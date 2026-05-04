@@ -33,15 +33,20 @@ import (
 )
 
 var (
-	// TODO: have a marker for "which" servergroup
 	serverGroupSummary = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "server_group_request_duration_seconds",
 		Help: "Summary of calls to servergroup instances",
-	}, []string{"host", "call", "status"})
+	}, []string{"server_group", "host", "call", "status"})
+
+	serverGroupRequestErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "promxy_server_group_request_errors_total",
+		Help: "Total number of failed requests to servergroup instances",
+	}, []string{"server_group", "host", "call"})
 )
 
 func init() {
 	prometheus.MustRegister(serverGroupSummary)
+	prometheus.MustRegister(serverGroupRequestErrors)
 }
 
 // New creates a new servergroup
@@ -292,8 +297,12 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 		}
 	}
 
+	sgName := s.Cfg.Name
 	apiClientMetricFunc := func(i int, api, status string, took float64) {
-		serverGroupSummary.WithLabelValues(targets[i], api, status).Observe(took)
+		serverGroupSummary.WithLabelValues(sgName, targets[i], api, status).Observe(took)
+		if status == "error" {
+			serverGroupRequestErrors.WithLabelValues(sgName, targets[i], api).Inc()
+		}
 	}
 
 	logrus.Debugf("Updating targets from discovery manager: %v", targets)

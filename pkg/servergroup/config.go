@@ -40,6 +40,11 @@ const (
 // This is where the vast majority of options exist.
 type Config struct {
 	Ordinal int `yaml:"-"`
+
+	// Name is the human-readable identifier for this server group, used as the
+	// "server_group" label on per-backend metrics and in error messages.
+	// When left empty, ApplyConfig in proxystorage populates it with "sg-<Ordinal>".
+	Name string `yaml:"name"`
 	// RemoteRead directs promxy to load RAW data (meaning matrix selectors such as `foo[1h]`)
 	// through the RemoteRead API on prom.
 	// Pros:

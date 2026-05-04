@@ -124,6 +124,9 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	}
 	for i, sgCfg := range c.ServerGroups {
 		sgCfg.Ordinal = i
+		if sgCfg.Name == "" {
+			sgCfg.Name = fmt.Sprintf("sg-%d", i)
+		}
 		tmp, err := servergroup.NewServerGroup()
 		if err != nil {
 			failed = true
