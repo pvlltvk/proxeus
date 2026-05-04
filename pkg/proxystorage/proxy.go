@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -149,6 +150,12 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	if failed {
 		newState.Cancel(nil)
 		return fmt.Errorf("error applying config to one or more server group(s)")
+	}
+
+	// Pre-flight: every server_group must have a unique, non-empty labels set.
+	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
+		newState.Cancel(nil)
+		return err
 	}
 
 	multiApi, err := promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
@@ -960,4 +967,42 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 func durationMilliseconds(d time.Duration) int64 {
 	return int64(d / (time.Millisecond / time.Nanosecond))
+}
+
+// validateUniqueServerGroupLabels ensures that every server_group carries a
+// non-empty labels set and that no two groups share the same label fingerprint.
+// It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
+// internally so the check is consistent with the one inside promclient.
+func validateUniqueServerGroupLabels(groups []*servergroup.Config) error {
+	type entry struct {
+		name   string
+		labels model.LabelSet
+	}
+	seen := make(map[model.Fingerprint][]entry)
+
+	for _, cfg := range groups {
+		if len(cfg.Labels) == 0 {
+			return fmt.Errorf(
+				"server_group label collision: group %s has empty labels — every server_group must declare a unique non-empty 'labels' set",
+				cfg.Name,
+			)
+		}
+		fp := cfg.Labels.FastFingerprint()
+		seen[fp] = append(seen[fp], entry{name: cfg.Name, labels: cfg.Labels})
+	}
+
+	for _, entries := range seen {
+		if len(entries) < 2 {
+			continue
+		}
+		parts := make([]string, len(entries))
+		for i, e := range entries {
+			parts[i] = fmt.Sprintf("%s (labels=%s)", e.name, e.labels)
+		}
+		return fmt.Errorf(
+			"server_group label collision: groups [%s] share the same labels — every server_group must declare a unique non-empty 'labels' set",
+			strings.Join(parts, ", "),
+		)
+	}
+	return nil
 }
