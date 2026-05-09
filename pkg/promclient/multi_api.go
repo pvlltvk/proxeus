@@ -61,6 +61,20 @@ func NormalizePromError(err error) error {
 // the specific API calls made through this multi client
 type MultiAPIMetricFunc func(i int, api, status string, took float64)
 
+// MergeFunc is the function MultiAPI uses to combine two model.Value results.
+// idxA and idxB are the source indices (ordinals) of the two operands within
+// the apis slice. The default implementation ignores them; the cross-group
+// implementation uses them for tie-breaking.
+//
+// Invariant relied on by the cross-group dedup implementation: the result-collection
+// loops in Query/QueryRange/GetValue iterate `i := 0..len(apis)-1` and block on
+// resultChans[i] in order, so `i` is always the true ordinal of the contributing
+// API. The running `resultIdx` is updated as `min(resultIdx, i)` after each merge.
+// If those loops are ever rewritten to consume channels in arrival order (a
+// `select` across all channels), the ordinals passed here will no longer be
+// the source ordinals and tie-breaking will silently break.
+type MergeFunc func(a, b model.Value, idxA, idxB int) (model.Value, error)
+
 // NewMustMultiAPI returns a MultiAPI
 func NewMustMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
 	a, err := NewMultiAPI(apis, antiAffinity, metricFunc, requiredCount, preferMax)
@@ -91,14 +105,19 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		}
 	}
 
-	return &MultiAPI{
+	m := &MultiAPI{
 		apis:            apis,
 		apiFingerprints: apiFingerprints,
 		antiAffinity:    antiAffinity,
 		metricFunc:      metricFunc,
 		requiredCount:   requiredCount,
 		preferMax:       preferMax,
-	}, nil
+	}
+	// Default merge: within-group HA semantics; ordinals are ignored.
+	m.mergeFn = func(a, b model.Value, _, _ int) (model.Value, error) {
+		return promhttputil.MergeValues(m.antiAffinity, a, b, m.preferMax)
+	}
+	return m, nil
 }
 
 // MultiAPI implements the API interface while merging the results from the apis it wraps
@@ -109,6 +128,7 @@ type MultiAPI struct {
 	metricFunc      MultiAPIMetricFunc
 	requiredCount   int // number "per key" that we require to respond
 	preferMax       bool
+	mergeFn         MergeFunc
 }
 
 func (m *MultiAPI) recordMetric(i int, api, status string, took float64) {
@@ -314,6 +334,7 @@ func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model
 
 	// Wait for results as we get them
 	var result model.Value
+	resultIdx := -1
 	warnings := make(promhttputil.WarningSet)
 	var lastError error
 	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
@@ -335,11 +356,15 @@ func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model
 				successMap[ret.ls]++
 				if result == nil {
 					result = ret.v
+					resultIdx = i
 				} else {
 					var err error
-					result, err = promhttputil.MergeValues(m.antiAffinity, result, ret.v, m.preferMax)
+					result, err = m.mergeFn(result, ret.v, resultIdx, i)
 					if err != nil {
 						return nil, warnings.Warnings(), err
+					}
+					if i < resultIdx {
+						resultIdx = i
 					}
 				}
 			}
@@ -394,6 +419,7 @@ func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (mo
 
 	// Wait for results as we get them
 	var result model.Value
+	resultIdx := -1
 	warnings := make(promhttputil.WarningSet)
 	var lastError error
 	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
@@ -415,11 +441,15 @@ func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (mo
 				successMap[ret.ls]++
 				if result == nil {
 					result = ret.v
+					resultIdx = i
 				} else {
 					var err error
-					result, err = promhttputil.MergeValues(m.antiAffinity, result, ret.v, m.preferMax)
+					result, err = m.mergeFn(result, ret.v, resultIdx, i)
 					if err != nil {
 						return nil, warnings.Warnings(), err
+					}
+					if i < resultIdx {
+						resultIdx = i
 					}
 				}
 			}
@@ -551,6 +581,7 @@ func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers 
 
 	// Wait for results as we get them
 	var result model.Value
+	resultIdx := -1
 	warnings := make(promhttputil.WarningSet)
 	var lastError error
 	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
@@ -572,11 +603,15 @@ func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers 
 				successMap[ret.ls]++
 				if result == nil {
 					result = ret.v
+					resultIdx = i
 				} else {
 					var err error
-					result, err = promhttputil.MergeValues(m.antiAffinity, result, ret.v, m.preferMax)
+					result, err = m.mergeFn(result, ret.v, resultIdx, i)
 					if err != nil {
 						return nil, warnings.Warnings(), err
+					}
+					if i < resultIdx {
+						resultIdx = i
 					}
 				}
 			}

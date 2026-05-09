@@ -60,4 +60,11 @@ func (c *Config) String() string {
 type PromxyConfig struct {
 	// Config for each of the server groups promxy is configured to aggregate
 	ServerGroups []*servergroup.Config `yaml:"server_groups"`
+
+	// CrossGroupDedup, when true, enables deterministic cross-server_group
+	// deduplication: series that match modulo each server_group's external
+	// `labels` collapse to one. The lower-ordinal server_group wins; ordinal
+	// is the index in `server_groups[]` (YAML order). Default false preserves
+	// historical behavior — both backends' series are returned.
+	CrossGroupDedup bool `yaml:"cross_group_dedup"`
 }

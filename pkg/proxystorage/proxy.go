@@ -158,7 +158,22 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		return err
 	}
 
-	multiApi, err := promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
+	var (
+		multiApi *promclient.MultiAPI
+		err      error
+	)
+	if c.CrossGroupDedup {
+		groupNames := make([]string, len(c.ServerGroups))
+		groupLabels := make([]model.LabelSet, len(c.ServerGroups))
+		for i, sg := range c.ServerGroups {
+			groupNames[i] = sg.Name
+			groupLabels[i] = sg.Labels
+		}
+		logrus.Warn("cross_group_dedup enabled: requiredCount=1 (single backend is enough); collision metrics not yet wired (B2 pending)")
+		multiApi, err = promclient.NewCrossGroupMultiAPI(apis, groupNames, groupLabels, nil)
+	} else {
+		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
+	}
 	if err != nil {
 		return err
 	}
