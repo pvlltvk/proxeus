@@ -61,6 +61,17 @@ func MergeValuesDeterministic(a, b model.Value, opts DedupOpts) (model.Value, *D
 		return nil, stats, fmt.Errorf("mismatch type %v!=%v", a.Type(), b.Type())
 	}
 
+	// Fast-path: when no labels are ignored the reduced fingerprint is identical
+	// to the full fingerprint, so cross-backend collision detection collapses to
+	// plain exact-FP dedup.  MergeValues already does that efficiently without
+	// any per-sample map copies, so we can skip the entire slow path.
+	// Scalar/String are handled identically via MergeValues further below, so
+	// this fast-path is safe for all types including Vector and Matrix.
+	if len(opts.IgnoreLabels) == 0 {
+		v, err := MergeValues(0, a, b, false)
+		return v, stats, err
+	}
+
 	switch aTyped := a.(type) {
 	case *model.Scalar:
 		// Delegate scalar tie-break to existing semantics (first non-zero wins).

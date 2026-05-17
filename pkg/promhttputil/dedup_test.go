@@ -1,6 +1,7 @@
 package promhttputil
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/prometheus/common/model"
@@ -278,4 +279,112 @@ func TestMergeValuesDeterministic_MatrixNoCollision(t *testing.T) {
 	if len(v.(model.Matrix)) != 2 {
 		t.Fatalf("expected 2 streams, got %d", len(v.(model.Matrix)))
 	}
+}
+
+// TestM1_EmptyIgnoreFastPath verifies that MergeValuesDeterministic with an
+// empty (nil or zero-length) IgnoreLabels map produces the same result as
+// MergeValues and reports zero collisions.
+func TestM1_EmptyIgnoreFastPath(t *testing.T) {
+	t.Run("nil_ignore_distinct_series_matches_MergeValues", func(t *testing.T) {
+		// Two Vectors with completely different series.  With nil IgnoreLabels
+		// the fast-path must delegate to MergeValues(0,a,b,false).
+		sA := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 1, Timestamp: 100}
+		sB := &model.Sample{Metric: model.Metric{"__name__": "mem", "instance": "x"}, Value: 2, Timestamp: 100}
+		a := model.Vector{sA}
+		b := model.Vector{sB}
+
+		got, stats, err := MergeValuesDeterministic(a, b, DedupOpts{IgnoreLabels: nil})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		want, wantErr := MergeValues(0, a, b, false)
+		if wantErr != nil {
+			t.Fatalf("MergeValues error: %v", wantErr)
+		}
+
+		gotVec := got.(model.Vector)
+		wantVec := want.(model.Vector)
+		if len(gotVec) != len(wantVec) {
+			t.Fatalf("len mismatch: fast-path=%d MergeValues=%d", len(gotVec), len(wantVec))
+		}
+		// Both series must be present.
+		if len(gotVec) != 2 {
+			t.Fatalf("expected 2 series, got %d", len(gotVec))
+		}
+		if stats.Collisions != 0 {
+			t.Fatalf("expected 0 collisions with nil IgnoreLabels, got %d", stats.Collisions)
+		}
+	})
+
+	t.Run("empty_map_ignore_exact_fp_duplicate_no_collision", func(t *testing.T) {
+		// Two Vectors with identical series (exact-FP match).  The fast-path
+		// deduplicates to 1 series and must report 0 collisions — exact-FP
+		// duplicates are within-group, not cross-group collisions.
+		opts := DedupOpts{IgnoreLabels: map[model.LabelName]struct{}{}}
+		sA := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 5, Timestamp: 100}
+		sB := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 9, Timestamp: 100}
+		a := model.Vector{sA}
+		b := model.Vector{sB}
+
+		v, stats, err := MergeValuesDeterministic(a, b, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		vec := v.(model.Vector)
+		if len(vec) != 1 {
+			t.Fatalf("expected 1 series (deduped), got %d", len(vec))
+		}
+		if stats.Collisions != 0 {
+			t.Fatalf("expected 0 collisions for exact-FP duplicate, got %d", stats.Collisions)
+		}
+	})
+}
+
+// BenchmarkMergeValuesDeterministic_EmptyIgnore compares the M1 fast-path
+// (IgnoreLabels nil) against the full slow path (IgnoreLabels non-empty) on a
+// 1000-sample Vector.  Run with:
+//
+//	go test -bench=BenchmarkMergeValuesDeterministic -benchmem -run=^$ ./pkg/promhttputil/
+func BenchmarkMergeValuesDeterministic_EmptyIgnore(b *testing.B) {
+	const n = 1000
+
+	makeVec := func(backend string) model.Vector {
+		v := make(model.Vector, n)
+		for i := 0; i < n; i++ {
+			v[i] = &model.Sample{
+				Metric: model.Metric{
+					"__name__": model.LabelValue(fmt.Sprintf("metric_%d", i)),
+					"instance": "host1",
+					"backend":  model.LabelValue(backend),
+				},
+				Value:     model.SampleValue(i),
+				Timestamp: model.Time(i * 1000),
+			}
+		}
+		return v
+	}
+
+	a := makeVec("sg0")
+	bVec := makeVec("sg1")
+
+	b.Run("fast_path_empty_ignore", func(b *testing.B) {
+		opts := DedupOpts{IgnoreLabels: nil}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, _ = MergeValuesDeterministic(a, bVec, opts)
+		}
+	})
+
+	b.Run("slow_path_nonempty_ignore", func(b *testing.B) {
+		opts := DedupOpts{
+			IgnoreLabels: map[model.LabelName]struct{}{"backend": {}},
+			OrdinalA:     0,
+			OrdinalB:     1,
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _, _ = MergeValuesDeterministic(a, bVec, opts)
+		}
+	})
 }
