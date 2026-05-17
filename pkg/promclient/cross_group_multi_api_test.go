@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
 )
 
@@ -99,5 +100,62 @@ func TestNewCrossGroupMultiAPI_LengthMismatch(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error on length mismatch")
+	}
+}
+
+// TestNewCrossGroupMultiAPI_CollisionCounterIncremented verifies that the
+// dedupCounter passed to NewCrossGroupMultiAPI is incremented exactly once for
+// each colliding series, with the correct winner/loser label values.
+//
+// Setup: two backends return the same "cpu" metric (modulo a "backend" label).
+// After dedup the lower-ordinal backend (sg0) wins, so the counter must record
+// one collision with winner="sg0", loser="sg1".
+func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
+	api0 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg0"}, Value: 1, Timestamp: 100},
+			}
+		},
+	}
+	api1 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg1"}, Value: 99, Timestamp: 100},
+			}
+		},
+	}
+
+	groupNames := []string{"sg0", "sg1"}
+	groupLabels := []model.LabelSet{
+		{"backend": "sg0"},
+		{"backend": "sg1"},
+	}
+
+	// Use an unregistered counter so this test does not touch the global registry.
+	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_collision_counter_incremented_total",
+	}, []string{"winner", "loser"})
+
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter)
+	if err != nil {
+		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
+	}
+
+	_, _, err = m.Query(context.Background(), "cpu", time.Now())
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	// One cpu series collided; sg0 (ordinal 0) wins over sg1 (ordinal 1).
+	got := testutil.ToFloat64(counter.WithLabelValues("sg0", "sg1"))
+	if got != 1 {
+		t.Fatalf("expected collision counter winner=sg0 loser=sg1 to be 1, got %v", got)
+	}
+
+	// No counter for the reverse direction.
+	gotReverse := testutil.ToFloat64(counter.WithLabelValues("sg1", "sg0"))
+	if gotReverse != 0 {
+		t.Fatalf("expected no reverse collision counter, got %v", gotReverse)
 	}
 }

@@ -169,8 +169,8 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 			groupNames[i] = sg.Name
 			groupLabels[i] = sg.Labels
 		}
-		logrus.Warn("cross_group_dedup enabled: requiredCount=1 (single backend is enough); collision metrics not yet wired (B2 pending)")
-		multiApi, err = promclient.NewCrossGroupMultiAPI(apis, groupNames, groupLabels, nil)
+		logrus.Info("cross_group_dedup enabled: requiredCount=1 (single backend is enough)")
+		multiApi, err = promclient.NewCrossGroupMultiAPI(apis, groupNames, groupLabels, crossGroupDedupCollisions)
 	} else {
 		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
 	}
