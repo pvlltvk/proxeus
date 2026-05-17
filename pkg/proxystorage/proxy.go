@@ -333,6 +333,20 @@ func (p *ProxyStorage) WalReplayHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// FlagsHandler implements /api/v1/status/flags. Upstream's handler returns
+// promxy's Go struct field names (e.g. `BindAddr`, `RoutePrefix`) instead of
+// Prometheus' dotted CLI names (`web.listen-address`, `web.route-prefix`),
+// which breaks any client that probes flags to detect server capabilities.
+// Promxy is not a Prometheus server, so we return an empty data object —
+// honest about the absence rather than misleading about its shape.
+func (p *ProxyStorage) FlagsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(`{"status":"success","data":{}}`)); err != nil {
+		logrus.Error("msg", "error writing response", "err", err)
+	}
+}
+
 // Querier returns a new Querier on the storage.
 func (p *ProxyStorage) Querier(mint, maxt int64) (storage.Querier, error) {
 	state := p.GetState()
