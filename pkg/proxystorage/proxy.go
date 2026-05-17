@@ -321,6 +321,18 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// WalReplayHandler implements /api/v1/status/walreplay. Promxy has no WAL,
+// so it reports a steady "fully replayed" state to keep Grafana's health
+// checks quiet. Without this override, upstream's handler returns HTTP 500
+// with a malformed double-JSON body.
+func (p *ProxyStorage) WalReplayHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(`{"status":"success","data":{"min":0,"max":0,"current":0}}`)); err != nil {
+		logrus.Error("msg", "error writing response", "err", err)
+	}
+}
+
 // Querier returns a new Querier on the storage.
 func (p *ProxyStorage) Querier(mint, maxt int64) (storage.Querier, error) {
 	state := p.GetState()

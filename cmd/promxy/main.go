@@ -481,6 +481,8 @@ func main() {
 			ps.ConfigHandler(w, r)
 		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/metadata") {
 			ps.MetadataHandler(w, r)
+		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/status/walreplay") {
+			ps.WalReplayHandler(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
 			webHandler.GetRouter().ServeHTTP(w, r)
