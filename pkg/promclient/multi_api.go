@@ -75,6 +75,13 @@ type MultiAPIMetricFunc func(i int, api, status string, took float64)
 // the source ordinals and tie-breaking will silently break.
 type MergeFunc func(a, b model.Value, idxA, idxB int) (model.Value, error)
 
+// MergeSeriesFunc merges the result of two backends' Series() calls.
+// idxA and idxB are the server_group ordinals so dedup callbacks can resolve
+// collisions by tie-break. The default implementation set in NewMultiAPI
+// ignores ordinals and falls back to set-union (MergeLabelSets); cross-group
+// callers override it for reduced-fingerprint dedup.
+type MergeSeriesFunc func(a, b []model.LabelSet, idxA, idxB int) []model.LabelSet
+
 // NewMustMultiAPI returns a MultiAPI
 func NewMustMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
 	a, err := NewMultiAPI(apis, antiAffinity, metricFunc, requiredCount, preferMax)
@@ -117,6 +124,10 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 	m.mergeFn = func(a, b model.Value, _, _ int) (model.Value, error) {
 		return promhttputil.MergeValues(m.antiAffinity, a, b, m.preferMax)
 	}
+	// Default series merge: set union; ordinals are ignored.
+	m.mergeSeriesFn = func(a, b []model.LabelSet, _, _ int) []model.LabelSet {
+		return MergeLabelSets(a, b)
+	}
 	return m, nil
 }
 
@@ -129,6 +140,7 @@ type MultiAPI struct {
 	requiredCount   int // number "per key" that we require to respond
 	preferMax       bool
 	mergeFn         MergeFunc
+	mergeSeriesFn   MergeSeriesFunc
 }
 
 func (m *MultiAPI) recordMetric(i int, api, status string, took float64) {
@@ -504,6 +516,7 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 
 	// Wait for results as we get them
 	var result []model.LabelSet
+	resultIdx := -1
 	warnings := make(promhttputil.WarningSet)
 	var lastError error
 	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
@@ -525,8 +538,12 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 				successMap[ret.ls]++
 				if result == nil {
 					result = ret.v
+					resultIdx = i
 				} else {
-					result = MergeLabelSets(result, ret.v)
+					result = m.mergeSeriesFn(result, ret.v, resultIdx, i)
+					if i < resultIdx {
+						resultIdx = i
+					}
 				}
 			}
 		}

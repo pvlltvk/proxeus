@@ -43,7 +43,7 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 		Name: "test_cross_group_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -97,6 +97,8 @@ func TestNewCrossGroupMultiAPI_LengthMismatch(t *testing.T) {
 		[]string{"a", "b"},
 		[]model.LabelSet{{"x": "1"}},
 		nil,
+		false,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error on length mismatch")
@@ -137,7 +139,7 @@ func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
 		Name: "test_collision_counter_incremented_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -157,5 +159,105 @@ func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
 	gotReverse := testutil.ToFloat64(counter.WithLabelValues("sg1", "sg0"))
 	if gotReverse != 0 {
 		t.Fatalf("expected no reverse collision counter, got %v", gotReverse)
+	}
+}
+
+// TestNewCrossGroupMultiAPI_SeriesDedup verifies F2: when dedupMetadata is true,
+// /api/v1/series collapses series that differ only by external labels, keeping
+// the lower-ordinal backend's full labelset.
+func TestNewCrossGroupMultiAPI_SeriesDedup(t *testing.T) {
+	api0 := &stubAPI{
+		series: func() []model.LabelSet {
+			return []model.LabelSet{
+				{"__name__": "up", "instance": "node:9100", "backend": "sg0"},
+				{"__name__": "up", "instance": "only-on-sg0", "backend": "sg0"},
+			}
+		},
+	}
+	api1 := &stubAPI{
+		series: func() []model.LabelSet {
+			return []model.LabelSet{
+				{"__name__": "up", "instance": "node:9100", "backend": "sg1"},
+				{"__name__": "up", "instance": "only-on-sg1", "backend": "sg1"},
+			}
+		},
+	}
+
+	groupNames := []string{"sg0", "sg1"}
+	groupLabels := []model.LabelSet{
+		{"backend": "sg0"},
+		{"backend": "sg1"},
+	}
+
+	metaCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_series_dedup_metadata_collisions_total",
+	}, []string{"winner", "loser", "endpoint"})
+
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, true, metaCounter)
+	if err != nil {
+		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
+	}
+
+	got, _, err := m.Series(context.Background(), []string{"up"}, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Series: %v", err)
+	}
+
+	// Expect 3 labelsets: shared node:9100 (sg0 wins) + only-on-sg0 + only-on-sg1.
+	if len(got) != 3 {
+		t.Fatalf("expected 3 series, got %d: %v", len(got), got)
+	}
+
+	// The shared node:9100 must come from sg0 (lower ordinal wins).
+	var shared model.LabelSet
+	for _, ls := range got {
+		if ls["instance"] == "node:9100" {
+			shared = ls
+		}
+	}
+	if shared == nil {
+		t.Fatal("shared node:9100 series not found")
+	}
+	if shared["backend"] != "sg0" {
+		t.Fatalf("expected shared series to come from sg0, got backend=%q", shared["backend"])
+	}
+
+	// Collision counter must record exactly one collision for sg0 winning over sg1.
+	wantCollisions := testutil.ToFloat64(metaCounter.WithLabelValues("sg0", "sg1", "series"))
+	if wantCollisions != 1 {
+		t.Fatalf("expected metadata collision counter sg0/sg1/series=1, got %v", wantCollisions)
+	}
+}
+
+// TestNewCrossGroupMultiAPI_SeriesNoDedupWhenDisabled verifies that with
+// dedupMetadata=false (default), /series returns one row per backend even for
+// logically-identical series — preserving the pre-F2 behavior and proving the
+// flag is the only switch.
+func TestNewCrossGroupMultiAPI_SeriesNoDedupWhenDisabled(t *testing.T) {
+	api0 := &stubAPI{
+		series: func() []model.LabelSet {
+			return []model.LabelSet{{"__name__": "up", "instance": "node:9100", "backend": "sg0"}}
+		},
+	}
+	api1 := &stubAPI{
+		series: func() []model.LabelSet {
+			return []model.LabelSet{{"__name__": "up", "instance": "node:9100", "backend": "sg1"}}
+		},
+	}
+
+	groupNames := []string{"sg0", "sg1"}
+	groupLabels := []model.LabelSet{{"backend": "sg0"}, {"backend": "sg1"}}
+
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, false, nil)
+	if err != nil {
+		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
+	}
+
+	got, _, err := m.Series(context.Background(), []string{"up"}, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Series: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 series (no dedup), got %d: %v", len(got), got)
 	}
 }

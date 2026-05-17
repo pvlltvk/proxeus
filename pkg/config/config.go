@@ -67,4 +67,11 @@ type PromxyConfig struct {
 	// is the index in `server_groups[]` (YAML order). Default false preserves
 	// historical behavior — both backends' series are returned.
 	CrossGroupDedup bool `yaml:"cross_group_dedup"`
+
+	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to
+	// /api/v1/series so Grafana label browsers and dashboards don't show one
+	// row per backend for what is logically a single target. Requires
+	// CrossGroupDedup to also be true; promxy will refuse to start otherwise.
+	// Default false preserves historical behavior.
+	CrossGroupDedupMetadata bool `yaml:"cross_group_dedup_metadata"`
 }

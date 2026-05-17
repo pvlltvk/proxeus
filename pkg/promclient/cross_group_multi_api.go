@@ -16,13 +16,21 @@ import (
 // apis, groupNames, and groupLabels must all have the same length; element i
 // is the API/name/labels for the server_group at index i.
 //
-// dedupCounter may be nil; if non-nil it is incremented on collisions with
-// label values {winner, loser} identifying the group names.
+// dedupCounter may be nil; if non-nil it is incremented on query-path
+// (Query / QueryRange) collisions with label values {winner, loser} identifying
+// the group names.
+//
+// dedupMetadata, when true, additionally wires reduced-fingerprint dedup into
+// MultiAPI.Series so /api/v1/series collapses series that differ only by
+// per-group external labels. dedupMetadataCounter mirrors dedupCounter for
+// that path; pass nil to skip the metric.
 func NewCrossGroupMultiAPI(
 	apis []API,
 	groupNames []string,
 	groupLabels []model.LabelSet,
 	dedupCounter *prometheus.CounterVec,
+	dedupMetadata bool,
+	dedupMetadataCounter *prometheus.CounterVec,
 ) (*MultiAPI, error) {
 	if len(apis) != len(groupNames) || len(apis) != len(groupLabels) {
 		return nil, fmt.Errorf("apis, groupNames, and groupLabels must have the same length")
@@ -68,6 +76,25 @@ func NewCrossGroupMultiAPI(
 			dedupCounter.WithLabelValues(winnerName, loserName).Add(float64(stats.Collisions))
 		}
 		return merged, nil
+	}
+
+	if dedupMetadata {
+		m.mergeSeriesFn = func(a, b []model.LabelSet, idxA, idxB int) []model.LabelSet {
+			opts := DedupLabelSetsOpts{
+				IgnoreLabels: ignoreLabels,
+				OrdinalA:     idxA,
+				OrdinalB:     idxB,
+			}
+			merged, stats := MergeLabelSetsDeterministic(a, b, opts)
+			if dedupMetadataCounter != nil && stats.Collisions > 0 {
+				winnerName, loserName := names[idxA], names[idxB]
+				if idxB < idxA {
+					winnerName, loserName = names[idxB], names[idxA]
+				}
+				dedupMetadataCounter.WithLabelValues(winnerName, loserName, "series").Add(float64(stats.Collisions))
+			}
+			return merged
+		}
 	}
 
 	return m, nil

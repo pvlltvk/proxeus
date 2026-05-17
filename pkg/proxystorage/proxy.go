@@ -158,6 +158,13 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		return err
 	}
 
+	// Pre-flight: metadata dedup is meaningless without query dedup — both
+	// rely on the same per-group external-label trust assumption.
+	if c.CrossGroupDedupMetadata && !c.CrossGroupDedup {
+		newState.Cancel(nil)
+		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
+	}
+
 	var (
 		multiApi *promclient.MultiAPI
 		err      error
@@ -169,8 +176,17 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 			groupNames[i] = sg.Name
 			groupLabels[i] = sg.Labels
 		}
-		logrus.Info("cross_group_dedup enabled: requiredCount=1 (single backend is enough)")
-		multiApi, err = promclient.NewCrossGroupMultiAPI(apis, groupNames, groupLabels, crossGroupDedupCollisions)
+		if c.CrossGroupDedupMetadata {
+			logrus.Info("cross_group_dedup enabled with metadata dedup: requiredCount=1; /api/v1/series collapses by reduced fingerprint")
+		} else {
+			logrus.Info("cross_group_dedup enabled: requiredCount=1 (single backend is enough)")
+		}
+		multiApi, err = promclient.NewCrossGroupMultiAPI(
+			apis, groupNames, groupLabels,
+			crossGroupDedupCollisions,
+			c.CrossGroupDedupMetadata,
+			crossGroupDedupMetadataCollisions,
+		)
 	} else {
 		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
 	}

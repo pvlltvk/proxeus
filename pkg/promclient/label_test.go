@@ -284,3 +284,74 @@ func TestAddLabelClient(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeLabelSetsDeterministic verifies F2's reduced-fingerprint dedup for
+// /api/v1/series. Two labelsets matching modulo `IgnoreLabels` collapse to one;
+// the lower-ordinal source wins and keeps its full labelset.
+func TestMergeLabelSetsDeterministic(t *testing.T) {
+	ignore := map[model.LabelName]struct{}{"backend": {}}
+
+	t.Run("collision_lowest_ordinal_wins", func(t *testing.T) {
+		a := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg0"}}
+		b := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg1"}}
+		got, stats := MergeLabelSetsDeterministic(a, b, DedupLabelSetsOpts{
+			IgnoreLabels: ignore, OrdinalA: 0, OrdinalB: 1,
+		})
+		if len(got) != 1 {
+			t.Fatalf("expected 1 series, got %d: %v", len(got), got)
+		}
+		if got[0]["backend"] != "sg0" {
+			t.Fatalf("expected sg0 to win, got backend=%q", got[0]["backend"])
+		}
+		if stats.Collisions != 1 {
+			t.Fatalf("expected 1 collision, got %d", stats.Collisions)
+		}
+	})
+
+	t.Run("collision_swap_when_b_has_lower_ordinal", func(t *testing.T) {
+		a := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg5"}}
+		b := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg2"}}
+		got, _ := MergeLabelSetsDeterministic(a, b, DedupLabelSetsOpts{
+			IgnoreLabels: ignore, OrdinalA: 5, OrdinalB: 2,
+		})
+		if got[0]["backend"] != "sg2" {
+			t.Fatalf("expected b (ordinal 2) to win, got backend=%q", got[0]["backend"])
+		}
+	})
+
+	t.Run("disjoint_series_both_kept_no_collisions", func(t *testing.T) {
+		a := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg0"}}
+		b := []model.LabelSet{{"__name__": "up", "instance": "y", "backend": "sg1"}}
+		got, stats := MergeLabelSetsDeterministic(a, b, DedupLabelSetsOpts{
+			IgnoreLabels: ignore, OrdinalA: 0, OrdinalB: 1,
+		})
+		if len(got) != 2 || stats.Collisions != 0 {
+			t.Fatalf("expected 2 distinct series and 0 collisions, got %d/%d", len(got), stats.Collisions)
+		}
+	})
+
+	t.Run("empty_ignore_falls_back_to_union", func(t *testing.T) {
+		a := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg0"}}
+		b := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg1"}}
+		got, stats := MergeLabelSetsDeterministic(a, b, DedupLabelSetsOpts{
+			IgnoreLabels: nil, OrdinalA: 0, OrdinalB: 1,
+		})
+		if len(got) != 2 {
+			t.Fatalf("with no IgnoreLabels expected union (2), got %d", len(got))
+		}
+		if stats.Collisions != 0 {
+			t.Fatalf("fast path must report 0 collisions, got %d", stats.Collisions)
+		}
+	})
+
+	t.Run("exact_full_fp_duplicate_collapses_no_collision", func(t *testing.T) {
+		a := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg0"}}
+		b := []model.LabelSet{{"__name__": "up", "instance": "x", "backend": "sg0"}}
+		got, stats := MergeLabelSetsDeterministic(a, b, DedupLabelSetsOpts{
+			IgnoreLabels: ignore, OrdinalA: 0, OrdinalB: 1,
+		})
+		if len(got) != 1 || stats.Collisions != 0 {
+			t.Fatalf("exact duplicate must collapse without collision; got len=%d collisions=%d", len(got), stats.Collisions)
+		}
+	})
+}

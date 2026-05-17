@@ -62,7 +62,7 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 		Name: "test_b1_e2e_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestB1E2E_ThreeBackendsChainedMerge(t *testing.T) {
 		{"backend": "sg2"},
 	}
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1, api2}, groupNames, groupLabels, nil)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1, api2}, groupNames, groupLabels, nil, false, nil)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestB1E2E_QueryRangeDedup(t *testing.T) {
 		{"backend": "vm"},
 	}
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, false, nil)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}

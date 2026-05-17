@@ -46,6 +46,94 @@ func MergeLabelSets(a, b []model.LabelSet) []model.LabelSet {
 	return a
 }
 
+// DedupLabelSetsOpts controls MergeLabelSetsDeterministic.
+type DedupLabelSetsOpts struct {
+	// IgnoreLabels are the label names stripped when computing the reduced
+	// fingerprint used for cross-backend collision detection.
+	IgnoreLabels map[model.LabelName]struct{}
+
+	// OrdinalA and OrdinalB are the server_group ordinals (YAML order) for
+	// the `a` and `b` inputs respectively. Lower ordinal wins on collision.
+	OrdinalA, OrdinalB int
+}
+
+// DedupLabelSetsStats reports collisions resolved by tie-break — one increment
+// per overlapping reduced fingerprint, not per labelset pair.
+type DedupLabelSetsStats struct {
+	Collisions int
+}
+
+// MergeLabelSetsDeterministic merges `a` and `b` like MergeLabelSets, but
+// detects collisions modulo opts.IgnoreLabels and resolves them by lowest
+// ordinal. The winning labelset keeps its full label set (including the
+// backend's external labels) so the /series response is honest about origin.
+//
+// This is intended only for cross-group merges where each group has distinct
+// external labels. Within-group HA dedup must continue to use MergeLabelSets.
+func MergeLabelSetsDeterministic(a, b []model.LabelSet, opts DedupLabelSetsOpts) ([]model.LabelSet, *DedupLabelSetsStats) {
+	stats := &DedupLabelSetsStats{}
+
+	// Fast path: no labels to ignore → reduced FP equals full FP, so collision
+	// detection collapses to plain MergeLabelSets and stats stay zero.
+	if len(opts.IgnoreLabels) == 0 {
+		return MergeLabelSets(a, b), stats
+	}
+
+	type entry struct {
+		idx     int
+		ordinal int
+	}
+
+	fullFPIndex := make(map[model.Fingerprint]int, len(a)+len(b))
+	reducedFPEntry := make(map[model.Fingerprint]*entry, len(a)+len(b))
+	result := make([]model.LabelSet, 0, len(a)+len(b))
+
+	add := func(ls model.LabelSet, ordinal int) {
+		fullFP := ls.Fingerprint()
+		if _, ok := fullFPIndex[fullFP]; ok {
+			return
+		}
+
+		redFP := reducedFingerprintLS(ls, opts.IgnoreLabels)
+		if existing, ok := reducedFPEntry[redFP]; ok {
+			stats.Collisions++
+			if ordinal < existing.ordinal {
+				oldLS := result[existing.idx]
+				delete(fullFPIndex, oldLS.Fingerprint())
+				result[existing.idx] = ls
+				fullFPIndex[fullFP] = existing.idx
+				existing.ordinal = ordinal
+			}
+			return
+		}
+
+		idx := len(result)
+		result = append(result, ls)
+		fullFPIndex[fullFP] = idx
+		reducedFPEntry[redFP] = &entry{idx: idx, ordinal: ordinal}
+	}
+
+	for _, ls := range a {
+		add(ls, opts.OrdinalA)
+	}
+	for _, ls := range b {
+		add(ls, opts.OrdinalB)
+	}
+	return result, stats
+}
+
+// reducedFingerprintLS returns the fingerprint of ls with all keys in ignore
+// removed. It copies the labelset, so callers may reuse ls safely.
+func reducedFingerprintLS(ls model.LabelSet, ignore map[model.LabelName]struct{}) model.Fingerprint {
+	reduced := make(model.LabelSet, len(ls))
+	for k, v := range ls {
+		if _, skip := ignore[k]; !skip {
+			reduced[k] = v
+		}
+	}
+	return reduced.FastFingerprint()
+}
+
 // AddLabelClient proxies a client and adds the given labels to all results
 type AddLabelClient struct {
 	API
