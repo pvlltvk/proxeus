@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/promql/promqltest"
+	"github.com/prometheus/prometheus/storage"
 )
 
 // HTTP-level coverage for F2: cross-backend dedup of /api/v1/series when
@@ -142,6 +143,240 @@ promxy:
 			}
 		})
 	}
+}
+
+// labelAPIData holds two metrics with disjoint label sets across series and a
+// shared `job` label whose values differ — enough to exercise both name-union
+// and value-union behavior.
+const labelAPIData = `
+load 1m
+  up{job="x", instance="host-1"} 1 1 1 1 1
+  http_requests{job="y", code="200"} 1 1 1 1 1
+`
+
+// labelAPICollisionData includes a series that already carries `az` — the same
+// label name the dual-backend test config stamps as a group label. Used to pin
+// down the asymmetry between /series (overwrites) and /label/az/values (unions).
+const labelAPICollisionData = `
+load 1m
+  weird{az="orig", job="z"} 1 1 1 1 1
+`
+
+// dualBackendProxy spins up two in-process backends sharing `store`, plus a
+// promxy in front with az=a / az=b group labels. Returns the proxy URL and a
+// cleanup func. Ports are distinct from TestSeriesDedup_HTTP's to allow
+// fast retries without TIME_WAIT contention.
+func dualBackendProxy(t *testing.T, store storage.Storage, backendAPort, backendBPort, proxyPort string) (proxyURL string, cleanup func()) {
+	t.Helper()
+	backendA, stopA := startAPIForTest(store, backendAPort)
+	backendB, stopB := startAPIForTest(store, backendBPort)
+
+	cfg := `
+promxy:
+  server_groups:
+    - static_configs:
+        - targets:
+          - localhost` + backendAPort + `
+      labels:
+        az: a
+    - static_configs:
+        - targets:
+          - localhost` + backendBPort + `
+      labels:
+        az: b
+`
+	ps := getProxyStorage(cfg)
+	proxySrv, stopP := startAPIForTest(ps, proxyPort)
+
+	return "http://localhost" + proxyPort, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		proxySrv.Shutdown(ctx)
+		backendA.Shutdown(ctx)
+		backendB.Shutdown(ctx)
+		<-stopP
+		<-stopA
+		<-stopB
+	}
+}
+
+// getJSON hits `url`, asserts 200, decodes into `out`, and asserts the envelope
+// status field is "success".
+func getJSON(t *testing.T, url string, out any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET %s: status=%d body=%s", url, resp.StatusCode, body)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		t.Fatalf("decode %s: %v", url, err)
+	}
+}
+
+func stringSetFrom(items []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(items))
+	for _, s := range items {
+		out[s] = struct{}{}
+	}
+	return out
+}
+
+// TestLabelsAPI_HTTP pins the union semantics for /api/v1/labels and
+// /api/v1/label/<name>/values across two backends, including group-label
+// injection and matcher-driven backend filtering.
+func TestLabelsAPI_HTTP(t *testing.T) {
+	store := promqltest.LoadedStorage(t, labelAPIData)
+	defer store.Close()
+
+	proxyURL, cleanup := dualBackendProxy(t, store, ":18193", ":18195", ":18192")
+	defer cleanup()
+
+	t.Run("/labels — union includes group labels", func(t *testing.T) {
+		var env struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		getJSON(t, proxyURL+"/api/v1/labels?start=0&end=300", &env)
+		if env.Status != "success" {
+			t.Errorf("status = %q, want success", env.Status)
+		}
+		got := stringSetFrom(env.Data)
+		want := stringSetFrom([]string{"__name__", "job", "instance", "code", "az"})
+		if !sameKeySet(got, want) {
+			t.Errorf("labels = %v, want %v", env.Data, want)
+		}
+	})
+
+	t.Run("/label/az/values — both group values present", func(t *testing.T) {
+		var env struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		getJSON(t, proxyURL+"/api/v1/label/az/values?start=0&end=300", &env)
+		got := stringSetFrom(env.Data)
+		want := stringSetFrom([]string{"a", "b"})
+		if !sameKeySet(got, want) {
+			t.Errorf("az values = %v, want %v", env.Data, want)
+		}
+	})
+
+	t.Run("/label/job/values — union across backends", func(t *testing.T) {
+		var env struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		getJSON(t, proxyURL+"/api/v1/label/job/values?start=0&end=300", &env)
+		got := stringSetFrom(env.Data)
+		// Both backends share storage so both return both jobs; the union
+		// collapses them to {x, y}. This guards against accidental
+		// duplicate-emission if MergeLabelValues were ever weakened.
+		want := stringSetFrom([]string{"x", "y"})
+		if !sameKeySet(got, want) {
+			t.Errorf("job values = %v, want %v", env.Data, want)
+		}
+	})
+
+	t.Run("/label/job/values?match[]={az=\"a\"} — group A only", func(t *testing.T) {
+		var env struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		q := url.Values{}
+		q.Set("match[]", `{az="a"}`)
+		q.Set("start", "0")
+		q.Set("end", "300")
+		getJSON(t, proxyURL+"/api/v1/label/job/values?"+q.Encode(), &env)
+		// The selector matches group A's az=a (drop selector) and excludes
+		// group B's az=b (whole backend skipped). Result is still {x, y}
+		// because group A's backend has both — but the point is that the
+		// matcher-on-group-label path doesn't error or lose data.
+		got := stringSetFrom(env.Data)
+		want := stringSetFrom([]string{"x", "y"})
+		if !sameKeySet(got, want) {
+			t.Errorf("job values (match az=a) = %v, want %v", env.Data, want)
+		}
+	})
+
+	t.Run("/labels?match[]={job=\"x\"} — name set restricted to matching series", func(t *testing.T) {
+		var env struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		q := url.Values{}
+		q.Set("match[]", `{job="x"}`)
+		q.Set("start", "0")
+		q.Set("end", "300")
+		getJSON(t, proxyURL+"/api/v1/labels?"+q.Encode(), &env)
+		got := stringSetFrom(env.Data)
+		// `job="x"` only matches the `up{job="x", instance="host-1"}` series,
+		// so the label-name universe is {__name__, job, instance} plus the
+		// proxy-injected `az`. `code` should NOT appear.
+		want := stringSetFrom([]string{"__name__", "job", "instance", "az"})
+		if !sameKeySet(got, want) {
+			t.Errorf("labels (match job=x) = %v, want %v", env.Data, want)
+		}
+	})
+}
+
+// TestLabelAPI_GroupLabelCollision_HTTP pins the current behavior when a
+// series in the backend already carries a label whose name matches a promxy
+// group label. /series overwrites; /label/<name>/values unions. The two
+// endpoints disagree — this test documents that gap so any future change is
+// an intentional one.
+func TestLabelAPI_GroupLabelCollision_HTTP(t *testing.T) {
+	store := promqltest.LoadedStorage(t, labelAPICollisionData)
+	defer store.Close()
+
+	proxyURL, cleanup := dualBackendProxy(t, store, ":18293", ":18295", ":18292")
+	defer cleanup()
+
+	t.Run("/series overwrites: original az=orig is lost", func(t *testing.T) {
+		var env struct {
+			Status string              `json:"status"`
+			Data   []map[string]string `json:"data"`
+		}
+		q := url.Values{}
+		q.Set("match[]", "weird")
+		q.Set("start", "0")
+		q.Set("end", "300")
+		getJSON(t, proxyURL+"/api/v1/series?"+q.Encode(), &env)
+
+		azSeen := stringSetFrom(nil)
+		for _, row := range env.Data {
+			if v, ok := row["az"]; ok {
+				azSeen[v] = struct{}{}
+			}
+		}
+		want := stringSetFrom([]string{"a", "b"})
+		if !sameKeySet(azSeen, want) {
+			t.Errorf("/series az values = %v, want %v (original az=orig should have been overwritten)", azSeen, want)
+		}
+		if _, leaked := azSeen["orig"]; leaked {
+			t.Errorf("/series leaked az=orig — AddLabelClient should overwrite, not preserve")
+		}
+	})
+
+	t.Run("/label/az/values unions: az=orig still appears", func(t *testing.T) {
+		var env struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		getJSON(t, proxyURL+"/api/v1/label/az/values?start=0&end=300", &env)
+		got := stringSetFrom(env.Data)
+		// Current behavior: backend reports ["orig"], group A unions in "a",
+		// group B unions in "b". A user querying values sees "orig" even
+		// though no series carrying az=orig is reachable through the proxy.
+		// This is the documented divergence from /series.
+		want := stringSetFrom([]string{"a", "b", "orig"})
+		if !sameKeySet(got, want) {
+			t.Errorf("/label/az/values = %v, want %v", env.Data, want)
+		}
+	})
 }
 
 func boolStr(b bool) string {
