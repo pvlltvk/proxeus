@@ -93,12 +93,12 @@ func TestHandlerBackendsJSON_Envelope(t *testing.T) {
 	}
 }
 
-func TestHandlerIndex_Returns200HTML(t *testing.T) {
+func TestHandlerBackends_Returns200HTML(t *testing.T) {
 	inv := Inventory{GeneratedAt: time.Now()}
 	h := newHandlerForTest(inv)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/promxy/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/promxy/backends", nil)
 	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
@@ -110,6 +110,23 @@ func TestHandlerIndex_Returns200HTML(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "<!DOCTYPE html>") {
 		t.Errorf("response body missing DOCTYPE: %q", w.Body.String())
+	}
+}
+
+func TestHandlerRoot_RedirectsToBackends(t *testing.T) {
+	inv := Inventory{GeneratedAt: time.Now()}
+	h := newHandlerForTest(inv)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/promxy/", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc != "/promxy/backends" {
+		t.Errorf("expected redirect to /promxy/backends, got %q", loc)
 	}
 }
 
