@@ -1,8 +1,9 @@
 // Package promxyui provides the promxy-specific inventory UI.
 //
-// It exposes two routes under the /promxy/ prefix:
+// It exposes three routes under the /promxy/ prefix:
 //
-//	GET /promxy/                  — HTML inventory page (rendered from templates/inventory.html)
+//	GET /promxy/                  — 302 redirect to /promxy/backends
+//	GET /promxy/backends          — HTML inventory page (rendered from templates/inventory.html)
 //	GET /promxy/api/backends.json — JSON snapshot of all server_groups and targets
 //	GET /promxy/static/*          — static assets owned by the frontend-developer agent
 package promxyui
@@ -80,8 +81,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveJSON(w, r)
 	case strings.Contains(p, "/static/"):
 		h.serveStatic(w, r)
-	default:
+	case strings.HasSuffix(p, "/backends") || strings.HasSuffix(p, "/backends/"):
 		h.serveIndex(w, r)
+	default:
+		// /promxy/ and any other sub-path: redirect to the backends page.
+		http.Redirect(w, r, "/promxy/backends", http.StatusFound)
 	}
 }
 
