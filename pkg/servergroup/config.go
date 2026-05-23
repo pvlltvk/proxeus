@@ -135,6 +135,12 @@ type Config struct {
 	ServiceDiscoveryConfigs discovery.Configs `yaml:"-"`
 	// PathPrefix to prepend to all queries to hosts in this servergroup
 	PathPrefix string `yaml:"path_prefix"`
+	// BackendType identifies the kind of backend for inventory-UI display
+	// (e.g. "thanos", "victoriametrics", "prometheus", "cortex", "mimir").
+	// Free-form; not validated. Auto-detection from /api/v1/status/buildinfo
+	// is unreliable (Thanos and VM omit the application field), so this is
+	// the canonical signal. Empty means the UI shows "unknown".
+	BackendType string `yaml:"backend_type,omitempty"`
 	// QueryParams are a map of query params to add to all HTTP calls made to this downstream
 	// the main use-case for this is to add `nocache=1` to VictoriaMetrics downstreams
 	// (see https://github.com/jacksontj/promxy/issues/202)
