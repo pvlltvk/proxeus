@@ -36,17 +36,24 @@ func TestValidateUniqueServerGroupLabels(t *testing.T) {
 			errContains: []string{"sg-0", "sg-3", "collision"},
 		},
 		{
-			name: "one group with empty labels — expect error",
+			name: "single group with empty labels — exempt (no cross-group ambiguity possible)",
 			groups: []*servergroup.Config{
 				{Name: "sg-0", Labels: nil},
 			},
-			wantErr:     true,
-			errContains: []string{"sg-0", "empty labels"},
+			wantErr: false,
 		},
 		{
-			name: "one group with empty label set (non-nil) — expect error",
+			name: "single group with empty label set (non-nil) — exempt",
 			groups: []*servergroup.Config{
 				{Name: "sg-0", Labels: model.LabelSet{}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "two groups, one with empty labels — expect error",
+			groups: []*servergroup.Config{
+				{Name: "sg-0", Labels: model.LabelSet{}},
+				{Name: "sg-1", Labels: model.LabelSet{"backend": "vm"}},
 			},
 			wantErr:     true,
 			errContains: []string{"sg-0", "empty labels"},

@@ -1030,7 +1030,15 @@ func durationMilliseconds(d time.Duration) int64 {
 // non-empty labels set and that no two groups share the same label fingerprint.
 // It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
 // internally so the check is consistent with the one inside promclient.
+//
+// Single-group configurations are exempt: with only one group there is no
+// cross-group identity to disambiguate and no dedup partner, so empty labels
+// are unambiguous.
 func validateUniqueServerGroupLabels(groups []*servergroup.Config) error {
+	if len(groups) < 2 {
+		return nil
+	}
+
 	type entry struct {
 		name   string
 		labels model.LabelSet
