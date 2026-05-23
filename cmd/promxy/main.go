@@ -49,6 +49,7 @@ import (
 	"github.com/jacksontj/promxy/pkg/logging"
 	"github.com/jacksontj/promxy/pkg/middleware"
 	"github.com/jacksontj/promxy/pkg/proxystorage"
+	"github.com/jacksontj/promxy/pkg/promxyui"
 	"github.com/jacksontj/promxy/pkg/server"
 )
 
@@ -460,6 +461,13 @@ func main() {
 	// Register API endpoint with correct route prefix
 	webHandler.Getv1API().Register(webHandler.GetRouter().WithPrefix(apiPrefix))
 
+	// Create the promxy inventory UI handler.
+	promxyUIHandler, err := promxyui.NewHandler(ps)
+	if err != nil {
+		logrus.Fatalf("Error creating promxy UI handler: %v", err)
+	}
+	go promxyUIHandler.Run(context.Background())
+
 	// Create our router
 	r := httprouter.New()
 
@@ -485,6 +493,8 @@ func main() {
 			ps.WalReplayHandler(w, r)
 		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/status/flags") {
 			ps.FlagsHandler(w, r)
+		} else if strings.HasPrefix(r.URL.Path, path.Join(webOptions.RoutePrefix, "/promxy")) {
+			promxyUIHandler.ServeHTTP(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
 			webHandler.GetRouter().ServeHTTP(w, r)
