@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +42,7 @@ import (
 	promlogging "github.com/prometheus/prometheus/util/logging"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
+	ui "github.com/prometheus/prometheus/web/ui"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 	"k8s.io/klog"
@@ -153,6 +156,173 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, rls .
 	noStepSuqueryInterval.Set(cfg.PromConfig.GlobalConfig.EvaluationInterval)
 	reloadTime.Set(float64(time.Now().Unix()))
 	return nil
+}
+
+// reactNavScript is injected into every Mantine index.html response just before
+// </body>.  It uses a MutationObserver to wait for the Mantine nav sidebar to
+// appear, then appends a "Backends" link styled to match the existing nav items,
+// with a small status dot driven by /promxy/api/backends.json.
+const reactNavScript = `<script>
+(function(){
+  var BACKENDS_URL = "/promxy/backends";
+  var API_URL = "/promxy/api/backends.json";
+
+  function makeLink(dot) {
+    var a = document.createElement("a");
+    a.href = BACKENDS_URL;
+    a.className = "promxy-nav-link";
+    // Copy inline styles from a neighbouring nav link so we blend in.
+    a.style.cssText = [
+      "display:flex","align-items:center","gap:6px",
+      "padding:8px 12px","text-decoration:none","font-size:14px",
+      "color:inherit","border-radius:4px","cursor:pointer",
+      "white-space:nowrap"
+    ].join(";");
+    if (dot) { a.appendChild(dot); }
+    a.appendChild(document.createTextNode("Backends"));
+    a.addEventListener("mouseenter", function(){ a.style.background="rgba(0,0,0,.06)"; });
+    a.addEventListener("mouseleave", function(){ a.style.background=""; });
+    return a;
+  }
+
+  function makeDot() {
+    var s = document.createElement("span");
+    s.id = "promxy-nav-dot";
+    s.style.cssText = [
+      "display:inline-block","width:8px","height:8px",
+      "border-radius:50%","background:#aaa","flex-shrink:0"
+    ].join(";");
+    return s;
+  }
+
+  function refreshDot(dot) {
+    fetch(API_URL).then(function(r){ return r.json(); }).then(function(d){
+      if (!d.groups || d.groups.length === 0) { dot.style.background="#aaa"; return; }
+      var total=0, up=0;
+      d.groups.forEach(function(g){
+        g.targets.forEach(function(t){ total++; if(t.healthy) up++; });
+      });
+      dot.style.background = (up===0 ? "#fa5252" : up<total ? "#fab005" : "#40c057");
+    }).catch(function(){ dot.style.background="#aaa"; });
+  }
+
+  // Selector strategies for the Mantine nav sidebar.
+  // Mantine AppShell renders a <nav> inside the navbar section;
+  // nav links are typically the direct children or nested anchors.
+  function findNavContainer() {
+    // Strategy 1: the AppShell navbar element (data-component attribute set by Mantine).
+    var el = document.querySelector("[data-component='AppShell.Navbar'] nav") ||
+             document.querySelector("[class*='mantine-AppShell-navbar'] nav") ||
+             document.querySelector("nav[class*='mantine-NavLink']") ||
+             document.querySelector("nav");
+    return el;
+  }
+
+  function tryInject() {
+    if (document.getElementById("promxy-nav-link")) return true; // already injected
+    var nav = findNavContainer();
+    if (!nav) return false;
+    // Don't inject into a tiny nav (e.g. breadcrumbs); ensure it already has links.
+    var existingLinks = nav.querySelectorAll("a");
+    if (existingLinks.length === 0) return false;
+
+    var dot = makeDot();
+    var link = makeLink(dot);
+    link.id = "promxy-nav-link";
+
+    // Clone style from the last existing nav link so sizing/colour matches.
+    var last = existingLinks[existingLinks.length - 1];
+    var computed = window.getComputedStyle(last);
+    // Inherit colour and font from the computed style of the neighbour.
+    link.style.color = computed.color;
+    link.style.fontFamily = computed.fontFamily;
+    link.style.fontSize = computed.fontSize;
+
+    // Insert after the last existing link in the same parent.
+    var parent = last.closest("li") ? last.closest("li").parentNode : last.parentNode;
+    if (last.closest("li")) {
+      var li = document.createElement("li");
+      li.style.cssText = last.closest("li").style.cssText;
+      li.appendChild(link);
+      parent.appendChild(li);
+    } else {
+      parent.appendChild(link);
+    }
+
+    refreshDot(dot);
+    setInterval(function(){ refreshDot(dot); }, 15000);
+    return true;
+  }
+
+  // Try immediately in case React hydration already ran.
+  if (!tryInject()) {
+    var observer = new MutationObserver(function(){
+      if (tryInject()) { observer.disconnect(); }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    // Give up after 30 s so we don't leak the observer forever.
+    setTimeout(function(){ observer.disconnect(); }, 30000);
+  }
+})();
+</script>`
+
+// reactRouteSet is the set of exact path segments that the Mantine UI handles.
+// These match newUIReactRouterPaths + newUIReactRouterServerPaths in web/web.go.
+var reactRouteSet = map[string]bool{
+	"/config":                 true,
+	"/flags":                  true,
+	"/service-discovery":      true,
+	"/alertmanager-discovery": true,
+	"/status":                 true,
+	"/targets":                true,
+	"/alerts":                 true,
+	"/query":                  true,
+	"/rules":                  true,
+	"/tsdb-status":            true,
+	"/agent":                  true,
+}
+
+// serveInjectedReactApp opens index.html from the embedded Mantine UI assets,
+// applies the same placeholder substitutions that upstream web.Handler does,
+// and injects reactNavScript immediately before </body>.
+func serveInjectedReactApp(w http.ResponseWriter, r *http.Request, opts *web.Options) {
+	const indexPath = "/static/mantine-ui/index.html"
+	f, err := ui.Assets.Open(indexPath)
+	if err != nil {
+		// Assets not built (stub FS).  Fall through — the upstream handler
+		// will produce its own error message which is more informative.
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error opening React index.html: %v", err)
+		return
+	}
+	defer f.Close()
+	idx, err := io.ReadAll(f)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error reading React index.html: %v", err)
+		return
+	}
+
+	// Apply the same placeholder replacements as upstream serveReactApp.
+	consolesPath := ""
+	if opts.ExternalURL != nil {
+		if _, statErr := os.Stat(opts.ConsoleTemplatesPath + "/index.html"); !os.IsNotExist(statErr) {
+			consolesPath = opts.ExternalURL.Path + "/consoles/index.html"
+		}
+	}
+	idx = bytes.ReplaceAll(idx, []byte("CONSOLES_LINK_PLACEHOLDER"), []byte(consolesPath))
+	idx = bytes.ReplaceAll(idx, []byte("TITLE_PLACEHOLDER"), []byte(opts.PageTitle))
+	idx = bytes.ReplaceAll(idx, []byte("AGENT_MODE_PLACEHOLDER"), []byte(strconv.FormatBool(opts.IsAgent)))
+	idx = bytes.ReplaceAll(idx, []byte("READY_PLACEHOLDER"), []byte("true"))
+	lookbackStr := model.Duration(opts.LookbackDelta).String()
+	idx = bytes.ReplaceAll(idx, []byte("LOOKBACKDELTA_PLACEHOLDER"), []byte(lookbackStr))
+
+	// Inject our nav script just before </body>.
+	idx = bytes.ReplaceAll(idx, []byte("</body>"), []byte(reactNavScript+"</body>"))
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(idx)
 }
 
 func main() {
@@ -495,6 +665,9 @@ func main() {
 			ps.FlagsHandler(w, r)
 		} else if strings.HasPrefix(r.URL.Path, path.Join(webOptions.RoutePrefix, "/promxy")) {
 			promxyUIHandler.ServeHTTP(w, r)
+		} else if reactRouteSet[r.URL.Path] {
+			// Serve Mantine index.html with our nav injection.
+			serveInjectedReactApp(w, r, webOptions)
 		} else {
 			// all else we send direct to the local prometheus UI
 			webHandler.GetRouter().ServeHTTP(w, r)
