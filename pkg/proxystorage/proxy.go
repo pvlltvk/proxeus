@@ -411,6 +411,26 @@ func (p *ProxyStorage) WALReplayStatus() (tsdb.WALReplayStatus, error) {
 	return tsdb.WALReplayStatus{}, errors.New("not implemented")
 }
 
+// ServerGroups returns the resolved server groups from the current state.
+// Returns nil if no state has been applied yet.
+func (p *ProxyStorage) ServerGroups() []*servergroup.ServerGroup {
+	state := p.GetState()
+	if state == nil {
+		return nil
+	}
+	return state.sgs
+}
+
+// Config returns the current configuration. Returns nil before the first
+// ApplyConfig call.
+func (p *ProxyStorage) Config() *proxyconfig.Config {
+	state := p.GetState()
+	if state == nil {
+		return nil
+	}
+	return state.cfg
+}
+
 // NodeReplacer replaces promql Nodes with more efficient-to-fetch ones. This works by taking lower-layer
 // chunks of the query, farming them out to prometheus hosts, then stitching the results back together.
 // An example would be a sum, we can sum multiple sums and come up with the same result -- so we do.
