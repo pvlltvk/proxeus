@@ -1,2 +1,7 @@
-deploy/*
-build/*
+.git
+deploy
+build
+cmd/promxy/promxy
+cmd/remote_write_exporter/remote_write_exporter
+.playwright-mcp
+*.png

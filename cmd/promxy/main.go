@@ -54,6 +54,8 @@ import (
 	"github.com/jacksontj/promxy/pkg/proxystorage"
 	"github.com/jacksontj/promxy/pkg/promxyui"
 	"github.com/jacksontj/promxy/pkg/server"
+
+	injectionUI "github.com/jacksontj/promxy/cmd/promxy/ui"
 )
 
 var (
@@ -158,113 +160,23 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, rls .
 	return nil
 }
 
-// reactNavScript is injected into every Mantine index.html response just before
-// </body>.  It uses a MutationObserver to wait for the Mantine nav sidebar to
-// appear, then appends a "Backends" link styled to match the existing nav items,
-// with a small status dot driven by /promxy/api/backends.json.
-const reactNavScript = `<script>
-(function(){
-  var BACKENDS_URL = "/promxy/backends";
-  var API_URL = "/promxy/api/backends.json";
+var (
+	reactHeadScript string
+	reactNavScript  string
+)
 
-  function makeLink(dot) {
-    var a = document.createElement("a");
-    a.href = BACKENDS_URL;
-    a.className = "promxy-nav-link";
-    // Copy inline styles from a neighbouring nav link so we blend in.
-    a.style.cssText = [
-      "display:flex","align-items:center","gap:6px",
-      "padding:8px 12px","text-decoration:none","font-size:14px",
-      "color:inherit","border-radius:4px","cursor:pointer",
-      "white-space:nowrap"
-    ].join(";");
-    if (dot) { a.appendChild(dot); }
-    a.appendChild(document.createTextNode("Backends"));
-    a.addEventListener("mouseenter", function(){ a.style.background="rgba(0,0,0,.06)"; });
-    a.addEventListener("mouseleave", function(){ a.style.background=""; });
-    return a;
-  }
-
-  function makeDot() {
-    var s = document.createElement("span");
-    s.id = "promxy-nav-dot";
-    s.style.cssText = [
-      "display:inline-block","width:8px","height:8px",
-      "border-radius:50%","background:#aaa","flex-shrink:0"
-    ].join(";");
-    return s;
-  }
-
-  function refreshDot(dot) {
-    fetch(API_URL).then(function(r){ return r.json(); }).then(function(d){
-      if (!d.groups || d.groups.length === 0) { dot.style.background="#aaa"; return; }
-      var total=0, up=0;
-      d.groups.forEach(function(g){
-        g.targets.forEach(function(t){ total++; if(t.healthy) up++; });
-      });
-      dot.style.background = (up===0 ? "#fa5252" : up<total ? "#fab005" : "#40c057");
-    }).catch(function(){ dot.style.background="#aaa"; });
-  }
-
-  // Selector strategies for the Mantine nav sidebar.
-  // Mantine AppShell renders a <nav> inside the navbar section;
-  // nav links are typically the direct children or nested anchors.
-  function findNavContainer() {
-    // Strategy 1: the AppShell navbar element (data-component attribute set by Mantine).
-    var el = document.querySelector("[data-component='AppShell.Navbar'] nav") ||
-             document.querySelector("[class*='mantine-AppShell-navbar'] nav") ||
-             document.querySelector("nav[class*='mantine-NavLink']") ||
-             document.querySelector("nav");
-    return el;
-  }
-
-  function tryInject() {
-    if (document.getElementById("promxy-nav-link")) return true; // already injected
-    var nav = findNavContainer();
-    if (!nav) return false;
-    // Don't inject into a tiny nav (e.g. breadcrumbs); ensure it already has links.
-    var existingLinks = nav.querySelectorAll("a");
-    if (existingLinks.length === 0) return false;
-
-    var dot = makeDot();
-    var link = makeLink(dot);
-    link.id = "promxy-nav-link";
-
-    // Clone style from the last existing nav link so sizing/colour matches.
-    var last = existingLinks[existingLinks.length - 1];
-    var computed = window.getComputedStyle(last);
-    // Inherit colour and font from the computed style of the neighbour.
-    link.style.color = computed.color;
-    link.style.fontFamily = computed.fontFamily;
-    link.style.fontSize = computed.fontSize;
-
-    // Insert after the last existing link in the same parent.
-    var parent = last.closest("li") ? last.closest("li").parentNode : last.parentNode;
-    if (last.closest("li")) {
-      var li = document.createElement("li");
-      li.style.cssText = last.closest("li").style.cssText;
-      li.appendChild(link);
-      parent.appendChild(li);
-    } else {
-      parent.appendChild(link);
-    }
-
-    refreshDot(dot);
-    setInterval(function(){ refreshDot(dot); }, 15000);
-    return true;
-  }
-
-  // Try immediately in case React hydration already ran.
-  if (!tryInject()) {
-    var observer = new MutationObserver(function(){
-      if (tryInject()) { observer.disconnect(); }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    // Give up after 30 s so we don't leak the observer forever.
-    setTimeout(function(){ observer.disconnect(); }, 30000);
-  }
-})();
-</script>`
+func init() {
+	head, err := injectionUI.Scripts.ReadFile("head.js")
+	if err != nil {
+		panic("embedded head.js missing: " + err.Error())
+	}
+	nav, err := injectionUI.Scripts.ReadFile("nav.js")
+	if err != nil {
+		panic("embedded nav.js missing: " + err.Error())
+	}
+	reactHeadScript = "<script>" + string(head) + "</script>"
+	reactNavScript = "<script>" + string(nav) + "</script>"
+}
 
 // reactRouteSet is the set of exact path segments that the Mantine UI handles.
 // These match newUIReactRouterPaths + newUIReactRouterServerPaths in web/web.go.
@@ -280,6 +192,7 @@ var reactRouteSet = map[string]bool{
 	"/rules":                  true,
 	"/tsdb-status":            true,
 	"/agent":                  true,
+	"/backends":               true,
 }
 
 // serveInjectedReactApp opens index.html from the embedded Mantine UI assets,
@@ -316,6 +229,17 @@ func serveInjectedReactApp(w http.ResponseWriter, r *http.Request, opts *web.Opt
 	idx = bytes.ReplaceAll(idx, []byte("READY_PLACEHOLDER"), []byte("true"))
 	lookbackStr := model.Duration(opts.LookbackDelta).String()
 	idx = bytes.ReplaceAll(idx, []byte("LOOKBACKDELTA_PLACEHOLDER"), []byte(lookbackStr))
+
+	// Replace Prometheus favicon with Promxy icon.
+	idx = bytes.ReplaceAll(idx, []byte(`href="./favicon.svg"`), []byte(`href="/promxy/static/promxy-icon.svg"`))
+
+	// Make asset URLs absolute so they resolve correctly when the page is
+	// served at a sub-path like /backends.
+	idx = bytes.ReplaceAll(idx, []byte(`"./assets/`), []byte(`"/assets/`))
+	idx = bytes.ReplaceAll(idx, []byte(`'./assets/`), []byte(`'/assets/`))
+
+	// Inject head script (blocks React Router navigation on /backends).
+	idx = bytes.ReplaceAll(idx, []byte("<head>"), []byte("<head>"+reactHeadScript))
 
 	// Inject our nav script just before </body>.
 	idx = bytes.ReplaceAll(idx, []byte("</body>"), []byte(reactNavScript+"</body>"))
@@ -599,6 +523,7 @@ func main() {
 		ListenAddresses: []string{opts.BindAddr},
 
 		Flags:       opts.ToFlags(),
+		PageTitle:   "Promxy",
 		RoutePrefix: opts.RoutePrefix,
 		ExternalURL: externalUrl,
 		Version: &web.PrometheusVersion{
@@ -663,11 +588,13 @@ func main() {
 			ps.WalReplayHandler(w, r)
 		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/status/flags") {
 			ps.FlagsHandler(w, r)
-		} else if strings.HasPrefix(r.URL.Path, path.Join(webOptions.RoutePrefix, "/promxy")) {
-			promxyUIHandler.ServeHTTP(w, r)
 		} else if reactRouteSet[r.URL.Path] {
 			// Serve Mantine index.html with our nav injection.
+			// This must come before the /promxy prefix check so that
+			// /backends is served through the Mantine shell.
 			serveInjectedReactApp(w, r, webOptions)
+		} else if strings.HasPrefix(r.URL.Path, path.Join(webOptions.RoutePrefix, "/promxy")) {
+			promxyUIHandler.ServeHTTP(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
 			webHandler.GetRouter().ServeHTTP(w, r)
