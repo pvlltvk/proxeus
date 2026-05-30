@@ -59,8 +59,8 @@ func TestSeriesDedup_HTTP(t *testing.T) {
 			store := promqltest.LoadedStorage(t, seriesDedupData)
 			defer store.Close()
 
-			backendA, stopA := startAPIForTest(store, ":18083")
-			backendB, stopB := startAPIForTest(store, ":18085")
+			backendA, addrA, stopA := startAPIForTest(store)
+			backendB, addrB, stopB := startAPIForTest(store)
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
@@ -77,18 +77,18 @@ promxy:
   server_groups:
     - static_configs:
         - targets:
-          - localhost:18083
+          - ` + addrA + `
       labels:
         az: a
     - static_configs:
         - targets:
-          - localhost:18085
+          - ` + addrB + `
       labels:
         az: b
 `
 			ps := getProxyStorage(cfg)
 
-			proxySrv, stopP := startAPIForTest(ps, ":18091")
+			proxySrv, proxyAddr, stopP := startAPIForTest(ps)
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
@@ -103,7 +103,7 @@ promxy:
 			q.Set("start", "0")
 			q.Set("end", "300")
 
-			resp, err := http.Get("http://localhost:18091/api/v1/series?" + q.Encode())
+			resp, err := http.Get("http://" + proxyAddr + "/api/v1/series?" + q.Encode())
 			if err != nil {
 				t.Fatalf("GET /api/v1/series: %v", err)
 			}
@@ -164,31 +164,31 @@ load 1m
 
 // dualBackendProxy spins up two in-process backends sharing `store`, plus a
 // promxy in front with az=a / az=b group labels. Returns the proxy URL and a
-// cleanup func. Ports are distinct from TestSeriesDedup_HTTP's to allow
-// fast retries without TIME_WAIT contention.
-func dualBackendProxy(t *testing.T, store storage.Storage, backendAPort, backendBPort, proxyPort string) (proxyURL string, cleanup func()) {
+// cleanup func. Each server binds an OS-assigned port, so concurrent tests
+// never contend for fixed ports.
+func dualBackendProxy(t *testing.T, store storage.Storage) (proxyURL string, cleanup func()) {
 	t.Helper()
-	backendA, stopA := startAPIForTest(store, backendAPort)
-	backendB, stopB := startAPIForTest(store, backendBPort)
+	backendA, addrA, stopA := startAPIForTest(store)
+	backendB, addrB, stopB := startAPIForTest(store)
 
 	cfg := `
 promxy:
   server_groups:
     - static_configs:
         - targets:
-          - localhost` + backendAPort + `
+          - ` + addrA + `
       labels:
         az: a
     - static_configs:
         - targets:
-          - localhost` + backendBPort + `
+          - ` + addrB + `
       labels:
         az: b
 `
 	ps := getProxyStorage(cfg)
-	proxySrv, stopP := startAPIForTest(ps, proxyPort)
+	proxySrv, proxyAddr, stopP := startAPIForTest(ps)
 
-	return "http://localhost" + proxyPort, func() {
+	return "http://" + proxyAddr, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		proxySrv.Shutdown(ctx)
@@ -233,7 +233,7 @@ func TestLabelsAPI_HTTP(t *testing.T) {
 	store := promqltest.LoadedStorage(t, labelAPIData)
 	defer store.Close()
 
-	proxyURL, cleanup := dualBackendProxy(t, store, ":18193", ":18195", ":18192")
+	proxyURL, cleanup := dualBackendProxy(t, store)
 	defer cleanup()
 
 	t.Run("/labels — union includes group labels", func(t *testing.T) {
@@ -332,7 +332,7 @@ func TestLabelAPI_GroupLabelCollision_HTTP(t *testing.T) {
 	store := promqltest.LoadedStorage(t, labelAPICollisionData)
 	defer store.Close()
 
-	proxyURL, cleanup := dualBackendProxy(t, store, ":18293", ":18295", ":18292")
+	proxyURL, cleanup := dualBackendProxy(t, store)
 	defer cleanup()
 
 	t.Run("/series overwrites: original az=orig is lost", func(t *testing.T) {
