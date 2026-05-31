@@ -29,16 +29,21 @@ type DedupStats struct {
 	Collisions int
 }
 
-// reducedFingerprint returns the fingerprint of m with all keys in ignore
-// removed. It copies the metric, so callers may reuse m safely.
-func reducedFingerprint(m model.Metric, ignore map[model.LabelName]struct{}) model.Fingerprint {
-	reduced := make(model.LabelSet, len(m))
+// reducedFingerprintInto returns the fingerprint of m with all keys in ignore
+// removed, reusing scratch as working storage. scratch is cleared on entry, so
+// a single map can be shared across many calls to avoid a per-call allocation.
+// FastFingerprint is order-independent and allocation-free, so repopulating
+// scratch is the only cost.
+func reducedFingerprintInto(scratch model.LabelSet, m model.Metric, ignore map[model.LabelName]struct{}) model.Fingerprint {
+	for k := range scratch {
+		delete(scratch, k)
+	}
 	for k, v := range m {
 		if _, skip := ignore[k]; !skip {
-			reduced[k] = v
+			scratch[k] = v
 		}
 	}
-	return reduced.FastFingerprint()
+	return scratch.FastFingerprint()
 }
 
 // MergeValuesDeterministic merges `a` and `b` like MergeValues, but detects
@@ -100,52 +105,51 @@ func MergeValuesDeterministic(a, b model.Value, opts DedupOpts) (model.Value, *D
 
 // mergeVectorDeterministic merges two Vectors using reduced-fingerprint
 // collision detection. Lower-ordinal source wins per bucket.
+//
+// Only the reduced fingerprint is indexed. Because each input's ignore labels
+// are constant within that input, an exact full-labelset duplicate always lands
+// in the same reduced bucket as its twin — so a direct labelset compare (run
+// only on a bucket hit) tells exact-dups from genuine cross-group collisions.
+// This keeps the common, disjoint path at one fingerprint per sample with no
+// per-sample full Fingerprint() call (the dominant allocator at high cardinality).
 func mergeVectorDeterministic(a, b model.Vector, opts DedupOpts) (model.Vector, int) {
 	type entry struct {
 		sample  *model.Sample
 		ordinal int
+		idx     int // position of this bucket's winner in result
 	}
 
-	// Key: full fingerprint → index in result (for fast same-FP dedup)
-	// Key: reduced fingerprint → entry (for cross-group dedup)
-	fullFPIndex := make(map[model.Fingerprint]int, len(a)+len(b))
-	reducedFPEntry := make(map[model.Fingerprint]*entry, len(a)+len(b))
+	buckets := make(map[model.Fingerprint]*entry, len(a)+len(b))
 	result := make(model.Vector, 0, len(a)+len(b))
+	scratch := make(model.LabelSet, 16)
 	collisions := 0
 
 	add := func(s *model.Sample, ordinal int) {
-		fullFP := s.Metric.Fingerprint()
+		redFP := reducedFingerprintInto(scratch, s.Metric, opts.IgnoreLabels)
 
-		// Exact duplicate: apply within-group preferMax=false semantics (first wins).
-		if idx, ok := fullFPIndex[fullFP]; ok {
-			if result[idx].Value == model.SampleValue(0) {
-				result[idx].Value = s.Value
+		existing, ok := buckets[redFP]
+		if !ok {
+			result = append(result, s)
+			buckets[redFP] = &entry{sample: s, ordinal: ordinal, idx: len(result) - 1}
+			return
+		}
+
+		// Exact duplicate of this bucket's winner: within-group preferMax=false
+		// semantics (first non-zero wins).
+		if existing.sample.Metric.Equal(s.Metric) {
+			if result[existing.idx].Value == model.SampleValue(0) {
+				result[existing.idx].Value = s.Value
 			}
 			return
 		}
 
-		redFP := reducedFingerprint(model.Metric(s.Metric), opts.IgnoreLabels)
-		if existing, ok := reducedFPEntry[redFP]; ok {
-			collisions++
-			// Lower ordinal wins.
-			if ordinal < existing.ordinal {
-				// Swap out the losing sample in result. We locate it via the
-				// full-FP index of the current winner before removing it.
-				oldFullFP := existing.sample.Metric.Fingerprint()
-				oldIdx := fullFPIndex[oldFullFP]
-				delete(fullFPIndex, oldFullFP)
-				result[oldIdx] = s
-				fullFPIndex[fullFP] = oldIdx
-				existing.sample = s
-				existing.ordinal = ordinal
-			}
-			return
+		// Genuine cross-group collision: lower ordinal wins.
+		collisions++
+		if ordinal < existing.ordinal {
+			result[existing.idx] = s
+			existing.sample = s
+			existing.ordinal = ordinal
 		}
-
-		idx := len(result)
-		result = append(result, s)
-		fullFPIndex[fullFP] = idx
-		reducedFPEntry[redFP] = &entry{sample: s, ordinal: ordinal}
 	}
 
 	for _, s := range a {
@@ -165,42 +169,37 @@ func mergeMatrixDeterministic(a, b model.Matrix, opts DedupOpts) (model.Matrix, 
 	type entry struct {
 		stream  *model.SampleStream
 		ordinal int
+		idx     int // position of this bucket's winner in result
 	}
 
-	fullFPIndex := make(map[model.Fingerprint]int, len(a)+len(b))
-	reducedFPEntry := make(map[model.Fingerprint]*entry, len(a)+len(b))
+	buckets := make(map[model.Fingerprint]*entry, len(a)+len(b))
 	result := make(model.Matrix, 0, len(a)+len(b))
+	scratch := make(model.LabelSet, 16)
 	collisions := 0
 
 	add := func(stream *model.SampleStream, ordinal int) {
-		fullFP := model.Metric(stream.Metric).Fingerprint()
+		redFP := reducedFingerprintInto(scratch, stream.Metric, opts.IgnoreLabels)
 
-		// Exact-FP duplicate: within-group HA already merged; keep first.
-		if _, ok := fullFPIndex[fullFP]; ok {
+		existing, ok := buckets[redFP]
+		if !ok {
+			result = append(result, stream)
+			buckets[redFP] = &entry{stream: stream, ordinal: ordinal, idx: len(result) - 1}
 			return
 		}
 
-		redFP := reducedFingerprint(model.Metric(stream.Metric), opts.IgnoreLabels)
-		if existing, ok := reducedFPEntry[redFP]; ok {
-			collisions++
-			if ordinal < existing.ordinal {
-				// Swap out the losing stream. Locate it via the full-FP index
-				// of the current winner before removing that entry.
-				oldFullFP := model.Metric(existing.stream.Metric).Fingerprint()
-				oldIdx := fullFPIndex[oldFullFP]
-				delete(fullFPIndex, oldFullFP)
-				result[oldIdx] = stream
-				fullFPIndex[fullFP] = oldIdx
-				existing.stream = stream
-				existing.ordinal = ordinal
-			}
+		// Exact duplicate of this bucket's winner: within-group HA already
+		// merged; keep first.
+		if existing.stream.Metric.Equal(stream.Metric) {
 			return
 		}
 
-		idx := len(result)
-		result = append(result, stream)
-		fullFPIndex[fullFP] = idx
-		reducedFPEntry[redFP] = &entry{stream: stream, ordinal: ordinal}
+		// Genuine cross-group collision: lower ordinal wins.
+		collisions++
+		if ordinal < existing.ordinal {
+			result[existing.idx] = stream
+			existing.stream = stream
+			existing.ordinal = ordinal
+		}
 	}
 
 	for _, s := range a {
