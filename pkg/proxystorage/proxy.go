@@ -152,10 +152,17 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		return fmt.Errorf("error applying config to one or more server group(s)")
 	}
 
-	// Pre-flight: every server_group must have a unique, non-empty labels set.
+	// Pre-flight: every server_group should carry a unique, non-empty labels set.
+	// This is mandatory when cross_group_dedup is on (dedup uses these labels for
+	// series identity — a collision would silently merge unrelated series). With
+	// dedup off it's only a hygiene concern (ambiguous provenance), so we warn
+	// rather than refuse to start, preserving historical promxy behavior.
 	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
-		newState.Cancel(nil)
-		return err
+		if c.CrossGroupDedup {
+			newState.Cancel(nil)
+			return err
+		}
+		logrus.Warnf("%s (not fatal without cross_group_dedup, but provenance will be ambiguous)", err)
 	}
 
 	// Pre-flight: metadata dedup is meaningless without query dedup — both
