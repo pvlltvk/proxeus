@@ -38,6 +38,12 @@ func newTestProber() *Prober {
 	}
 }
 
+// testClient is the HTTP client used to drive probeTarget directly in tests
+// (where there is no real server_group transport to derive one from).
+func testClient() *http.Client {
+	return &http.Client{Timeout: 2 * time.Second}
+}
+
 func TestProber_HealthyTarget(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -52,7 +58,7 @@ func TestProber_HealthyTarget(t *testing.T) {
 	defer srv.Close()
 
 	host := srv.Listener.Addr().String()
-	result := newTestProber().probeTarget(context.Background(), sgCfg("g", "http", ""), host)
+	result := newTestProber().probeTarget(context.Background(), testClient(), sgCfg("g", "http", ""), host)
 
 	if !result.Healthy {
 		t.Errorf("expected healthy=true, got false; lastError=%q", result.LastError)
@@ -87,7 +93,7 @@ func TestProber_UsesPathPrefix(t *testing.T) {
 	defer srv.Close()
 
 	host := srv.Listener.Addr().String()
-	result := newTestProber().probeTarget(context.Background(), sgCfg("vm", "http", prefix), host)
+	result := newTestProber().probeTarget(context.Background(), testClient(), sgCfg("vm", "http", prefix), host)
 
 	if !result.Healthy {
 		t.Fatalf("expected healthy=true, got false; lastError=%q", result.LastError)
@@ -119,7 +125,7 @@ func TestProber_PathPrefix_LabelsFallback(t *testing.T) {
 	defer srv.Close()
 
 	host := srv.Listener.Addr().String()
-	result := newTestProber().probeTarget(context.Background(), sgCfg("vm", "http", prefix), host)
+	result := newTestProber().probeTarget(context.Background(), testClient(), sgCfg("vm", "http", prefix), host)
 
 	if !result.Healthy {
 		t.Errorf("expected healthy=true (labels fallback), got false; lastError=%q", result.LastError)
@@ -131,7 +137,7 @@ func TestProber_PathPrefix_LabelsFallback(t *testing.T) {
 
 func TestProber_ErrorTarget(t *testing.T) {
 	// Point at a port that is not listening.
-	result := newTestProber().probeTarget(context.Background(), sgCfg("g", "http", ""), "127.0.0.1:1")
+	result := newTestProber().probeTarget(context.Background(), testClient(), sgCfg("g", "http", ""), "127.0.0.1:1")
 
 	if result.Healthy {
 		t.Errorf("expected healthy=false for unreachable target")

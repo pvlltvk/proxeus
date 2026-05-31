@@ -138,9 +138,10 @@ func (p *Prober) probeAll(ctx context.Context) {
 		if sgState == nil {
 			continue
 		}
+		client := p.clientForGroup(sg)
 		for _, target := range sgState.Targets {
 			key := probeKey{group: sgCfg.Name, target: target}
-			result := p.probeTarget(ctx, sgCfg, target)
+			result := p.probeTarget(ctx, client, sgCfg, target)
 			p.mu.Lock()
 			p.results[key] = result
 			p.mu.Unlock()
@@ -148,11 +149,25 @@ func (p *Prober) probeAll(ctx context.Context) {
 	}
 }
 
-// probeTarget performs a single health check against one target (host:port).
+// clientForGroup returns an HTTP client that probes through the server_group's
+// own transport, so probes inherit its TLS settings, auth (basic/bearer/SigV4),
+// and custom headers and therefore succeed against HTTPS or authenticated
+// backends exactly as real queries do. The probe timeout is reapplied via the
+// returned client. Falls back to the bare default client when no group transport
+// is available (e.g. in tests).
+func (p *Prober) clientForGroup(sg *servergroup.ServerGroup) *http.Client {
+	if sg == nil {
+		return p.client
+	}
+	return &http.Client{Transport: sg, Timeout: defaultProbeTimeout}
+}
+
+// probeTarget performs a single health check against one target (host:port)
+// using the supplied client (built from the server_group's transport).
 // The URL is built from sgCfg.GetScheme() + target + sgCfg.PathPrefix, so
 // backends with a non-root path prefix (e.g. VictoriaMetrics at
 // /select/0/prometheus) are probed at the correct endpoint.
-func (p *Prober) probeTarget(ctx context.Context, sgCfg *servergroup.Config, rawTarget string) ProbeResult {
+func (p *Prober) probeTarget(ctx context.Context, client *http.Client, sgCfg *servergroup.Config, rawTarget string) ProbeResult {
 	base := backendBaseURL(sgCfg, rawTarget)
 	buildInfoURL := base + "/api/v1/status/buildinfo"
 
@@ -165,7 +180,7 @@ func (p *Prober) probeTarget(ctx context.Context, sgCfg *servergroup.Config, raw
 		}
 	}
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	probeAt := time.Now()
 	if err != nil {
 		errStr := err.Error()
@@ -184,7 +199,7 @@ func (p *Prober) probeTarget(ctx context.Context, sgCfg *servergroup.Config, raw
 		// buildinfo non-200 — try /api/v1/labels as a liveness fallback.
 		// Drain and close the buildinfo response so the connection can be reused.
 		resp.Body.Close()
-		healthy, fallbackErr := p.checkLabelsEndpoint(ctx, base)
+		healthy, fallbackErr := p.checkLabelsEndpoint(ctx, client, base)
 		return ProbeResult{
 			Healthy:     healthy,
 			LastError:   fallbackErr,
@@ -203,13 +218,13 @@ func (p *Prober) probeTarget(ctx context.Context, sgCfg *servergroup.Config, raw
 
 // checkLabelsEndpoint hits /api/v1/labels (under the same base URL) to confirm
 // the target is reachable. Returns (healthy, errorString).
-func (p *Prober) checkLabelsEndpoint(ctx context.Context, base string) (bool, string) {
+func (p *Prober) checkLabelsEndpoint(ctx context.Context, client *http.Client, base string) (bool, string) {
 	labelsURL := base + "/api/v1/labels"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, labelsURL, nil)
 	if err != nil {
 		return false, err.Error()
 	}
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err.Error()
 	}
