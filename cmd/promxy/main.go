@@ -561,7 +561,8 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Error creating promxy UI handler: %v", err)
 	}
-	go promxyUIHandler.Run(context.Background())
+	// Tie the prober loop to the main context so it stops on shutdown.
+	go promxyUIHandler.Run(ctx)
 
 	// Create our router
 	r := httprouter.New()
