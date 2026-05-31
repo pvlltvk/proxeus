@@ -141,12 +141,50 @@ type MultiAPI struct {
 	preferMax       bool
 	mergeFn         MergeFunc
 	mergeSeriesFn   MergeSeriesFunc
+
+	// partialResponse, when true, relaxes requiredCount: the fan-out returns
+	// whatever responded (plus a warning per failed backend) instead of failing
+	// the whole call when a backend errors. Only set by the cross-group
+	// constructor; the within-group HA path leaves it false.
+	partialResponse bool
 }
 
 func (m *MultiAPI) recordMetric(i int, api, status string, took float64) {
 	if m.metricFunc != nil {
 		m.metricFunc(i, api, status, took)
 	}
+}
+
+// abortOnError reports whether an error from one backend should abort the whole
+// fan-out immediately. In partial-response mode a single failure is tolerated,
+// so we never abort early; otherwise we abort as soon as a fingerprint bucket
+// can no longer reach requiredCount.
+func (m *MultiAPI) abortOnError(ls model.Fingerprint, outstanding, success map[model.Fingerprint]int) bool {
+	if m.partialResponse {
+		return false
+	}
+	return (outstanding[ls] + success[ls]) < m.requiredCount
+}
+
+// missingRequired reports the final-check failure. In partial-response mode the
+// fan-out succeeds as long as at least one backend responded (callers surface a
+// warning for the rest); otherwise every bucket must reach requiredCount.
+func (m *MultiAPI) missingRequired(outstanding, success map[model.Fingerprint]int) bool {
+	if m.partialResponse {
+		return len(success) == 0
+	}
+	for k := range outstanding {
+		if success[k] < m.requiredCount {
+			return true
+		}
+	}
+	return false
+}
+
+// partialWarning formats the degradation warning attached when a backend fails
+// in partial-response mode.
+func partialWarning(i int, err error) v1.Warnings {
+	return v1.Warnings{fmt.Sprintf("partial_response: backend[%d] unavailable: %s", i, err.Error())}
 }
 
 // LabelValues performs a query for the values of the given label.
@@ -199,9 +237,11 @@ func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []str
 			warnings.AddWarnings(ret.warnings)
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, warnings.Warnings(), ret.err
+				}
+				if m.partialResponse {
+					warnings.AddWarnings(partialWarning(i, ret.err))
 				}
 				lastError = ret.err
 			} else {
@@ -215,11 +255,8 @@ func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []str
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	sort.Sort(model.LabelValues(result))
@@ -277,9 +314,11 @@ func (m *MultiAPI) LabelNames(ctx context.Context, matchers []string, startTime 
 			warnings.AddWarnings(ret.warnings)
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, warnings.Warnings(), ret.err
+				}
+				if m.partialResponse {
+					warnings.AddWarnings(partialWarning(i, ret.err))
 				}
 				lastError = ret.err
 			} else {
@@ -291,11 +330,8 @@ func (m *MultiAPI) LabelNames(ctx context.Context, matchers []string, startTime 
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	stringResult := make([]string, 0, len(result))
@@ -359,9 +395,11 @@ func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model
 			warnings.AddWarnings(ret.warnings)
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, warnings.Warnings(), ret.err
+				}
+				if m.partialResponse {
+					warnings.AddWarnings(partialWarning(i, ret.err))
 				}
 				lastError = ret.err
 			} else {
@@ -383,11 +421,8 @@ func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	return result, warnings.Warnings(), nil
@@ -444,9 +479,11 @@ func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (mo
 			warnings.AddWarnings(ret.warnings)
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, warnings.Warnings(), ret.err
+				}
+				if m.partialResponse {
+					warnings.AddWarnings(partialWarning(i, ret.err))
 				}
 				lastError = ret.err
 			} else {
@@ -468,11 +505,8 @@ func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (mo
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	return result, warnings.Warnings(), nil
@@ -529,9 +563,11 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 			warnings.AddWarnings(ret.warnings)
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, warnings.Warnings(), ret.err
+				}
+				if m.partialResponse {
+					warnings.AddWarnings(partialWarning(i, ret.err))
 				}
 				lastError = ret.err
 			} else {
@@ -549,11 +585,8 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	return result, warnings.Warnings(), nil
@@ -611,9 +644,11 @@ func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers 
 			warnings.AddWarnings(ret.warnings)
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, warnings.Warnings(), ret.err
+				}
+				if m.partialResponse {
+					warnings.AddWarnings(partialWarning(i, ret.err))
 				}
 				lastError = ret.err
 			} else {
@@ -635,11 +670,8 @@ func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers 
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	return result, warnings.Warnings(), nil
@@ -691,8 +723,7 @@ func (m *MultiAPI) Metadata(ctx context.Context, metric, limit string) (map[stri
 		case ret := <-resultChans[i]:
 			outstandingRequests[ret.ls]--
 			if ret.err != nil {
-				// If there aren't enough outstanding requests to possibly succeed, no reason to wait
-				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
 					return nil, ret.err
 				}
 				lastError = ret.err
@@ -712,11 +743,8 @@ func (m *MultiAPI) Metadata(ctx context.Context, metric, limit string) (map[stri
 		}
 	}
 
-	// Verify that we hit the requiredCount for all of the buckets
-	for k := range outstandingRequests {
-		if successMap[k] < m.requiredCount {
-			return nil, errors.Wrap(lastError, "Unable to fetch from downstream servers")
-		}
+	if m.missingRequired(outstandingRequests, successMap) {
+		return nil, errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	return result, nil

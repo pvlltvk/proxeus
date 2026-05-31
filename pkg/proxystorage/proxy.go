@@ -165,6 +165,12 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
 	}
 
+	// Pre-flight: partial response only affects the cross-group fan-out.
+	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
+		newState.Cancel(nil)
+		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
+	}
+
 	var (
 		multiApi *promclient.MultiAPI
 		err      error
@@ -176,16 +182,14 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 			groupNames[i] = sg.Name
 			groupLabels[i] = sg.Labels
 		}
-		if c.CrossGroupDedupMetadata {
-			logrus.Info("cross_group_dedup enabled with metadata dedup: requiredCount=1; /api/v1/series collapses by reduced fingerprint")
-		} else {
-			logrus.Info("cross_group_dedup enabled: requiredCount=1 (single backend is enough)")
-		}
+		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t)",
+			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse)
 		multiApi, err = promclient.NewCrossGroupMultiAPI(
 			apis, groupNames, groupLabels,
 			crossGroupDedupCollisions,
 			c.CrossGroupDedupMetadata,
 			crossGroupDedupMetadataCollisions,
+			c.CrossGroupPartialResponse,
 		)
 	} else {
 		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)

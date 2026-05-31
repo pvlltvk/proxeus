@@ -74,4 +74,13 @@ type PromxyConfig struct {
 	// CrossGroupDedup to also be true; promxy will refuse to start otherwise.
 	// Default false preserves historical behavior.
 	CrossGroupDedupMetadata bool `yaml:"cross_group_dedup_metadata"`
+
+	// CrossGroupPartialResponse, when true, lets a query succeed when only some
+	// server_groups respond: results from the healthy backends are returned and
+	// a warning is attached for each that failed (Grafana surfaces it). When
+	// false (default) any single backend error fails the whole query — correct
+	// for HA replicas, but undesirable for federating disjoint data, where a
+	// Thanos outage should not blank out VM-sourced series. Only affects the
+	// cross-group fan-out, so it requires CrossGroupDedup to also be true.
+	CrossGroupPartialResponse bool `yaml:"cross_group_partial_response"`
 }

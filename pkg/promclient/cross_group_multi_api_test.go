@@ -43,7 +43,7 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 		Name: "test_cross_group_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil, false)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -99,6 +99,7 @@ func TestNewCrossGroupMultiAPI_LengthMismatch(t *testing.T) {
 		nil,
 		false,
 		nil,
+		false,
 	)
 	if err == nil {
 		t.Fatal("expected error on length mismatch")
@@ -139,7 +140,7 @@ func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
 		Name: "test_collision_counter_incremented_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil, false)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestNewCrossGroupMultiAPI_SeriesDedup(t *testing.T) {
 		Name: "test_series_dedup_metadata_collisions_total",
 	}, []string{"winner", "loser", "endpoint"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, true, metaCounter)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, true, metaCounter, false)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -248,7 +249,7 @@ func TestNewCrossGroupMultiAPI_SeriesNoDedupWhenDisabled(t *testing.T) {
 	groupNames := []string{"sg0", "sg1"}
 	groupLabels := []model.LabelSet{{"backend": "sg0"}, {"backend": "sg1"}}
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, false, nil)
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, false, nil, false)
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}

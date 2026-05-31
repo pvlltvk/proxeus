@@ -31,6 +31,7 @@ func NewCrossGroupMultiAPI(
 	dedupCounter *prometheus.CounterVec,
 	dedupMetadata bool,
 	dedupMetadataCounter *prometheus.CounterVec,
+	partialResponse bool,
 ) (*MultiAPI, error) {
 	if len(apis) != len(groupNames) || len(apis) != len(groupLabels) {
 		return nil, fmt.Errorf("apis, groupNames, and groupLabels must have the same length")
@@ -45,13 +46,17 @@ func NewCrossGroupMultiAPI(
 		}
 	}
 
-	// requiredCount=1: dedup mode means "give me the series from whichever
-	// backend has it"; a single healthy backend is enough to serve the query.
+	// requiredCount=1: each server_group has unique labels, so it occupies its
+	// own fingerprint bucket of size 1. With partialResponse=false this means
+	// EVERY backend must respond (any one error fails the whole query — see
+	// MultiAPI.missingRequired); partialResponse=true relaxes that to "at least
+	// one backend responded", returning partial results with a warning.
 	// antiAffinity/preferMax disabled — those are within-group HA concerns.
 	m, err := NewMultiAPI(apis, model.TimeFromUnix(0), nil, 1, false)
 	if err != nil {
 		return nil, err
 	}
+	m.partialResponse = partialResponse
 
 	names := make([]string, len(groupNames))
 	copy(names, groupNames)
