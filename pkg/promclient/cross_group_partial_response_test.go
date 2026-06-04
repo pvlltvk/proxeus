@@ -28,6 +28,26 @@ func (s *keyedStub) Query(_ context.Context, _ string, _ time.Time) (model.Value
 	return s.val, nil, s.err
 }
 
+// blockingStub is a keyed API whose Query blocks until its context is canceled
+// when block is true (simulating a backend that hangs past the query deadline),
+// or returns val immediately otherwise.
+type blockingStub struct {
+	API
+	key   model.LabelSet
+	val   model.Value
+	block bool
+}
+
+func (s *blockingStub) Key() model.LabelSet { return s.key }
+
+func (s *blockingStub) Query(ctx context.Context, _ string, _ time.Time) (model.Value, v1.Warnings, error) {
+	if s.block {
+		<-ctx.Done()
+		return nil, nil, ctx.Err()
+	}
+	return s.val, nil, nil
+}
+
 func crossGroupPartial(t *testing.T, apis []API, partial bool) *MultiAPI {
 	t.Helper()
 	names := []string{"sg0", "sg1"}
@@ -80,6 +100,65 @@ func TestCrossGroupPartialResponse_EnabledReturnsPartial(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "partial_response") {
 		t.Fatalf("expected partial_response warning, got %q", warnings[0])
+	}
+}
+
+// A low-ordinal backend that hangs past the query deadline must not blank
+// the whole result when partial_response is on. The healthy higher-ordinal
+// backend already responded, so we return its data with a warning instead of
+// discarding everything with ctx.Err() — and we return promptly at the deadline
+// rather than waiting on the hung backend (no head-of-line blocking).
+func TestCrossGroupPartialResponse_SlowLowOrdinalHonorsDeadline(t *testing.T) {
+	apis := []API{
+		&blockingStub{key: model.LabelSet{"server_group": "sg0"}, block: true},            // ordinal 0 hangs
+		&blockingStub{key: model.LabelSet{"server_group": "sg1"}, val: vec("cpu", "sg1")}, // ordinal 1 healthy
+	}
+	m := crossGroupPartial(t, apis, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	v, warnings, err := m.Query(ctx, "cpu", time.Now())
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected partial success when a low-ordinal backend hangs, got error: %v", err)
+	}
+	res, ok := v.(model.Vector)
+	if !ok || len(res) != 1 || res[0].Metric["server_group"] != "sg1" {
+		t.Fatalf("expected the healthy sg1 series, got %v", v)
+	}
+	if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "|"), "partial_response") {
+		t.Fatalf("expected a partial_response warning, got %v", warnings)
+	}
+	// Must return around the deadline, not hang on the stuck backend.
+	if elapsed > 2*time.Second {
+		t.Fatalf("query did not honor the deadline; took %s", elapsed)
+	}
+}
+
+// With partial_response off, a hung backend must surface the context error at
+// the deadline (not hang forever, not masquerade as success).
+func TestCrossGroupPartialResponse_DisabledSlowBackendHonorsDeadline(t *testing.T) {
+	apis := []API{
+		&blockingStub{key: model.LabelSet{"server_group": "sg0"}, block: true},
+		&blockingStub{key: model.LabelSet{"server_group": "sg1"}, val: vec("cpu", "sg1")},
+	}
+	m := crossGroupPartial(t, apis, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, _, err := m.Query(ctx, "cpu", time.Now())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a context error when a backend hangs and partial_response is off")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("query did not honor the deadline; took %s", elapsed)
 	}
 }
 

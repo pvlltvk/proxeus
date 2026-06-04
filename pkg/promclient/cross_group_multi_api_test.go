@@ -262,3 +262,72 @@ func TestNewCrossGroupMultiAPI_SeriesNoDedupWhenDisabled(t *testing.T) {
 		t.Fatalf("expected 2 series (no dedup), got %d: %v", len(got), got)
 	}
 }
+
+// TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal verifies that
+// collision attribution is exact when the colliding series exists only in
+// backends 1 and 2 (not 0). The lowest ordinal that actually contributes the
+// winner is sg1, so the counter must record {winner=sg1, loser=sg2} and zero
+// for {sg0, sg2}.
+//
+// The chained binary form misattributed this: after merging backends 0+1 into
+// an accumulator, it presented the accumulator under the running-minimum ordinal
+// (0), so merging backend 2 blamed sg0 for a series it never served. The n-way
+// merge buckets each series under its true origin ordinal, giving exact attribution.
+func TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal(t *testing.T) {
+	api0 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "mem", "backend": "sg0"}, Value: 7, Timestamp: 100},
+			}
+		},
+	}
+	api1 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg1"}, Value: 1, Timestamp: 100},
+			}
+		},
+	}
+	api2 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg2"}, Value: 2, Timestamp: 100},
+			}
+		},
+	}
+
+	groupNames := []string{"sg0", "sg1", "sg2"}
+	groupLabels := []model.LabelSet{{"backend": "sg0"}, {"backend": "sg1"}, {"backend": "sg2"}}
+
+	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_collision_attribution_middle_total",
+	}, []string{"winner", "loser"})
+
+	m, err := NewCrossGroupMultiAPI([]API{api0, api1, api2}, groupNames, groupLabels, counter, false, nil, false)
+	if err != nil {
+		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
+	}
+
+	v, _, err := m.Query(context.Background(), "cpu", time.Now())
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	// cpu must come from sg1 (lower of the two contributing ordinals).
+	vec, ok := v.(model.Vector)
+	if !ok {
+		t.Fatalf("expected model.Vector, got %T", v)
+	}
+	for _, s := range vec {
+		if s.Metric["__name__"] == "cpu" && s.Metric["backend"] != "sg1" {
+			t.Fatalf("cpu: expected winner backend sg1, got %q", s.Metric["backend"])
+		}
+	}
+
+	if got := testutil.ToFloat64(counter.WithLabelValues("sg1", "sg2")); got != 1 {
+		t.Fatalf("expected collision attributed to winner=sg1 loser=sg2 (=1), got %v", got)
+	}
+	if got := testutil.ToFloat64(counter.WithLabelValues("sg0", "sg2")); got != 0 {
+		t.Fatalf("collision misattributed to sg0 (which never served cpu): sg0/sg2=%v, want 0", got)
+	}
+}
