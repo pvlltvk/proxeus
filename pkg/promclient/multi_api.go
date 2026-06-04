@@ -61,26 +61,36 @@ func NormalizePromError(err error) error {
 // the specific API calls made through this multi client
 type MultiAPIMetricFunc func(i int, api, status string, took float64)
 
-// MergeFunc is the function MultiAPI uses to combine two model.Value results.
-// idxA and idxB are the source indices (ordinals) of the two operands within
-// the apis slice. The default implementation ignores them; the cross-group
-// implementation uses them for tie-breaking.
-//
-// Invariant relied on by the cross-group dedup implementation: the result-collection
-// loops in Query/QueryRange/GetValue iterate `i := 0..len(apis)-1` and block on
-// resultChans[i] in order, so `i` is always the true ordinal of the contributing
-// API. The running `resultIdx` is updated as `min(resultIdx, i)` after each merge.
-// If those loops are ever rewritten to consume channels in arrival order (a
-// `select` across all channels), the ordinals passed here will no longer be
-// the source ordinals and tie-breaking will silently break.
-type MergeFunc func(a, b model.Value, idxA, idxB int) (model.Value, error)
+// OrdinalValue pairs one backend's value result with its source ordinal (its
+// index within the apis slice / YAML server_group order).
+type OrdinalValue struct {
+	Value   model.Value
+	Ordinal int
+}
 
-// MergeSeriesFunc merges the result of two backends' Series() calls.
-// idxA and idxB are the server_group ordinals so dedup callbacks can resolve
-// collisions by tie-break. The default implementation set in NewMultiAPI
-// ignores ordinals and falls back to set-union (MergeLabelSets); cross-group
-// callers override it for reduced-fingerprint dedup.
-type MergeSeriesFunc func(a, b []model.LabelSet, idxA, idxB int) []model.LabelSet
+// OrdinalSeries pairs one backend's Series() result with its source ordinal.
+type OrdinalSeries struct {
+	Series  []model.LabelSet
+	Ordinal int
+}
+
+// MergeFunc folds the successful per-backend values into a single result. The
+// inputs are provided sorted by ascending ordinal, so a fold preserves
+// YAML/server_group priority regardless of the order the backends actually
+// responded in. The default implementation (NewMultiAPI) does within-group HA
+// merging and ignores ordinals; the cross-group implementation does
+// deterministic n-way dedup keyed on ordinal.
+//
+// Collection order is intentionally decoupled from merge order: MultiAPI gathers
+// responses as they arrive (no head-of-line blocking, partial-response aware on
+// cancellation) but always merges in ascending-ordinal order here.
+type MergeFunc func(results []OrdinalValue) (model.Value, error)
+
+// MergeSeriesFunc folds the successful per-backend Series() results into one
+// labelset slice, inputs sorted by ascending ordinal. The default set-unions
+// (MergeLabelSets); cross-group callers override it for reduced-fingerprint
+// dedup.
+type MergeSeriesFunc func(results []OrdinalSeries) []model.LabelSet
 
 // NewMustMultiAPI returns a MultiAPI
 func NewMustMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
@@ -120,13 +130,35 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		requiredCount:   requiredCount,
 		preferMax:       preferMax,
 	}
-	// Default merge: within-group HA semantics; ordinals are ignored.
-	m.mergeFn = func(a, b model.Value, _, _ int) (model.Value, error) {
-		return promhttputil.MergeValues(m.antiAffinity, a, b, m.preferMax)
+	// Default merge: within-group HA semantics; ordinals are ignored. Inputs are
+	// sorted by ascending ordinal, so this left-fold matches the historical
+	// index-order merge exactly.
+	m.mergeFn = func(results []OrdinalValue) (model.Value, error) {
+		var merged model.Value
+		for _, r := range results {
+			if merged == nil {
+				merged = r.Value
+				continue
+			}
+			v, err := promhttputil.MergeValues(m.antiAffinity, merged, r.Value, m.preferMax)
+			if err != nil {
+				return nil, err
+			}
+			merged = v
+		}
+		return merged, nil
 	}
 	// Default series merge: set union; ordinals are ignored.
-	m.mergeSeriesFn = func(a, b []model.LabelSet, _, _ int) []model.LabelSet {
-		return MergeLabelSets(a, b)
+	m.mergeSeriesFn = func(results []OrdinalSeries) []model.LabelSet {
+		var merged []model.LabelSet
+		for _, r := range results {
+			if merged == nil {
+				merged = r.Series
+				continue
+			}
+			merged = MergeLabelSets(merged, r.Series)
+		}
+		return merged
 	}
 	return m, nil
 }
@@ -187,76 +219,146 @@ func partialWarning(i int, err error) v1.Warnings {
 	return v1.Warnings{fmt.Sprintf("partial_response: backend[%d] unavailable: %s", i, err.Error())}
 }
 
-// LabelValues performs a query for the values of the given label.
-func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []string, startTime time.Time, endTime time.Time) (model.LabelValues, v1.Warnings, error) {
+// gathered is one backend's successful response plus the ordinal it came from.
+type gathered[T any] struct {
+	value   T
+	ordinal int
+}
+
+// scatterGather fans `call` out across all of m.apis concurrently and collects
+// the responses in arrival order — there is no head-of-line blocking on a slow
+// low-ordinal backend. It applies the requiredCount / partialResponse policy via
+// m.abortOnError / m.missingRequired and accumulates warnings.
+//
+// It is partial-aware on context cancellation: if the caller's ctx is canceled
+// (e.g. the PromQL engine's query deadline) after at least one backend has
+// already answered and partialResponse is on, it returns the successes gathered
+// so far (with a warning) instead of discarding everything with ctx.Err(). This
+// is the fix for the case where a low-ordinal backend hangs past the deadline:
+// previously the whole query failed even though healthy backends had responded.
+//
+// Successful results are returned sorted by ascending ordinal so callers merge
+// deterministically (lowest server_group first), independent of arrival order.
+func scatterGather[T any](
+	ctx context.Context,
+	m *MultiAPI,
+	apiName string,
+	call func(ctx context.Context, api API) (T, v1.Warnings, error),
+) ([]gathered[T], promhttputil.WarningSet, error) {
 	childContext, childContextCancel := context.WithCancel(ctx)
 	defer childContextCancel()
 
-	type chanResult struct {
-		v        model.LabelValues
+	type rawResult struct {
+		value    T
 		warnings v1.Warnings
 		err      error
 		ls       model.Fingerprint
+		ordinal  int
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
+	resultChan := make(chan rawResult, len(m.apis))
+	outstanding := make(map[model.Fingerprint]int) // fingerprint -> outstanding
+	for i := range m.apis {
+		outstanding[m.apiFingerprints[i]]++
+	}
 
 	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API, label string) {
+		go func(i int, api API) {
 			start := time.Now()
-			result, w, err := api.LabelValues(childContext, label, matchers, startTime, endTime)
+			value, w, err := call(childContext, api)
 			took := time.Since(start)
 			if err != nil {
-				m.recordMetric(i, "label_values", "error", took.Seconds())
+				m.recordMetric(i, apiName, "error", took.Seconds())
 			} else {
-				m.recordMetric(i, "label_values", "success", took.Seconds())
+				m.recordMetric(i, apiName, "success", took.Seconds())
 			}
-			retChan <- chanResult{
-				v:        result,
+			resultChan <- rawResult{
+				value:    value,
 				warnings: w,
 				err:      NormalizePromError(err),
 				ls:       m.apiFingerprints[i],
+				ordinal:  i,
 			}
-		}(i, resultChans[i], api, label)
+		}(i, api)
 	}
 
-	// Wait for results as we get them
-	var result []model.LabelValue
 	warnings := make(promhttputil.WarningSet)
-	var lastError error
 	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
+	results := make([]gathered[T], 0, len(m.apis))
+	var lastError error
+
+	for n := 0; n < len(m.apis); n++ {
 		select {
 		case <-ctx.Done():
-			return nil, warnings.Warnings(), ctx.Err()
+			// Caller deadline/cancel fired. In partial-response mode, keep what
+			// already succeeded rather than discarding it; otherwise honor it.
+			if m.partialResponse && len(results) > 0 {
+				warnings.AddWarnings(v1.Warnings{fmt.Sprintf(
+					"partial_response: %s returning %d/%d backends after cancellation: %s",
+					apiName, len(results), len(m.apis), ctx.Err())})
+				sortGathered(results)
+				return results, warnings, nil
+			}
+			return nil, warnings, ctx.Err()
 
-		case ret := <-resultChans[i]:
+		case ret := <-resultChan:
 			warnings.AddWarnings(ret.warnings)
-			outstandingRequests[ret.ls]--
+			outstanding[ret.ls]--
 			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, warnings.Warnings(), ret.err
+				if m.abortOnError(ret.ls, outstanding, successMap) {
+					return nil, warnings, ret.err
 				}
 				if m.partialResponse {
-					warnings.AddWarnings(partialWarning(i, ret.err))
+					warnings.AddWarnings(partialWarning(ret.ordinal, ret.err))
 				}
 				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				if result == nil {
-					result = ret.v
-				} else {
-					result = MergeLabelValues(result, ret.v)
-				}
+				continue
 			}
+			successMap[ret.ls]++
+			results = append(results, gathered[T]{value: ret.value, ordinal: ret.ordinal})
 		}
 	}
 
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
+	if m.missingRequired(outstanding, successMap) {
+		return nil, warnings, errors.Wrap(lastError, "Unable to fetch from downstream servers")
+	}
+
+	sortGathered(results)
+	return results, warnings, nil
+}
+
+// sortGathered orders gathered results by ascending source ordinal.
+func sortGathered[T any](results []gathered[T]) {
+	sort.Slice(results, func(i, j int) bool { return results[i].ordinal < results[j].ordinal })
+}
+
+// toOrdinalValues adapts gathered value results into the merge-hook input.
+func toOrdinalValues(results []gathered[model.Value]) []OrdinalValue {
+	out := make([]OrdinalValue, len(results))
+	for i, r := range results {
+		out[i] = OrdinalValue{Value: r.value, Ordinal: r.ordinal}
+	}
+	return out
+}
+
+// LabelValues performs a query for the values of the given label.
+func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []string, startTime time.Time, endTime time.Time) (model.LabelValues, v1.Warnings, error) {
+	results, warnings, err := scatterGather(ctx, m, "label_values",
+		func(ctx context.Context, api API) (model.LabelValues, v1.Warnings, error) {
+			return api.LabelValues(ctx, label, matchers, startTime, endTime)
+		})
+	if err != nil {
+		return nil, warnings.Warnings(), err
+	}
+
+	// Label values are a set union; merge order does not matter.
+	var result []model.LabelValue
+	for _, r := range results {
+		if result == nil {
+			result = r.value
+		} else {
+			result = MergeLabelValues(result, r.value)
+		}
 	}
 
 	sort.Sort(model.LabelValues(result))
@@ -266,72 +368,20 @@ func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []str
 
 // LabelNames returns all the unique label names present in the block in sorted order.
 func (m *MultiAPI) LabelNames(ctx context.Context, matchers []string, startTime time.Time, endTime time.Time) ([]string, v1.Warnings, error) {
-	childContext, childContextCancel := context.WithCancel(ctx)
-	defer childContextCancel()
-
-	type chanResult struct {
-		v        []string
-		warnings v1.Warnings
-		err      error
-		ls       model.Fingerprint
+	results, warnings, err := scatterGather(ctx, m, "label_names",
+		func(ctx context.Context, api API) ([]string, v1.Warnings, error) {
+			return api.LabelNames(ctx, matchers, startTime, endTime)
+		})
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
-
-	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API) {
-			start := time.Now()
-			result, w, err := api.LabelNames(childContext, matchers, startTime, endTime)
-			took := time.Since(start)
-			if err != nil {
-				m.recordMetric(i, "label_names", "error", took.Seconds())
-			} else {
-				m.recordMetric(i, "label_names", "success", took.Seconds())
-			}
-			retChan <- chanResult{
-				v:        result,
-				warnings: w,
-				err:      NormalizePromError(err),
-				ls:       m.apiFingerprints[i],
-			}
-		}(i, resultChans[i], api)
-	}
-
-	// Wait for results as we get them
+	// Label names are a set union; merge order does not matter.
 	result := make(map[string]struct{})
-	warnings := make(promhttputil.WarningSet)
-	var lastError error
-	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, warnings.Warnings(), ctx.Err()
-
-		case ret := <-resultChans[i]:
-			warnings.AddWarnings(ret.warnings)
-			outstandingRequests[ret.ls]--
-			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, warnings.Warnings(), ret.err
-				}
-				if m.partialResponse {
-					warnings.AddWarnings(partialWarning(i, ret.err))
-				}
-				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				for _, v := range ret.v {
-					result[v] = struct{}{}
-				}
-			}
+	for _, r := range results {
+		for _, v := range r.value {
+			result[v] = struct{}{}
 		}
-	}
-
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	stringResult := make([]string, 0, len(result))
@@ -346,405 +396,101 @@ func (m *MultiAPI) LabelNames(ctx context.Context, matchers []string, startTime 
 
 // Query performs a query for the given time.
 func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model.Value, v1.Warnings, error) {
-	childContext, childContextCancel := context.WithCancel(ctx)
-	defer childContextCancel()
-
-	type chanResult struct {
-		v        model.Value
-		warnings v1.Warnings
-		err      error
-		ls       model.Fingerprint
+	results, warnings, err := scatterGather(ctx, m, "query",
+		func(ctx context.Context, api API) (model.Value, v1.Warnings, error) {
+			return api.Query(ctx, query, ts)
+		})
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
-
-	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API, query string, ts time.Time) {
-			start := time.Now()
-			result, w, err := api.Query(childContext, query, ts)
-			took := time.Since(start)
-			if err != nil {
-				m.recordMetric(i, "query", "error", took.Seconds())
-			} else {
-				m.recordMetric(i, "query", "success", took.Seconds())
-			}
-			retChan <- chanResult{
-				v:        result,
-				warnings: w,
-				err:      NormalizePromError(err),
-				ls:       m.apiFingerprints[i],
-			}
-		}(i, resultChans[i], api, query, ts)
+	merged, err := m.mergeFn(toOrdinalValues(results))
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	// Wait for results as we get them
-	var result model.Value
-	resultIdx := -1
-	warnings := make(promhttputil.WarningSet)
-	var lastError error
-	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, warnings.Warnings(), ctx.Err()
-
-		case ret := <-resultChans[i]:
-			warnings.AddWarnings(ret.warnings)
-			outstandingRequests[ret.ls]--
-			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, warnings.Warnings(), ret.err
-				}
-				if m.partialResponse {
-					warnings.AddWarnings(partialWarning(i, ret.err))
-				}
-				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				if result == nil {
-					result = ret.v
-					resultIdx = i
-				} else {
-					var err error
-					result, err = m.mergeFn(result, ret.v, resultIdx, i)
-					if err != nil {
-						return nil, warnings.Warnings(), err
-					}
-					if i < resultIdx {
-						resultIdx = i
-					}
-				}
-			}
-		}
-	}
-
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-	}
-
-	return result, warnings.Warnings(), nil
+	return merged, warnings.Warnings(), nil
 }
 
 // QueryRange performs a query for the given range.
 func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (model.Value, v1.Warnings, error) {
-	childContext, childContextCancel := context.WithCancel(ctx)
-	defer childContextCancel()
-
-	type chanResult struct {
-		v        model.Value
-		warnings v1.Warnings
-		err      error
-		ls       model.Fingerprint
+	results, warnings, err := scatterGather(ctx, m, "query_range",
+		func(ctx context.Context, api API) (model.Value, v1.Warnings, error) {
+			return api.QueryRange(ctx, query, r)
+		})
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
-
-	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API, query string, r v1.Range) {
-			start := time.Now()
-			result, w, err := api.QueryRange(childContext, query, r)
-			took := time.Since(start)
-			if err != nil {
-				m.recordMetric(i, "query_range", "error", took.Seconds())
-			} else {
-				m.recordMetric(i, "query_range", "success", took.Seconds())
-			}
-			retChan <- chanResult{
-				v:        result,
-				warnings: w,
-				err:      NormalizePromError(err),
-				ls:       m.apiFingerprints[i],
-			}
-		}(i, resultChans[i], api, query, r)
+	merged, err := m.mergeFn(toOrdinalValues(results))
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	// Wait for results as we get them
-	var result model.Value
-	resultIdx := -1
-	warnings := make(promhttputil.WarningSet)
-	var lastError error
-	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, warnings.Warnings(), ctx.Err()
-
-		case ret := <-resultChans[i]:
-			warnings.AddWarnings(ret.warnings)
-			outstandingRequests[ret.ls]--
-			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, warnings.Warnings(), ret.err
-				}
-				if m.partialResponse {
-					warnings.AddWarnings(partialWarning(i, ret.err))
-				}
-				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				if result == nil {
-					result = ret.v
-					resultIdx = i
-				} else {
-					var err error
-					result, err = m.mergeFn(result, ret.v, resultIdx, i)
-					if err != nil {
-						return nil, warnings.Warnings(), err
-					}
-					if i < resultIdx {
-						resultIdx = i
-					}
-				}
-			}
-		}
-	}
-
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-	}
-
-	return result, warnings.Warnings(), nil
+	return merged, warnings.Warnings(), nil
 }
 
 // Series finds series by label matchers.
 func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.Time, endTime time.Time) ([]model.LabelSet, v1.Warnings, error) {
-	childContext, childContextCancel := context.WithCancel(ctx)
-	defer childContextCancel()
-
-	type chanResult struct {
-		v        []model.LabelSet
-		warnings v1.Warnings
-		err      error
-		ls       model.Fingerprint
+	results, warnings, err := scatterGather(ctx, m, "series",
+		func(ctx context.Context, api API) ([]model.LabelSet, v1.Warnings, error) {
+			return api.Series(ctx, matches, startTime, endTime)
+		})
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
-
-	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API) {
-			start := time.Now()
-			result, w, err := api.Series(childContext, matches, startTime, endTime)
-			took := time.Since(start)
-			if err != nil {
-				m.recordMetric(i, "series", "error", took.Seconds())
-			} else {
-				m.recordMetric(i, "series", "success", took.Seconds())
-			}
-			retChan <- chanResult{
-				v:        result,
-				warnings: w,
-				err:      NormalizePromError(err),
-				ls:       m.apiFingerprints[i],
-			}
-		}(i, resultChans[i], api)
+	ordinalSeries := make([]OrdinalSeries, len(results))
+	for i, r := range results {
+		ordinalSeries[i] = OrdinalSeries{Series: r.value, Ordinal: r.ordinal}
 	}
 
-	// Wait for results as we get them
-	var result []model.LabelSet
-	resultIdx := -1
-	warnings := make(promhttputil.WarningSet)
-	var lastError error
-	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, warnings.Warnings(), ctx.Err()
-
-		case ret := <-resultChans[i]:
-			warnings.AddWarnings(ret.warnings)
-			outstandingRequests[ret.ls]--
-			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, warnings.Warnings(), ret.err
-				}
-				if m.partialResponse {
-					warnings.AddWarnings(partialWarning(i, ret.err))
-				}
-				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				if result == nil {
-					result = ret.v
-					resultIdx = i
-				} else {
-					result = m.mergeSeriesFn(result, ret.v, resultIdx, i)
-					if i < resultIdx {
-						resultIdx = i
-					}
-				}
-			}
-		}
-	}
-
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-	}
-
-	return result, warnings.Warnings(), nil
+	return m.mergeSeriesFn(ordinalSeries), warnings.Warnings(), nil
 }
 
 // GetValue fetches a `model.Value` which represents the actual collected data
 func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers []*labels.Matcher) (model.Value, v1.Warnings, error) {
-	childContext, childContextCancel := context.WithCancel(ctx)
-	defer childContextCancel()
-
-	type chanResult struct {
-		v        model.Value
-		warnings v1.Warnings
-		err      error
-		ls       model.Fingerprint
+	results, warnings, err := scatterGather(ctx, m, "get_value",
+		func(ctx context.Context, api API) (model.Value, v1.Warnings, error) {
+			return api.GetValue(ctx, start, end, matchers)
+		})
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
-
-	// Scatter out all the queries
-	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API) {
-			queryStart := time.Now()
-			result, w, err := api.GetValue(childContext, start, end, matchers)
-			took := time.Since(queryStart)
-			if err != nil {
-				m.recordMetric(i, "get_value", "error", took.Seconds())
-			} else {
-				m.recordMetric(i, "get_value", "success", took.Seconds())
-			}
-			retChan <- chanResult{
-				v:        result,
-				warnings: w,
-				err:      NormalizePromError(err),
-				ls:       m.apiFingerprints[i],
-			}
-		}(i, resultChans[i], api)
+	merged, err := m.mergeFn(toOrdinalValues(results))
+	if err != nil {
+		return nil, warnings.Warnings(), err
 	}
 
-	// Wait for results as we get them
-	var result model.Value
-	resultIdx := -1
-	warnings := make(promhttputil.WarningSet)
-	var lastError error
-	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, warnings.Warnings(), ctx.Err()
-
-		case ret := <-resultChans[i]:
-			warnings.AddWarnings(ret.warnings)
-			outstandingRequests[ret.ls]--
-			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, warnings.Warnings(), ret.err
-				}
-				if m.partialResponse {
-					warnings.AddWarnings(partialWarning(i, ret.err))
-				}
-				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				if result == nil {
-					result = ret.v
-					resultIdx = i
-				} else {
-					var err error
-					result, err = m.mergeFn(result, ret.v, resultIdx, i)
-					if err != nil {
-						return nil, warnings.Warnings(), err
-					}
-					if i < resultIdx {
-						resultIdx = i
-					}
-				}
-			}
-		}
-	}
-
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, warnings.Warnings(), errors.Wrap(lastError, "Unable to fetch from downstream servers")
-	}
-
-	return result, warnings.Warnings(), nil
+	return merged, warnings.Warnings(), nil
 }
 
 // Metadata returns metadata about metrics currently scraped by the metric name.
 func (m *MultiAPI) Metadata(ctx context.Context, metric, limit string) (map[string][]v1.Metadata, error) {
-	childContext, childContextCancel := context.WithCancel(ctx)
-	defer childContextCancel()
-
-	type chanResult struct {
-		v   map[string][]v1.Metadata
-		err error
-		ls  model.Fingerprint
+	// Metadata has no warnings channel; adapt it to scatterGather's shape.
+	results, _, err := scatterGather(ctx, m, "query",
+		func(ctx context.Context, api API) (map[string][]v1.Metadata, v1.Warnings, error) {
+			v, err := api.Metadata(ctx, metric, limit)
+			return v, nil, err
+		})
+	if err != nil {
+		return nil, err
 	}
 
-	resultChans := make([]chan chanResult, len(m.apis))
-	outstandingRequests := make(map[model.Fingerprint]int) // fingerprint -> outstanding
-
-	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
-		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API, metric, limit string) {
-			start := time.Now()
-			result, err := api.Metadata(childContext, metric, limit)
-			took := time.Since(start)
-			if err != nil {
-				m.recordMetric(i, "query", "error", took.Seconds())
-			} else {
-				m.recordMetric(i, "query", "success", took.Seconds())
-			}
-			retChan <- chanResult{
-				v:   result,
-				err: NormalizePromError(err),
-				ls:  m.apiFingerprints[i],
-			}
-		}(i, resultChans[i], api, metric, limit)
-	}
-
-	// Wait for results as we get them
+	// First writer wins per metric name. Results are sorted by ascending
+	// ordinal, so the lowest server_group deterministically wins.
 	var result map[string][]v1.Metadata
-	var lastError error
-	successMap := make(map[model.Fingerprint]int) // fingerprint -> success
-	for i := 0; i < len(m.apis); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-
-		case ret := <-resultChans[i]:
-			outstandingRequests[ret.ls]--
-			if ret.err != nil {
-				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
-					return nil, ret.err
-				}
-				lastError = ret.err
-			} else {
-				successMap[ret.ls]++
-				if result == nil {
-					result = ret.v
-				} else {
-					// Merge metadata!
-					for k, v := range ret.v {
-						if _, ok := result[k]; !ok {
-							result[k] = v
-						}
-					}
-				}
+	for _, r := range results {
+		if result == nil {
+			result = r.value
+			continue
+		}
+		for k, v := range r.value {
+			if _, ok := result[k]; !ok {
+				result[k] = v
 			}
 		}
-	}
-
-	if m.missingRequired(outstandingRequests, successMap) {
-		return nil, errors.Wrap(lastError, "Unable to fetch from downstream servers")
 	}
 
 	return result, nil
