@@ -3,12 +3,14 @@ package promxyui
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 
 	proxyconfig "github.com/jacksontj/promxy/pkg/config"
 	"github.com/jacksontj/promxy/pkg/proxystorage"
@@ -18,6 +20,7 @@ import (
 const (
 	defaultProbeInterval = 30 * time.Second
 	defaultProbeTimeout  = 5 * time.Second
+	maxProbeConcurrency  = 8
 )
 
 // probeKey uniquely identifies a (group, target) pair.
@@ -115,6 +118,7 @@ func (p *Prober) Run(ctx context.Context) {
 }
 
 // probeAll walks every (group, target) in the current configuration.
+// Per-target probes run concurrently, bounded by maxProbeConcurrency.
 func (p *Prober) probeAll(ctx context.Context) {
 	cfg := p.ps.Config()
 	if cfg == nil {
@@ -129,6 +133,9 @@ func (p *Prober) probeAll(ctx context.Context) {
 		}
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxProbeConcurrency)
+
 	for _, sgCfg := range cfg.PromxyConfig.ServerGroups {
 		sg, ok := sgByName[sgCfg.Name]
 		if !ok {
@@ -140,13 +147,24 @@ func (p *Prober) probeAll(ctx context.Context) {
 		}
 		client := p.clientForGroup(sg)
 		for _, target := range sgState.Targets {
+			// Capture loop variables for the goroutine.
+			sgCfg, target := sgCfg, target
 			key := probeKey{group: sgCfg.Name, target: target}
-			result := p.probeTarget(ctx, client, sgCfg, target)
-			p.mu.Lock()
-			p.results[key] = result
-			p.mu.Unlock()
+			g.Go(func() error {
+				if gctx.Err() != nil {
+					return nil
+				}
+				result := p.probeTarget(gctx, client, sgCfg, target)
+				p.mu.Lock()
+				p.results[key] = result
+				p.mu.Unlock()
+				return nil
+			})
 		}
 	}
+	// Wait for all probes; errors are suppressed (probeTarget never returns
+	// one — results carry their own error strings).
+	g.Wait() //nolint:errcheck
 }
 
 // clientForGroup returns an HTTP client that probes through the server_group's
@@ -198,6 +216,7 @@ func (p *Prober) probeTarget(ctx context.Context, client *http.Client, sgCfg *se
 	if resp.StatusCode != http.StatusOK {
 		// buildinfo non-200 — try /api/v1/labels as a liveness fallback.
 		// Drain and close the buildinfo response so the connection can be reused.
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
 		resp.Body.Close()
 		healthy, fallbackErr := p.checkLabelsEndpoint(ctx, client, base)
 		return ProbeResult{

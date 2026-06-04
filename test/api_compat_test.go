@@ -418,4 +418,3 @@ func counterValue(t *testing.T, name string) float64 {
 	}
 	return total
 }
-
