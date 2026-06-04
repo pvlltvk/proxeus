@@ -341,6 +341,15 @@ func toOrdinalValues(results []gathered[model.Value]) []OrdinalValue {
 	return out
 }
 
+// toOrdinalSeries adapts gathered series results into the merge-hook input.
+func toOrdinalSeries(results []gathered[[]model.LabelSet]) []OrdinalSeries {
+	out := make([]OrdinalSeries, len(results))
+	for i, r := range results {
+		out[i] = OrdinalSeries{Series: r.value, Ordinal: r.ordinal}
+	}
+	return out
+}
+
 // LabelValues performs a query for the values of the given label.
 func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []string, startTime time.Time, endTime time.Time) (model.LabelValues, v1.Warnings, error) {
 	results, warnings, err := scatterGather(ctx, m, "label_values",
@@ -352,16 +361,18 @@ func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []str
 	}
 
 	// Label values are a set union; merge order does not matter.
-	var result []model.LabelValue
+	seen := make(map[model.LabelValue]struct{})
 	for _, r := range results {
-		if result == nil {
-			result = r.value
-		} else {
-			result = MergeLabelValues(result, r.value)
+		for _, v := range r.value {
+			seen[v] = struct{}{}
 		}
 	}
 
-	sort.Sort(model.LabelValues(result))
+	result := make(model.LabelValues, 0, len(seen))
+	for v := range seen {
+		result = append(result, v)
+	}
+	sort.Sort(result)
 
 	return result, warnings.Warnings(), nil
 }
@@ -440,12 +451,7 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 		return nil, warnings.Warnings(), err
 	}
 
-	ordinalSeries := make([]OrdinalSeries, len(results))
-	for i, r := range results {
-		ordinalSeries[i] = OrdinalSeries{Series: r.value, Ordinal: r.ordinal}
-	}
-
-	return m.mergeSeriesFn(ordinalSeries), warnings.Warnings(), nil
+	return m.mergeSeriesFn(toOrdinalSeries(results)), warnings.Warnings(), nil
 }
 
 // GetValue fetches a `model.Value` which represents the actual collected data
