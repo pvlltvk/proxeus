@@ -7,21 +7,26 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-func dedupOpts(ignoreKey model.LabelName, ordA, ordB int) DedupOpts {
-	return DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{ignoreKey: {}},
-		OrdinalA:     ordA,
-		OrdinalB:     ordB,
-		NameA:        "group-a",
-		NameB:        "group-b",
+// ignoreSet builds an IgnoreLabels set from the given keys.
+func ignoreSet(keys ...model.LabelName) map[model.LabelName]struct{} {
+	m := make(map[model.LabelName]struct{}, len(keys))
+	for _, k := range keys {
+		m[k] = struct{}{}
 	}
+	return m
+}
+
+// merge2 merges exactly two values at the given ordinals — a convenience wrapper
+// over the n-way MergeValuesDeterministic for the many two-backend test cases.
+func merge2(a, b model.Value, ignore map[model.LabelName]struct{}, ordA, ordB int) (model.Value, *DedupStats, error) {
+	return MergeValuesDeterministic([]model.Value{a, b}, []int{ordA, ordB}, ignore)
 }
 
 func TestMergeValuesDeterministic_NilInputs(t *testing.T) {
-	opts := dedupOpts("server_group", 0, 1)
+	ignore := ignoreSet("server_group")
 
 	t.Run("both nil", func(t *testing.T) {
-		v, stats, err := MergeValuesDeterministic(nil, nil, opts)
+		v, stats, err := merge2(nil, nil, ignore, 0, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -38,7 +43,7 @@ func TestMergeValuesDeterministic_NilInputs(t *testing.T) {
 
 	t.Run("a nil", func(t *testing.T) {
 		vec := model.Vector{{Metric: model.Metric{"__name__": "foo"}, Value: 1, Timestamp: 1}}
-		v, stats, err := MergeValuesDeterministic(nil, vec, opts)
+		v, stats, err := merge2(nil, vec, ignore, 0, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -53,7 +58,7 @@ func TestMergeValuesDeterministic_NilInputs(t *testing.T) {
 
 	t.Run("b nil", func(t *testing.T) {
 		vec := model.Vector{{Metric: model.Metric{"__name__": "foo"}, Value: 1, Timestamp: 1}}
-		v, stats, err := MergeValuesDeterministic(vec, nil, opts)
+		v, stats, err := merge2(vec, nil, ignore, 0, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -68,10 +73,9 @@ func TestMergeValuesDeterministic_NilInputs(t *testing.T) {
 }
 
 func TestMergeValuesDeterministic_TypeMismatch(t *testing.T) {
-	opts := dedupOpts("server_group", 0, 1)
 	a := model.Vector{{Metric: model.Metric{"__name__": "foo"}, Value: 1, Timestamp: 1}}
 	b := model.Matrix{&model.SampleStream{Metric: model.Metric{"__name__": "foo"}}}
-	_, _, err := MergeValuesDeterministic(a, b, opts)
+	_, _, err := merge2(a, b, ignoreSet("server_group"), 0, 1)
 	if err == nil {
 		t.Fatal("expected error on type mismatch")
 	}
@@ -80,13 +84,7 @@ func TestMergeValuesDeterministic_TypeMismatch(t *testing.T) {
 func TestMergeValuesDeterministic_Vector(t *testing.T) {
 	// series that differ only in "server_group" label are considered collisions.
 	// lower ordinal wins.
-	opts := DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"server_group": {}},
-		OrdinalA:     0,
-		OrdinalB:     1,
-		NameA:        "thanos",
-		NameB:        "victoria",
-	}
+	ignore := ignoreSet("server_group")
 
 	sA := &model.Sample{
 		Metric:    model.Metric{"__name__": "cpu", "server_group": "thanos"},
@@ -108,7 +106,7 @@ func TestMergeValuesDeterministic_Vector(t *testing.T) {
 	a := model.Vector{sA}
 	b := model.Vector{sB, sOnly}
 
-	v, stats, err := MergeValuesDeterministic(a, b, opts)
+	v, stats, err := merge2(a, b, ignore, 0, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,13 +140,7 @@ func TestMergeValuesDeterministic_Vector(t *testing.T) {
 
 func TestMergeValuesDeterministic_VectorHigherOrdinalWins(t *testing.T) {
 	// When ordinalB < ordinalA the b side should win.
-	opts := DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"server_group": {}},
-		OrdinalA:     1,
-		OrdinalB:     0,
-		NameA:        "late",
-		NameB:        "early",
-	}
+	ignore := ignoreSet("server_group")
 
 	sA := &model.Sample{
 		Metric: model.Metric{"__name__": "cpu", "server_group": "late"},
@@ -159,7 +151,7 @@ func TestMergeValuesDeterministic_VectorHigherOrdinalWins(t *testing.T) {
 		Value:  20,
 	}
 
-	v, stats, err := MergeValuesDeterministic(model.Vector{sA}, model.Vector{sB}, opts)
+	v, stats, err := merge2(model.Vector{sA}, model.Vector{sB}, ignore, 1, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,17 +168,13 @@ func TestMergeValuesDeterministic_VectorHigherOrdinalWins(t *testing.T) {
 }
 
 func TestMergeValuesDeterministic_VectorNoCollision(t *testing.T) {
-	opts := DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"server_group": {}},
-		OrdinalA:     0,
-		OrdinalB:     1,
-	}
+	ignore := ignoreSet("server_group")
 
 	// Two completely different series (different __name__).
 	sA := &model.Sample{Metric: model.Metric{"__name__": "alpha", "server_group": "sg0"}, Value: 1}
 	sB := &model.Sample{Metric: model.Metric{"__name__": "beta", "server_group": "sg1"}, Value: 2}
 
-	v, stats, err := MergeValuesDeterministic(model.Vector{sA}, model.Vector{sB}, opts)
+	v, stats, err := merge2(model.Vector{sA}, model.Vector{sB}, ignore, 0, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -199,13 +187,7 @@ func TestMergeValuesDeterministic_VectorNoCollision(t *testing.T) {
 }
 
 func TestMergeValuesDeterministic_Matrix(t *testing.T) {
-	opts := DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"server_group": {}},
-		OrdinalA:     0,
-		OrdinalB:     1,
-		NameA:        "sg0",
-		NameB:        "sg1",
-	}
+	ignore := ignoreSet("server_group")
 
 	streamA := &model.SampleStream{
 		Metric: model.Metric{"__name__": "cpu", "server_group": "sg0"},
@@ -223,7 +205,7 @@ func TestMergeValuesDeterministic_Matrix(t *testing.T) {
 	a := model.Matrix{streamA}
 	b := model.Matrix{streamB, streamOnly}
 
-	v, stats, err := MergeValuesDeterministic(a, b, opts)
+	v, stats, err := merge2(a, b, ignore, 0, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -254,11 +236,7 @@ func TestMergeValuesDeterministic_Matrix(t *testing.T) {
 }
 
 func TestMergeValuesDeterministic_MatrixNoCollision(t *testing.T) {
-	opts := DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"server_group": {}},
-		OrdinalA:     0,
-		OrdinalB:     1,
-	}
+	ignore := ignoreSet("server_group")
 
 	streamA := &model.SampleStream{
 		Metric: model.Metric{"__name__": "cpu", "server_group": "sg0"},
@@ -269,7 +247,7 @@ func TestMergeValuesDeterministic_MatrixNoCollision(t *testing.T) {
 		Values: []model.SamplePair{{Timestamp: 1, Value: 5}},
 	}
 
-	v, stats, err := MergeValuesDeterministic(model.Matrix{streamA}, model.Matrix{streamB}, opts)
+	v, stats, err := merge2(model.Matrix{streamA}, model.Matrix{streamB}, ignore, 0, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -281,19 +259,18 @@ func TestMergeValuesDeterministic_MatrixNoCollision(t *testing.T) {
 	}
 }
 
-// TestM1_EmptyIgnoreFastPath verifies that MergeValuesDeterministic with an
-// empty (nil or zero-length) IgnoreLabels map produces the same result as
-// MergeValues and reports zero collisions.
-func TestM1_EmptyIgnoreFastPath(t *testing.T) {
+// TestMergeValuesDeterministic_EmptyIgnore verifies that an empty (nil or
+// zero-length) IgnoreLabels set reduces collision detection to plain exact-FP
+// dedup: distinct series pass through, identical series collapse, and no
+// cross-group collisions are reported.
+func TestMergeValuesDeterministic_EmptyIgnore(t *testing.T) {
 	t.Run("nil_ignore_distinct_series_matches_MergeValues", func(t *testing.T) {
-		// Two Vectors with completely different series.  With nil IgnoreLabels
-		// the fast-path must delegate to MergeValues(0,a,b,false).
 		sA := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 1, Timestamp: 100}
 		sB := &model.Sample{Metric: model.Metric{"__name__": "mem", "instance": "x"}, Value: 2, Timestamp: 100}
 		a := model.Vector{sA}
 		b := model.Vector{sB}
 
-		got, stats, err := MergeValuesDeterministic(a, b, DedupOpts{IgnoreLabels: nil})
+		got, stats, err := merge2(a, b, nil, 0, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -306,9 +283,8 @@ func TestM1_EmptyIgnoreFastPath(t *testing.T) {
 		gotVec := got.(model.Vector)
 		wantVec := want.(model.Vector)
 		if len(gotVec) != len(wantVec) {
-			t.Fatalf("len mismatch: fast-path=%d MergeValues=%d", len(gotVec), len(wantVec))
+			t.Fatalf("len mismatch: deterministic=%d MergeValues=%d", len(gotVec), len(wantVec))
 		}
-		// Both series must be present.
 		if len(gotVec) != 2 {
 			t.Fatalf("expected 2 series, got %d", len(gotVec))
 		}
@@ -318,16 +294,14 @@ func TestM1_EmptyIgnoreFastPath(t *testing.T) {
 	})
 
 	t.Run("empty_map_ignore_exact_fp_duplicate_no_collision", func(t *testing.T) {
-		// Two Vectors with identical series (exact-FP match).  The fast-path
-		// deduplicates to 1 series and must report 0 collisions — exact-FP
-		// duplicates are within-group, not cross-group collisions.
-		opts := DedupOpts{IgnoreLabels: map[model.LabelName]struct{}{}}
+		// Identical series (exact-FP match) deduplicate to 1 with 0 collisions —
+		// exact-FP duplicates are within-group, not cross-group collisions.
 		sA := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 5, Timestamp: 100}
 		sB := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 9, Timestamp: 100}
 		a := model.Vector{sA}
 		b := model.Vector{sB}
 
-		v, stats, err := MergeValuesDeterministic(a, b, opts)
+		v, stats, err := merge2(a, b, map[model.LabelName]struct{}{}, 0, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -341,12 +315,11 @@ func TestM1_EmptyIgnoreFastPath(t *testing.T) {
 	})
 }
 
-// BenchmarkMergeValuesDeterministic_EmptyIgnore compares the M1 fast-path
-// (IgnoreLabels nil) against the full slow path (IgnoreLabels non-empty) on a
-// 1000-sample Vector.  Run with:
+// BenchmarkMergeValuesDeterministic compares an empty IgnoreLabels set against a
+// non-empty one on a 1000-sample Vector.  Run with:
 //
 //	go test -bench=BenchmarkMergeValuesDeterministic -benchmem -run=^$ ./pkg/promhttputil/
-func BenchmarkMergeValuesDeterministic_EmptyIgnore(b *testing.B) {
+func BenchmarkMergeValuesDeterministic(b *testing.B) {
 	const n = 1000
 
 	makeVec := func(backend string) model.Vector {
@@ -368,23 +341,18 @@ func BenchmarkMergeValuesDeterministic_EmptyIgnore(b *testing.B) {
 	a := makeVec("sg0")
 	bVec := makeVec("sg1")
 
-	b.Run("fast_path_empty_ignore", func(b *testing.B) {
-		opts := DedupOpts{IgnoreLabels: nil}
+	b.Run("empty_ignore", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, _, _ = MergeValuesDeterministic(a, bVec, opts)
+			_, _, _ = merge2(a, bVec, nil, 0, 1)
 		}
 	})
 
-	b.Run("slow_path_nonempty_ignore", func(b *testing.B) {
-		opts := DedupOpts{
-			IgnoreLabels: map[model.LabelName]struct{}{"backend": {}},
-			OrdinalA:     0,
-			OrdinalB:     1,
-		}
+	b.Run("nonempty_ignore", func(b *testing.B) {
+		ignore := ignoreSet("backend")
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, _, _ = MergeValuesDeterministic(a, bVec, opts)
+			_, _, _ = merge2(a, bVec, ignore, 0, 1)
 		}
 	})
 }

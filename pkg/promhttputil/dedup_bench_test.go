@@ -64,18 +64,10 @@ func benchMetric(backend string, i, sharedSeries int) model.Metric {
 	}
 }
 
-func ignoreBackend() DedupOpts {
-	return DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"backend": {}},
-		OrdinalA:     0,
-		OrdinalB:     1,
-	}
-}
-
 // BenchmarkDedupVectorScaling sweeps cardinality at a realistic ~5% overlap to
-// expose how the slow path scales with series count.
+// expose how dedup scales with series count.
 func BenchmarkDedupVectorScaling(b *testing.B) {
-	opts := ignoreBackend()
+	ignore := ignoreSet("backend")
 	for _, n := range dedupSizes {
 		shared := n / 20 // 5% accidental overlap
 		a := benchVector("sg0", n, shared)
@@ -84,7 +76,7 @@ func BenchmarkDedupVectorScaling(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _, _ = MergeValuesDeterministic(a, bv, opts)
+				_, _, _ = merge2(a, bv, ignore, 0, 1)
 			}
 		})
 	}
@@ -95,7 +87,7 @@ func BenchmarkDedupVectorScaling(b *testing.B) {
 // samples-per-series; the points mostly drive payload size / allocations.
 func BenchmarkDedupMatrixScaling(b *testing.B) {
 	const nSamples = 300
-	opts := ignoreBackend()
+	ignore := ignoreSet("backend")
 	for _, n := range []int{1000, 10000} {
 		shared := n / 20
 		a := benchMatrix("sg0", n, shared, nSamples)
@@ -104,7 +96,7 @@ func BenchmarkDedupMatrixScaling(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _, _ = MergeValuesDeterministic(a, bv, opts)
+				_, _, _ = merge2(a, bv, ignore, 0, 1)
 			}
 		})
 	}
@@ -117,14 +109,11 @@ func BenchmarkDedupVectorCollisionSwap(b *testing.B) {
 	const n = 10000
 	a := benchVector("sg0", n, n)  // 100% shared
 	bv := benchVector("sg1", n, n) // 100% shared
-	opts := DedupOpts{
-		IgnoreLabels: map[model.LabelName]struct{}{"backend": {}},
-		OrdinalA:     1, // a is higher ordinal -> every b sample displaces a's winner
-		OrdinalB:     0,
-	}
+	// a is the higher ordinal, so every b sample displaces a's winner.
+	ignore := ignoreSet("backend")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, _ = MergeValuesDeterministic(a, bv, opts)
+		_, _, _ = merge2(a, bv, ignore, 1, 0)
 	}
 }

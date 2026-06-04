@@ -73,7 +73,7 @@ func NewCrossGroupMultiAPI(
 			values[i] = r.Value
 			ordinals[i] = r.Ordinal
 		}
-		merged, stats, err := promhttputil.MergeValuesDeterministicN(values, ordinals, ignoreLabels)
+		merged, stats, err := promhttputil.MergeValuesDeterministic(values, ordinals, ignoreLabels)
 		if err != nil {
 			return nil, err
 		}
@@ -93,7 +93,7 @@ func NewCrossGroupMultiAPI(
 				sets[i] = r.Series
 				ordinals[i] = r.Ordinal
 			}
-			merged, stats := MergeLabelSetsDeterministicN(sets, ordinals, ignoreLabels)
+			merged, stats := MergeLabelSetsDeterministic(sets, ordinals, ignoreLabels)
 			if dedupMetadataCounter != nil {
 				for pair, count := range stats.Pairs {
 					dedupMetadataCounter.WithLabelValues(names[pair[0]], names[pair[1]], "series").Add(float64(count))

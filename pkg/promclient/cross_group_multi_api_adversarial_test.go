@@ -206,8 +206,8 @@ func TestB1E2E_ThreeBackendsChainedMerge(t *testing.T) {
 }
 
 // TestB1E2E_QueryRangeDedup verifies that cross-group dedup works for
-// QueryRange (matrix results), which exercises mergeMatrixDeterministic through
-// the full MultiAPI path.
+// QueryRange (matrix results), which exercises the matrix merge path through
+// the full MultiAPI.
 func TestB1E2E_QueryRangeDedup(t *testing.T) {
 	api0 := &stubAPI{
 		queryRange: func(_ string, _ v1.Range) model.Value {
