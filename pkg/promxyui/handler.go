@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"html/template"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -50,20 +51,27 @@ type Handler struct {
 	prober *Prober
 	tmpl   *template.Template
 
+	// routePrefix is the -web.route-prefix the UI is served under (e.g. "/" or
+	// "/foo"). Used to build absolute redirect targets that honor the prefix.
+	routePrefix string
+
 	// inventoryFn, when non-nil, overrides prober.Inventory(). Used in tests.
 	inventoryFn func() Inventory
 }
 
 // NewHandler constructs a Handler. ps is used to initialise the background
-// Prober which health-checks every (group, target) every 30 s.
-func NewHandler(ps *proxystorage.ProxyStorage) (*Handler, error) {
+// Prober which health-checks every (group, target) every 30 s. routePrefix is
+// the -web.route-prefix the UI is served under and is used to build redirect
+// targets that honor the prefix.
+func NewHandler(ps *proxystorage.ProxyStorage, routePrefix string) (*Handler, error) {
 	tmpl, err := template.ParseFS(Templates, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
 	return &Handler{
-		prober: NewProber(ps),
-		tmpl:   tmpl,
+		prober:      NewProber(ps),
+		tmpl:        tmpl,
+		routePrefix: routePrefix,
 	}, nil
 }
 
@@ -84,8 +92,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(p, "/backends") || strings.HasSuffix(p, "/backends/"):
 		h.serveIndex(w, r)
 	default:
-		// /promxy/ and any other sub-path: redirect to the backends page.
-		http.Redirect(w, r, "/promxy/backends", http.StatusFound)
+		// /promxy/ and any other sub-path: redirect to the backends page,
+		// honoring the route prefix (path.Join cleans "" → "/promxy/backends").
+		http.Redirect(w, r, path.Join(h.routePrefix, "/promxy/backends"), http.StatusFound)
 	}
 }
 

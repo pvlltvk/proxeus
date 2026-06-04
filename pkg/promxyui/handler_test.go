@@ -130,6 +130,37 @@ func TestHandlerRoot_RedirectsToBackends(t *testing.T) {
 	}
 }
 
+func TestHandlerRedirect_HonorsRoutePrefix(t *testing.T) {
+	cases := []struct {
+		name        string
+		routePrefix string
+		reqPath     string
+		wantLoc     string
+	}{
+		{name: "root prefix", routePrefix: "", reqPath: "/promxy/", wantLoc: "/promxy/backends"},
+		{name: "root prefix slash", routePrefix: "/", reqPath: "/promxy/", wantLoc: "/promxy/backends"},
+		{name: "sub-path prefix", routePrefix: "/foo", reqPath: "/foo/promxy/", wantLoc: "/foo/promxy/backends"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandlerForTest(Inventory{GeneratedAt: time.Now()})
+			h.routePrefix = tc.routePrefix
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, tc.reqPath, nil)
+			h.ServeHTTP(w, r)
+
+			if w.Code != http.StatusFound {
+				t.Fatalf("expected 302, got %d", w.Code)
+			}
+			if loc := w.Header().Get("Location"); loc != tc.wantLoc {
+				t.Errorf("expected redirect to %q, got %q", tc.wantLoc, loc)
+			}
+		})
+	}
+}
+
 func TestHandlerBackendsJSON_EmptyGroups(t *testing.T) {
 	inv := Inventory{
 		GeneratedAt: time.Now(),

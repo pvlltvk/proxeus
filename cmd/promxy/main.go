@@ -51,8 +51,8 @@ import (
 	proxyconfig "github.com/jacksontj/promxy/pkg/config"
 	"github.com/jacksontj/promxy/pkg/logging"
 	"github.com/jacksontj/promxy/pkg/middleware"
-	"github.com/jacksontj/promxy/pkg/proxystorage"
 	"github.com/jacksontj/promxy/pkg/promxyui"
+	"github.com/jacksontj/promxy/pkg/proxystorage"
 	"github.com/jacksontj/promxy/pkg/server"
 
 	injectionUI "github.com/jacksontj/promxy/cmd/promxy/ui"
@@ -195,6 +195,21 @@ var reactRouteSet = map[string]bool{
 	"/backends":               true,
 }
 
+// isReactRoute reports whether urlPath (the full, possibly route-prefixed
+// request path) targets one of the Mantine UI routes. It strips routePrefix
+// before comparing against the unprefixed reactRouteSet keys. At the root
+// (routePrefix "/" or ""), the trim is a no-op so "/query" matches as before.
+func isReactRoute(routePrefix, urlPath string) bool {
+	trimmed := strings.TrimRight(routePrefix, "/")
+	rel := strings.TrimPrefix(urlPath, trimmed)
+	// Under a non-root prefix, require that the prefix was actually present;
+	// otherwise an unprefixed "/query" would be misrouted to the React app.
+	if trimmed != "" && rel == urlPath {
+		return false
+	}
+	return reactRouteSet[rel]
+}
+
 // serveInjectedReactApp opens index.html from the embedded Mantine UI assets,
 // applies the same placeholder substitutions that upstream web.Handler does,
 // and injects reactNavScript immediately before </body>.
@@ -230,16 +245,27 @@ func serveInjectedReactApp(w http.ResponseWriter, r *http.Request, opts *web.Opt
 	lookbackStr := model.Duration(opts.LookbackDelta).String()
 	idx = bytes.ReplaceAll(idx, []byte("LOOKBACKDELTA_PLACEHOLDER"), []byte(lookbackStr))
 
+	// prefix is "" at root and "/foo" under -web.route-prefix=/foo. All
+	// absolute UI/asset paths below are built from it so the page works
+	// whether served at the root or at a sub-path.
+	prefix := strings.TrimRight(opts.RoutePrefix, "/")
+
 	// Replace Prometheus favicon with Promxy icon.
-	idx = bytes.ReplaceAll(idx, []byte(`href="./favicon.svg"`), []byte(`href="/promxy/static/promxy-icon.svg"`))
+	idx = bytes.ReplaceAll(idx, []byte(`href="./favicon.svg"`), []byte(`href="`+prefix+`/promxy/static/promxy-icon.svg"`))
 
 	// Make asset URLs absolute so they resolve correctly when the page is
-	// served at a sub-path like /backends.
-	idx = bytes.ReplaceAll(idx, []byte(`"./assets/`), []byte(`"/assets/`))
-	idx = bytes.ReplaceAll(idx, []byte(`'./assets/`), []byte(`'/assets/`))
+	// served at a sub-path like /backends. Under a route prefix the upstream
+	// web handler serves the bundled assets at <prefix>/assets/.
+	idx = bytes.ReplaceAll(idx, []byte(`"./assets/`), []byte(`"`+prefix+`/assets/`))
+	idx = bytes.ReplaceAll(idx, []byte(`'./assets/`), []byte(`'`+prefix+`/assets/`))
+
+	// Expose the route prefix to the injected scripts so they can build their
+	// own absolute paths. Must be injected before reactHeadScript so head.js
+	// can read it.
+	prefixScript := fmt.Sprintf("<script>window.__PROMXY_ROUTE_PREFIX__=%q;</script>", prefix)
 
 	// Inject head script (blocks React Router navigation on /backends).
-	idx = bytes.ReplaceAll(idx, []byte("<head>"), []byte("<head>"+reactHeadScript))
+	idx = bytes.ReplaceAll(idx, []byte("<head>"), []byte("<head>"+prefixScript+reactHeadScript))
 
 	// Inject our nav script just before </body>.
 	idx = bytes.ReplaceAll(idx, []byte("</body>"), []byte(reactNavScript+"</body>"))
@@ -557,7 +583,7 @@ func main() {
 	webHandler.Getv1API().Register(webHandler.GetRouter().WithPrefix(apiPrefix))
 
 	// Create the promxy inventory UI handler.
-	promxyUIHandler, err := promxyui.NewHandler(ps)
+	promxyUIHandler, err := promxyui.NewHandler(ps, webOptions.RoutePrefix)
 	if err != nil {
 		logrus.Fatalf("Error creating promxy UI handler: %v", err)
 	}
@@ -589,7 +615,7 @@ func main() {
 			ps.WalReplayHandler(w, r)
 		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/status/flags") {
 			ps.FlagsHandler(w, r)
-		} else if reactRouteSet[r.URL.Path] {
+		} else if isReactRoute(webOptions.RoutePrefix, r.URL.Path) {
 			// Serve Mantine index.html with our nav injection.
 			// This must come before the /promxy prefix check so that
 			// /backends is served through the Mantine shell.

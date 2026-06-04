@@ -1,7 +1,8 @@
 (function(){
-  var ICON_URL = '/promxy/static/promxy-icon.svg';
-  var BACKENDS_PATH = '/backends';
-  var API_URL = '/promxy/api/backends.json';
+  var PREFIX = (window.__PROMXY_ROUTE_PREFIX__ || '');
+  var ICON_URL = PREFIX + '/promxy/static/promxy-icon.svg';
+  var BACKENDS_PATH = PREFIX + '/backends';
+  var API_URL = PREFIX + '/promxy/api/backends.json';
 
   // Text labels for nav items to hide from the dropdown.
   var HIDE_DROPDOWN_LABELS = {
@@ -31,10 +32,10 @@
   // browser navigation (bypassing React Router entirely).
   function fixBackendsHref(a) {
     // a.href is the fully-resolved absolute URL; use pathname to compare.
-    var pathname = a.pathname; // e.g. /backends/query
+    var pathname = a.pathname; // e.g. /backends/query (or <prefix>/backends/query)
     var prefix = BACKENDS_PATH + '/';
     if (pathname && pathname.indexOf(prefix) === 0) {
-      var corrected = '/' + pathname.slice(prefix.length);
+      var corrected = PREFIX + '/' + pathname.slice(prefix.length);
       a.href = corrected;
       // Mark so we only attach the listener once.
       if (!a.dataset.promxyFixed) {
