@@ -59,6 +59,9 @@ func (s *DedupStats) record(winner, loser int) {
 // This is intended only for cross-group merges where each group has distinct
 // external labels. Within-group HA dedup must continue to use MergeValues.
 func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[model.LabelName]struct{}) (model.Value, *DedupStats, error) {
+	if len(values) != len(ordinals) {
+		return nil, &DedupStats{}, fmt.Errorf("MergeValuesDeterministic: values/ordinals length mismatch (%d != %d)", len(values), len(ordinals))
+	}
 	stats := &DedupStats{}
 
 	type ordinalValue struct {

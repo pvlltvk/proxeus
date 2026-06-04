@@ -46,17 +46,17 @@ func MergeLabelSets(a, b []model.LabelSet) []model.LabelSet {
 	return a
 }
 
-// DedupLabelSetsStats reports collisions resolved by MergeLabelSetsDeterministic.
+// dedupLabelSetsStats reports collisions resolved by mergeLabelSetsDeterministic.
 // Collisions is the number of series-level collisions; Pairs breaks them down by
 // the {winnerOrdinal, loserOrdinal} that collided so callers can attribute each
 // to the exact server_groups. See DedupStats for why bucketing by origin ordinal
 // is needed for accurate attribution.
-type DedupLabelSetsStats struct {
+type dedupLabelSetsStats struct {
 	Collisions int
 	Pairs      map[[2]int]int
 }
 
-func (s *DedupLabelSetsStats) record(winner, loser int) {
+func (s *dedupLabelSetsStats) record(winner, loser int) {
 	s.Collisions++
 	if s.Pairs == nil {
 		s.Pairs = make(map[[2]int]int)
@@ -64,7 +64,7 @@ func (s *DedupLabelSetsStats) record(winner, loser int) {
 	s.Pairs[[2]int{winner, loser}]++
 }
 
-// MergeLabelSetsDeterministic merges N backends' /series results in one pass,
+// mergeLabelSetsDeterministic merges N backends' /series results in one pass,
 // each tagged with its source ordinal, resolving collisions (labelsets that
 // match modulo ignore) by lowest ordinal. The winning labelset keeps its full
 // label set (including the backend's external labels) so the /series response is
@@ -77,8 +77,9 @@ func (s *DedupLabelSetsStats) record(winner, loser int) {
 //
 // This is intended only for cross-group merges where each group has distinct
 // external labels. Within-group HA dedup must continue to use MergeLabelSets.
-func MergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *DedupLabelSetsStats) {
-	stats := &DedupLabelSetsStats{}
+// Callers must pass equal-length sets and ordinals slices.
+func mergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *dedupLabelSetsStats) {
+	stats := &dedupLabelSetsStats{}
 
 	type entry struct {
 		idx     int

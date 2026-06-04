@@ -61,20 +61,20 @@ func NormalizePromError(err error) error {
 // the specific API calls made through this multi client
 type MultiAPIMetricFunc func(i int, api, status string, took float64)
 
-// OrdinalValue pairs one backend's value result with its source ordinal (its
+// ordinalValue pairs one backend's value result with its source ordinal (its
 // index within the apis slice / YAML server_group order).
-type OrdinalValue struct {
+type ordinalValue struct {
 	Value   model.Value
 	Ordinal int
 }
 
-// OrdinalSeries pairs one backend's Series() result with its source ordinal.
-type OrdinalSeries struct {
+// ordinalSeries pairs one backend's Series() result with its source ordinal.
+type ordinalSeries struct {
 	Series  []model.LabelSet
 	Ordinal int
 }
 
-// MergeFunc folds the successful per-backend values into a single result. The
+// mergeFunc folds the successful per-backend values into a single result. The
 // inputs are provided sorted by ascending ordinal, so a fold preserves
 // YAML/server_group priority regardless of the order the backends actually
 // responded in. The default implementation (NewMultiAPI) does within-group HA
@@ -84,13 +84,13 @@ type OrdinalSeries struct {
 // Collection order is intentionally decoupled from merge order: MultiAPI gathers
 // responses as they arrive (no head-of-line blocking, partial-response aware on
 // cancellation) but always merges in ascending-ordinal order here.
-type MergeFunc func(results []OrdinalValue) (model.Value, error)
+type mergeFunc func(results []ordinalValue) (model.Value, error)
 
-// MergeSeriesFunc folds the successful per-backend Series() results into one
+// mergeSeriesFunc folds the successful per-backend Series() results into one
 // labelset slice, inputs sorted by ascending ordinal. The default set-unions
 // (MergeLabelSets); cross-group callers override it for reduced-fingerprint
 // dedup.
-type MergeSeriesFunc func(results []OrdinalSeries) []model.LabelSet
+type mergeSeriesFunc func(results []ordinalSeries) []model.LabelSet
 
 // NewMustMultiAPI returns a MultiAPI
 func NewMustMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
@@ -133,7 +133,7 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 	// Default merge: within-group HA semantics; ordinals are ignored. Inputs are
 	// sorted by ascending ordinal, so this left-fold matches the historical
 	// index-order merge exactly.
-	m.mergeFn = func(results []OrdinalValue) (model.Value, error) {
+	m.mergeFn = func(results []ordinalValue) (model.Value, error) {
 		var merged model.Value
 		for _, r := range results {
 			if merged == nil {
@@ -149,7 +149,7 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		return merged, nil
 	}
 	// Default series merge: set union; ordinals are ignored.
-	m.mergeSeriesFn = func(results []OrdinalSeries) []model.LabelSet {
+	m.mergeSeriesFn = func(results []ordinalSeries) []model.LabelSet {
 		var merged []model.LabelSet
 		for _, r := range results {
 			if merged == nil {
@@ -171,8 +171,8 @@ type MultiAPI struct {
 	metricFunc      MultiAPIMetricFunc
 	requiredCount   int // number "per key" that we require to respond
 	preferMax       bool
-	mergeFn         MergeFunc
-	mergeSeriesFn   MergeSeriesFunc
+	mergeFn         mergeFunc
+	mergeSeriesFn   mergeSeriesFunc
 
 	// partialResponse, when true, relaxes requiredCount: the fan-out returns
 	// whatever responded (plus a warning per failed backend) instead of failing
@@ -333,19 +333,19 @@ func sortGathered[T any](results []gathered[T]) {
 }
 
 // toOrdinalValues adapts gathered value results into the merge-hook input.
-func toOrdinalValues(results []gathered[model.Value]) []OrdinalValue {
-	out := make([]OrdinalValue, len(results))
+func toOrdinalValues(results []gathered[model.Value]) []ordinalValue {
+	out := make([]ordinalValue, len(results))
 	for i, r := range results {
-		out[i] = OrdinalValue{Value: r.value, Ordinal: r.ordinal}
+		out[i] = ordinalValue{Value: r.value, Ordinal: r.ordinal}
 	}
 	return out
 }
 
 // toOrdinalSeries adapts gathered series results into the merge-hook input.
-func toOrdinalSeries(results []gathered[[]model.LabelSet]) []OrdinalSeries {
-	out := make([]OrdinalSeries, len(results))
+func toOrdinalSeries(results []gathered[[]model.LabelSet]) []ordinalSeries {
+	out := make([]ordinalSeries, len(results))
 	for i, r := range results {
-		out[i] = OrdinalSeries{Series: r.value, Ordinal: r.ordinal}
+		out[i] = ordinalSeries{Series: r.value, Ordinal: r.ordinal}
 	}
 	return out
 }
