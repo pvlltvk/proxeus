@@ -61,42 +61,43 @@ func NewCrossGroupMultiAPI(
 	names := make([]string, len(groupNames))
 	copy(names, groupNames)
 
-	m.mergeFn = func(a, b model.Value, idxA, idxB int) (model.Value, error) {
-		opts := promhttputil.DedupOpts{
-			IgnoreLabels: ignoreLabels,
-			OrdinalA:     idxA,
-			OrdinalB:     idxB,
-			NameA:        names[idxA],
-			NameB:        names[idxB],
+	// N-way merge in a single pass: every series is bucketed under its true
+	// origin ordinal, so collisions are attributed to the exact winner/loser
+	// server_group (the chained binary form misattributed them to the running
+	// minimum ordinal). MultiAPI feeds these hooks the successful results sorted
+	// by ascending ordinal.
+	m.mergeFn = func(results []OrdinalValue) (model.Value, error) {
+		values := make([]model.Value, len(results))
+		ordinals := make([]int, len(results))
+		for i, r := range results {
+			values[i] = r.Value
+			ordinals[i] = r.Ordinal
 		}
-		merged, stats, err := promhttputil.MergeValuesDeterministic(a, b, opts)
+		merged, stats, err := promhttputil.MergeValuesDeterministicN(values, ordinals, ignoreLabels)
 		if err != nil {
 			return nil, err
 		}
-		if dedupCounter != nil && stats.Collisions > 0 {
-			winnerName, loserName := names[idxA], names[idxB]
-			if idxB < idxA {
-				winnerName, loserName = names[idxB], names[idxA]
+		if dedupCounter != nil {
+			for pair, count := range stats.Pairs {
+				dedupCounter.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
 			}
-			dedupCounter.WithLabelValues(winnerName, loserName).Add(float64(stats.Collisions))
 		}
 		return merged, nil
 	}
 
 	if dedupMetadata {
-		m.mergeSeriesFn = func(a, b []model.LabelSet, idxA, idxB int) []model.LabelSet {
-			opts := DedupLabelSetsOpts{
-				IgnoreLabels: ignoreLabels,
-				OrdinalA:     idxA,
-				OrdinalB:     idxB,
+		m.mergeSeriesFn = func(results []OrdinalSeries) []model.LabelSet {
+			sets := make([][]model.LabelSet, len(results))
+			ordinals := make([]int, len(results))
+			for i, r := range results {
+				sets[i] = r.Series
+				ordinals[i] = r.Ordinal
 			}
-			merged, stats := MergeLabelSetsDeterministic(a, b, opts)
-			if dedupMetadataCounter != nil && stats.Collisions > 0 {
-				winnerName, loserName := names[idxA], names[idxB]
-				if idxB < idxA {
-					winnerName, loserName = names[idxB], names[idxA]
+			merged, stats := MergeLabelSetsDeterministicN(sets, ordinals, ignoreLabels)
+			if dedupMetadataCounter != nil {
+				for pair, count := range stats.Pairs {
+					dedupMetadataCounter.WithLabelValues(names[pair[0]], names[pair[1]], "series").Add(float64(count))
 				}
-				dedupMetadataCounter.WithLabelValues(winnerName, loserName, "series").Add(float64(stats.Collisions))
 			}
 			return merged
 		}

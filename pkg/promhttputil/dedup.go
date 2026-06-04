@@ -211,3 +211,207 @@ func mergeMatrixDeterministic(a, b model.Matrix, opts DedupOpts) (model.Matrix, 
 
 	return result, collisions
 }
+
+// DedupNStats reports collisions resolved by MergeValuesDeterministicN. Total is
+// the number of series-level collisions (one per losing series). Pairs breaks
+// that down by the {winnerOrdinal, loserOrdinal} that actually collided, so a
+// caller can attribute each collision to the exact contributing server_groups.
+//
+// This is the property the binary MergeValuesDeterministic cannot give when
+// chained: there, every accumulated series is presented to the next merge under
+// a single OrdinalA (the running minimum), so a collision against a series that
+// truly came from a middle backend is misattributed to the lowest ordinal. The
+// n-way merge buckets every series under its own origin ordinal, so attribution
+// is exact regardless of input order.
+type DedupNStats struct {
+	Total int
+	Pairs map[[2]int]int
+}
+
+func (s *DedupNStats) record(winner, loser int) {
+	s.Total++
+	if s.Pairs == nil {
+		s.Pairs = make(map[[2]int]int)
+	}
+	s.Pairs[[2]int{winner, loser}]++
+}
+
+// MergeValuesDeterministicN merges N per-backend values in a single pass, each
+// tagged with its source ordinal, resolving cross-backend collisions (modulo
+// ignore) by lowest ordinal. values[i] is the result from the backend at
+// ordinals[i]; the two slices must have equal length.
+//
+// Callers should pass the inputs in ascending-ordinal order for a deterministic
+// result ordering, but correctness (which series wins, and collision
+// attribution) does not depend on the order.
+//
+// Unlike chaining MergeValuesDeterministic pairwise, every series is bucketed
+// with its true origin ordinal, so the returned DedupNStats attributes each
+// collision to the exact winner/loser server_group.
+func MergeValuesDeterministicN(values []model.Value, ordinals []int, ignore map[model.LabelName]struct{}) (model.Value, *DedupNStats, error) {
+	stats := &DedupNStats{}
+
+	type ordinalValue struct {
+		v   model.Value
+		ord int
+	}
+	nonNil := make([]ordinalValue, 0, len(values))
+	for i, v := range values {
+		if v != nil {
+			nonNil = append(nonNil, ordinalValue{v: v, ord: ordinals[i]})
+		}
+	}
+
+	switch len(nonNil) {
+	case 0:
+		return nil, stats, nil
+	case 1:
+		return nonNil[0].v, stats, nil
+	}
+
+	typ := nonNil[0].v.Type()
+	for _, x := range nonNil[1:] {
+		if x.v.Type() != typ {
+			return nil, stats, fmt.Errorf("mismatch type %v!=%v", typ, x.v.Type())
+		}
+	}
+
+	switch typ {
+	case model.ValVector:
+		vectors := make([]model.Vector, len(nonNil))
+		ords := make([]int, len(nonNil))
+		for i, x := range nonNil {
+			vectors[i] = x.v.(model.Vector)
+			ords[i] = x.ord
+		}
+		return mergeNVectorsDeterministic(vectors, ords, ignore, stats), stats, nil
+
+	case model.ValMatrix:
+		matrices := make([]model.Matrix, len(nonNil))
+		ords := make([]int, len(nonNil))
+		for i, x := range nonNil {
+			matrices[i] = x.v.(model.Matrix)
+			ords[i] = x.ord
+		}
+		return mergeNMatricesDeterministic(matrices, ords, ignore, stats), stats, nil
+
+	case model.ValScalar, model.ValString:
+		// Scalar/String have no series identity to dedup; fold pairwise with the
+		// existing first-non-zero / first-wins semantics, lowest ordinal first.
+		result := nonNil[0].v
+		for _, x := range nonNil[1:] {
+			merged, err := MergeValues(0, result, x.v, false)
+			if err != nil {
+				return nil, stats, err
+			}
+			result = merged
+		}
+		return result, stats, nil
+	}
+
+	return nil, stats, fmt.Errorf("unknown type! %v", reflect.TypeOf(nonNil[0].v))
+}
+
+// mergeNVectorsDeterministic is the n-way generalization of
+// mergeVectorDeterministic: every sample is bucketed under its origin ordinal,
+// so the lowest-ordinal source wins each reduced-fingerprint bucket and stats
+// record the true {winner, loser} pair.
+func mergeNVectorsDeterministic(vectors []model.Vector, ordinals []int, ignore map[model.LabelName]struct{}, stats *DedupNStats) model.Vector {
+	type entry struct {
+		sample  *model.Sample
+		ordinal int
+		idx     int
+	}
+
+	total := 0
+	for _, v := range vectors {
+		total += len(v)
+	}
+	buckets := make(map[model.Fingerprint]*entry, total)
+	result := make(model.Vector, 0, total)
+	scratch := make(model.LabelSet, 16)
+
+	for vi, vec := range vectors {
+		ord := ordinals[vi]
+		for _, s := range vec {
+			redFP := reducedFingerprintInto(scratch, s.Metric, ignore)
+
+			existing, ok := buckets[redFP]
+			if !ok {
+				result = append(result, s)
+				buckets[redFP] = &entry{sample: s, ordinal: ord, idx: len(result) - 1}
+				continue
+			}
+
+			// Exact duplicate of this bucket's winner: first non-zero wins.
+			if existing.sample.Metric.Equal(s.Metric) {
+				if result[existing.idx].Value == model.SampleValue(0) {
+					result[existing.idx].Value = s.Value
+				}
+				continue
+			}
+
+			// Genuine cross-group collision: lower ordinal wins.
+			if ord < existing.ordinal {
+				stats.record(ord, existing.ordinal)
+				result[existing.idx] = s
+				existing.sample = s
+				existing.ordinal = ord
+			} else {
+				stats.record(existing.ordinal, ord)
+			}
+		}
+	}
+
+	return result
+}
+
+// mergeNMatricesDeterministic is the n-way generalization of
+// mergeMatrixDeterministic. Streams are not interleaved; the lowest-ordinal
+// source's stream wins each bucket.
+func mergeNMatricesDeterministic(matrices []model.Matrix, ordinals []int, ignore map[model.LabelName]struct{}, stats *DedupNStats) model.Matrix {
+	type entry struct {
+		stream  *model.SampleStream
+		ordinal int
+		idx     int
+	}
+
+	total := 0
+	for _, m := range matrices {
+		total += len(m)
+	}
+	buckets := make(map[model.Fingerprint]*entry, total)
+	result := make(model.Matrix, 0, total)
+	scratch := make(model.LabelSet, 16)
+
+	for mi, mat := range matrices {
+		ord := ordinals[mi]
+		for _, stream := range mat {
+			redFP := reducedFingerprintInto(scratch, stream.Metric, ignore)
+
+			existing, ok := buckets[redFP]
+			if !ok {
+				result = append(result, stream)
+				buckets[redFP] = &entry{stream: stream, ordinal: ord, idx: len(result) - 1}
+				continue
+			}
+
+			// Exact duplicate of this bucket's winner: keep first.
+			if existing.stream.Metric.Equal(stream.Metric) {
+				continue
+			}
+
+			// Genuine cross-group collision: lower ordinal wins.
+			if ord < existing.ordinal {
+				stats.record(ord, existing.ordinal)
+				result[existing.idx] = stream
+				existing.stream = stream
+				existing.ordinal = ord
+			} else {
+				stats.record(existing.ordinal, ord)
+			}
+		}
+	}
+
+	return result
+}

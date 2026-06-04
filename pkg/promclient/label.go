@@ -122,6 +122,82 @@ func MergeLabelSetsDeterministic(a, b []model.LabelSet, opts DedupLabelSetsOpts)
 	return result, stats
 }
 
+// DedupLabelSetsNStats reports collisions resolved by
+// MergeLabelSetsDeterministicN. Total is the number of series-level collisions;
+// Pairs breaks them down by the {winnerOrdinal, loserOrdinal} that collided so
+// callers can attribute each to the exact server_groups. See DedupNStats for why
+// the n-way form is needed for accurate attribution.
+type DedupLabelSetsNStats struct {
+	Total int
+	Pairs map[[2]int]int
+}
+
+func (s *DedupLabelSetsNStats) record(winner, loser int) {
+	s.Total++
+	if s.Pairs == nil {
+		s.Pairs = make(map[[2]int]int)
+	}
+	s.Pairs[[2]int{winner, loser}]++
+}
+
+// MergeLabelSetsDeterministicN is the n-way generalization of
+// MergeLabelSetsDeterministic: it merges N backends' /series results in one
+// pass, each tagged with its source ordinal, resolving collisions (modulo
+// ignore) by lowest ordinal. sets[i] is the result from the backend at
+// ordinals[i]; the two slices must have equal length.
+//
+// Because every labelset is bucketed under its true origin ordinal, the returned
+// stats attribute each collision to the exact winner/loser — unlike chaining the
+// binary form, which loses the origin ordinal of an accumulated labelset.
+func MergeLabelSetsDeterministicN(sets [][]model.LabelSet, ordinals []int, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *DedupLabelSetsNStats) {
+	stats := &DedupLabelSetsNStats{}
+
+	type entry struct {
+		idx     int
+		ordinal int
+	}
+
+	total := 0
+	for _, s := range sets {
+		total += len(s)
+	}
+	fullFPIndex := make(map[model.Fingerprint]int, total)
+	reducedFPEntry := make(map[model.Fingerprint]*entry, total)
+	result := make([]model.LabelSet, 0, total)
+
+	for si, set := range sets {
+		ord := ordinals[si]
+		for _, ls := range set {
+			fullFP := ls.Fingerprint()
+			if _, ok := fullFPIndex[fullFP]; ok {
+				continue
+			}
+
+			redFP := reducedFingerprintLS(ls, ignore)
+			if existing, ok := reducedFPEntry[redFP]; ok {
+				if ord < existing.ordinal {
+					stats.record(ord, existing.ordinal)
+					oldLS := result[existing.idx]
+					delete(fullFPIndex, oldLS.Fingerprint())
+					result[existing.idx] = ls
+					fullFPIndex[fullFP] = existing.idx
+					existing.ordinal = ord
+				} else {
+					stats.record(existing.ordinal, ord)
+				}
+				continue
+			}
+
+			idx := len(result)
+			result = append(result, ls)
+			fullFPIndex[fullFP] = idx
+			reducedFPEntry[redFP] = &entry{idx: idx, ordinal: ord}
+		}
+	}
+
+	return result, stats
+}
+
 // reducedFingerprintLS returns the fingerprint of ls with all keys in ignore
 // removed. It copies the labelset, so callers may reuse ls safely.
 func reducedFingerprintLS(ls model.LabelSet, ignore map[model.LabelName]struct{}) model.Fingerprint {
