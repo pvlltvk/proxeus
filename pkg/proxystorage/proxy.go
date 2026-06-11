@@ -276,7 +276,7 @@ func (p *ProxyStorage) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	b, err := json.Marshal(v)
 	if err != nil {
-		logrus.Error("msg", "error marshaling json response", "err", err)
+		logrus.WithError(err).Error("error marshaling json response")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -284,7 +284,7 @@ func (p *ProxyStorage) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if n, err := w.Write(b); err != nil {
-		logrus.Error("msg", "error writing response", "bytesWritten", n, "err", err)
+		logrus.WithError(err).WithField("bytesWritten", n).Error("error writing response")
 	}
 }
 
@@ -333,7 +333,7 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	b, err := json.Marshal(v)
 	if err != nil {
-		logrus.Error("msg", "error marshaling json response", "err", err)
+		logrus.WithError(err).Error("error marshaling json response")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -341,7 +341,7 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if n, err := w.Write(b); err != nil {
-		logrus.Error("msg", "error writing response", "bytesWritten", n, "err", err)
+		logrus.WithError(err).WithField("bytesWritten", n).Error("error writing response")
 	}
 
 }
@@ -354,7 +354,7 @@ func (p *ProxyStorage) WalReplayHandler(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(`{"status":"success","data":{"min":0,"max":0,"current":0}}`)); err != nil {
-		logrus.Error("msg", "error writing response", "err", err)
+		logrus.WithError(err).Error("error writing response")
 	}
 }
 
@@ -368,7 +368,7 @@ func (p *ProxyStorage) FlagsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(`{"status":"success","data":{}}`)); err != nil {
-		logrus.Error("msg", "error writing response", "err", err)
+		logrus.WithError(err).Error("error writing response")
 	}
 }
 
