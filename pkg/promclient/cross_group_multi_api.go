@@ -66,7 +66,7 @@ func NewCrossGroupMultiAPI(
 	// server_group (the chained binary form misattributed them to the running
 	// minimum ordinal). MultiAPI feeds these hooks the successful results sorted
 	// by ascending ordinal.
-	m.mergeFn = func(results []ordinalValue) (model.Value, error) {
+	m.mergeFn = func(results []gathered[model.Value]) (model.Value, error) {
 		values := make([]model.Value, len(results))
 		ordinals := make([]int, len(results))
 		for i, r := range results {
@@ -86,11 +86,11 @@ func NewCrossGroupMultiAPI(
 	}
 
 	if dedupMetadata {
-		m.mergeSeriesFn = func(results []ordinalSeries) []model.LabelSet {
+		m.mergeSeriesFn = func(results []gathered[[]model.LabelSet]) []model.LabelSet {
 			sets := make([][]model.LabelSet, len(results))
 			ordinals := make([]int, len(results))
 			for i, r := range results {
-				sets[i] = r.series
+				sets[i] = r.value
 				ordinals[i] = r.ordinal
 			}
 			merged, stats := mergeLabelSetsDeterministic(sets, ordinals, ignoreLabels)

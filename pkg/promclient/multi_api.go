@@ -61,19 +61,6 @@ func NormalizePromError(err error) error {
 // the specific API calls made through this multi client
 type MultiAPIMetricFunc func(i int, api, status string, took float64)
 
-// ordinalValue pairs one backend's value result with its source ordinal (its
-// index within the apis slice / YAML server_group order).
-type ordinalValue struct {
-	value   model.Value
-	ordinal int
-}
-
-// ordinalSeries pairs one backend's Series() result with its source ordinal.
-type ordinalSeries struct {
-	series  []model.LabelSet
-	ordinal int
-}
-
 // mergeFunc folds the successful per-backend values into a single result. The
 // inputs are provided sorted by ascending ordinal, so a fold preserves
 // YAML/server_group priority regardless of the order the backends actually
@@ -84,13 +71,13 @@ type ordinalSeries struct {
 // Collection order is intentionally decoupled from merge order: MultiAPI gathers
 // responses as they arrive (no head-of-line blocking, partial-response aware on
 // cancellation) but always merges in ascending-ordinal order here.
-type mergeFunc func(results []ordinalValue) (model.Value, error)
+type mergeFunc func(results []gathered[model.Value]) (model.Value, error)
 
 // mergeSeriesFunc folds the successful per-backend Series() results into one
 // labelset slice, inputs sorted by ascending ordinal. The default set-unions
 // (MergeLabelSets); cross-group callers override it for reduced-fingerprint
 // dedup.
-type mergeSeriesFunc func(results []ordinalSeries) []model.LabelSet
+type mergeSeriesFunc func(results []gathered[[]model.LabelSet]) []model.LabelSet
 
 // NewMustMultiAPI returns a MultiAPI
 func NewMustMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
@@ -133,7 +120,7 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 	// Default merge: within-group HA semantics; ordinals are ignored. Inputs are
 	// sorted by ascending ordinal, so this left-fold matches the historical
 	// index-order merge exactly.
-	m.mergeFn = func(results []ordinalValue) (model.Value, error) {
+	m.mergeFn = func(results []gathered[model.Value]) (model.Value, error) {
 		var merged model.Value
 		for _, r := range results {
 			if merged == nil {
@@ -149,14 +136,14 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		return merged, nil
 	}
 	// Default series merge: set union; ordinals are ignored.
-	m.mergeSeriesFn = func(results []ordinalSeries) []model.LabelSet {
+	m.mergeSeriesFn = func(results []gathered[[]model.LabelSet]) []model.LabelSet {
 		var merged []model.LabelSet
 		for _, r := range results {
 			if merged == nil {
-				merged = r.series
+				merged = r.value
 				continue
 			}
-			merged = MergeLabelSets(merged, r.series)
+			merged = MergeLabelSets(merged, r.value)
 		}
 		return merged
 	}
@@ -332,24 +319,6 @@ func sortGathered[T any](results []gathered[T]) {
 	sort.Slice(results, func(i, j int) bool { return results[i].ordinal < results[j].ordinal })
 }
 
-// toOrdinalValues adapts gathered value results into the merge-hook input.
-func toOrdinalValues(results []gathered[model.Value]) []ordinalValue {
-	out := make([]ordinalValue, len(results))
-	for i, r := range results {
-		out[i] = ordinalValue{value: r.value, ordinal: r.ordinal}
-	}
-	return out
-}
-
-// toOrdinalSeries adapts gathered series results into the merge-hook input.
-func toOrdinalSeries(results []gathered[[]model.LabelSet]) []ordinalSeries {
-	out := make([]ordinalSeries, len(results))
-	for i, r := range results {
-		out[i] = ordinalSeries{series: r.value, ordinal: r.ordinal}
-	}
-	return out
-}
-
 // LabelValues performs a query for the values of the given label.
 func (m *MultiAPI) LabelValues(ctx context.Context, label string, matchers []string, startTime time.Time, endTime time.Time) (model.LabelValues, v1.Warnings, error) {
 	results, warnings, err := scatterGather(ctx, m, "label_values",
@@ -415,7 +384,7 @@ func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model
 		return nil, warnings.Warnings(), err
 	}
 
-	merged, err := m.mergeFn(toOrdinalValues(results))
+	merged, err := m.mergeFn(results)
 	if err != nil {
 		return nil, warnings.Warnings(), err
 	}
@@ -433,7 +402,7 @@ func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (mo
 		return nil, warnings.Warnings(), err
 	}
 
-	merged, err := m.mergeFn(toOrdinalValues(results))
+	merged, err := m.mergeFn(results)
 	if err != nil {
 		return nil, warnings.Warnings(), err
 	}
@@ -451,7 +420,7 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 		return nil, warnings.Warnings(), err
 	}
 
-	return m.mergeSeriesFn(toOrdinalSeries(results)), warnings.Warnings(), nil
+	return m.mergeSeriesFn(results), warnings.Warnings(), nil
 }
 
 // GetValue fetches a `model.Value` which represents the actual collected data
@@ -464,7 +433,7 @@ func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers 
 		return nil, warnings.Warnings(), err
 	}
 
-	merged, err := m.mergeFn(toOrdinalValues(results))
+	merged, err := m.mergeFn(results)
 	if err != nil {
 		return nil, warnings.Warnings(), err
 	}

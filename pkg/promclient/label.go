@@ -46,24 +46,6 @@ func MergeLabelSets(a, b []model.LabelSet) []model.LabelSet {
 	return a
 }
 
-// dedupLabelSetsStats reports collisions resolved by mergeLabelSetsDeterministic.
-// Collisions is the number of series-level collisions; Pairs breaks them down by
-// the {winnerOrdinal, loserOrdinal} that collided so callers can attribute each
-// to the exact server_groups. See DedupStats for why bucketing by origin ordinal
-// is needed for accurate attribution.
-type dedupLabelSetsStats struct {
-	Collisions int
-	Pairs      map[[2]int]int
-}
-
-func (s *dedupLabelSetsStats) record(winner, loser int) {
-	s.Collisions++
-	if s.Pairs == nil {
-		s.Pairs = make(map[[2]int]int)
-	}
-	s.Pairs[[2]int{winner, loser}]++
-}
-
 // mergeLabelSetsDeterministic merges N backends' /series results in one pass,
 // each tagged with its source ordinal, resolving collisions (labelsets that
 // match modulo ignore) by lowest ordinal. The winning labelset keeps its full
@@ -78,8 +60,8 @@ func (s *dedupLabelSetsStats) record(winner, loser int) {
 // This is intended only for cross-group merges where each group has distinct
 // external labels. Within-group HA dedup must continue to use MergeLabelSets.
 // Callers must pass equal-length sets and ordinals slices.
-func mergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *dedupLabelSetsStats) {
-	stats := &dedupLabelSetsStats{}
+func mergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *promhttputil.DedupStats) {
+	stats := &promhttputil.DedupStats{}
 
 	type entry struct {
 		idx     int
@@ -105,14 +87,14 @@ func mergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore
 			redFP := reducedFingerprintLS(ls, ignore)
 			if existing, ok := reducedFPEntry[redFP]; ok {
 				if ord < existing.ordinal {
-					stats.record(ord, existing.ordinal)
+					stats.Record(ord, existing.ordinal)
 					oldLS := result[existing.idx]
 					delete(fullFPIndex, oldLS.Fingerprint())
 					result[existing.idx] = ls
 					fullFPIndex[fullFP] = existing.idx
 					existing.ordinal = ord
 				} else {
-					stats.record(existing.ordinal, ord)
+					stats.Record(existing.ordinal, ord)
 				}
 				continue
 			}

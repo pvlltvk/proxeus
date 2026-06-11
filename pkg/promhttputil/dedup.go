@@ -36,7 +36,9 @@ type DedupStats struct {
 	Pairs      map[[2]int]int
 }
 
-func (s *DedupStats) record(winner, loser int) {
+// Record marks one collision resolved in favor of winner over loser
+// (identified by their source ordinals).
+func (s *DedupStats) Record(winner, loser int) {
 	s.Collisions++
 	if s.Pairs == nil {
 		s.Pairs = make(map[[2]int]int)
@@ -176,12 +178,12 @@ func mergeVectorsDeterministic(vectors []model.Vector, ordinals []int, ignore ma
 
 			// Genuine cross-group collision: lower ordinal wins.
 			if ord < existing.ordinal {
-				stats.record(ord, existing.ordinal)
+				stats.Record(ord, existing.ordinal)
 				result[existing.idx] = s
 				existing.sample = s
 				existing.ordinal = ord
 			} else {
-				stats.record(existing.ordinal, ord)
+				stats.Record(existing.ordinal, ord)
 			}
 		}
 	}
@@ -226,12 +228,12 @@ func mergeMatricesDeterministic(matrices []model.Matrix, ordinals []int, ignore 
 
 			// Genuine cross-group collision: lower ordinal wins.
 			if ord < existing.ordinal {
-				stats.record(ord, existing.ordinal)
+				stats.Record(ord, existing.ordinal)
 				result[existing.idx] = stream
 				existing.stream = stream
 				existing.ordinal = ord
 			} else {
-				stats.record(existing.ordinal, ord)
+				stats.Record(existing.ordinal, ord)
 			}
 		}
 	}
