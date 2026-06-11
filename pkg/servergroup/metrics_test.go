@@ -70,21 +70,14 @@ func TestServerGroupErrorCounterRegistered(t *testing.T) {
 	}
 }
 
-// TestAPIClientMetricFuncServerGroupLabel verifies that the apiClientMetricFunc
-// closure (as constructed in loadTargetGroupMap) correctly tags observations
-// with the configured server group name and only increments the error counter
-// on status="error".
+// TestAPIClientMetricFuncServerGroupLabel verifies that apiClientMetricFunc
+// correctly tags observations with the configured server group name and only
+// increments the error counter on status="error".
 func TestAPIClientMetricFuncServerGroupLabel(t *testing.T) {
 	const sgName = "sg-closure-test"
 	targets := []string{"target-host:9090"}
 
-	// Replicate the closure from loadTargetGroupMap.
-	fn := func(i int, api, status string, took float64) {
-		serverGroupSummary.WithLabelValues(sgName, targets[i], api, status).Observe(took)
-		if status == "error" {
-			serverGroupRequestErrors.WithLabelValues(sgName, targets[i], api).Inc()
-		}
-	}
+	fn := apiClientMetricFunc(sgName, targets)
 
 	// One success — should NOT increment the error counter for this label set.
 	fn(0, "query_range", "success", 0.010)

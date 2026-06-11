@@ -154,6 +154,18 @@ func (s *ServerGroup) Sync() {
 	}
 }
 
+// apiClientMetricFunc returns a promclient.MultiAPIMetricFunc that records
+// per-target request duration and error metrics for the given server group,
+// tagging each observation with the target host at index i in targets.
+func apiClientMetricFunc(sgName string, targets []string) promclient.MultiAPIMetricFunc {
+	return func(i int, api, status string, took float64) {
+		serverGroupSummary.WithLabelValues(sgName, targets[i], api, status).Observe(took)
+		if status == "error" {
+			serverGroupRequestErrors.WithLabelValues(sgName, targets[i], api).Inc()
+		}
+	}
+}
+
 func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgroup.Group) (err error) {
 	targets := make([]string, 0)
 	apiClients := make([]promclient.API, 0)
@@ -298,15 +310,9 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 	}
 
 	sgName := s.Cfg.Name
-	apiClientMetricFunc := func(i int, api, status string, took float64) {
-		serverGroupSummary.WithLabelValues(sgName, targets[i], api, status).Observe(took)
-		if status == "error" {
-			serverGroupRequestErrors.WithLabelValues(sgName, targets[i], api).Inc()
-		}
-	}
 
 	logrus.Debugf("Updating targets from discovery manager: %v", targets)
-	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), apiClientMetricFunc, 1, s.Cfg.GetPreferMax())
+	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), apiClientMetricFunc(sgName, targets), 1, s.Cfg.GetPreferMax())
 	if err != nil {
 		return err
 	}
