@@ -2,6 +2,7 @@ package promxyui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -201,8 +202,9 @@ func (p *Prober) probeTarget(ctx context.Context, client *http.Client, sgCfg *se
 	resp, err := client.Do(req)
 	probeAt := time.Now()
 	if err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{"target": rawTarget}).Debug("promxyui probe failed")
 		errStr := err.Error()
-		if strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "timeout") {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || strings.Contains(errStr, "timeout") {
 			errStr = "probe timed out"
 		}
 		logrus.WithFields(logrus.Fields{"target": rawTarget}).Debugf("promxyui probe error: %s", errStr)
@@ -249,8 +251,10 @@ func (p *Prober) checkLabelsEndpoint(ctx context.Context, client *http.Client, b
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
 		return true, ""
 	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	return false, fmt.Sprintf("buildinfo and labels both unreachable (labels HTTP %d)", resp.StatusCode)
 }
 

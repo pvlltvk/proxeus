@@ -64,14 +64,14 @@ type MultiAPIMetricFunc func(i int, api, status string, took float64)
 // ordinalValue pairs one backend's value result with its source ordinal (its
 // index within the apis slice / YAML server_group order).
 type ordinalValue struct {
-	Value   model.Value
-	Ordinal int
+	value   model.Value
+	ordinal int
 }
 
 // ordinalSeries pairs one backend's Series() result with its source ordinal.
 type ordinalSeries struct {
-	Series  []model.LabelSet
-	Ordinal int
+	series  []model.LabelSet
+	ordinal int
 }
 
 // mergeFunc folds the successful per-backend values into a single result. The
@@ -137,10 +137,10 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		var merged model.Value
 		for _, r := range results {
 			if merged == nil {
-				merged = r.Value
+				merged = r.value
 				continue
 			}
-			v, err := promhttputil.MergeValues(m.antiAffinity, merged, r.Value, m.preferMax)
+			v, err := promhttputil.MergeValues(m.antiAffinity, merged, r.value, m.preferMax)
 			if err != nil {
 				return nil, err
 			}
@@ -153,10 +153,10 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		var merged []model.LabelSet
 		for _, r := range results {
 			if merged == nil {
-				merged = r.Series
+				merged = r.series
 				continue
 			}
-			merged = MergeLabelSets(merged, r.Series)
+			merged = MergeLabelSets(merged, r.series)
 		}
 		return merged
 	}
@@ -287,7 +287,7 @@ func scatterGather[T any](
 	results := make([]gathered[T], 0, len(m.apis))
 	var lastError error
 
-	for n := 0; n < len(m.apis); n++ {
+	for range m.apis {
 		select {
 		case <-ctx.Done():
 			// Caller deadline/cancel fired. In partial-response mode, keep what
@@ -336,7 +336,7 @@ func sortGathered[T any](results []gathered[T]) {
 func toOrdinalValues(results []gathered[model.Value]) []ordinalValue {
 	out := make([]ordinalValue, len(results))
 	for i, r := range results {
-		out[i] = ordinalValue{Value: r.value, Ordinal: r.ordinal}
+		out[i] = ordinalValue{value: r.value, ordinal: r.ordinal}
 	}
 	return out
 }
@@ -345,7 +345,7 @@ func toOrdinalValues(results []gathered[model.Value]) []ordinalValue {
 func toOrdinalSeries(results []gathered[[]model.LabelSet]) []ordinalSeries {
 	out := make([]ordinalSeries, len(results))
 	for i, r := range results {
-		out[i] = ordinalSeries{Series: r.value, Ordinal: r.ordinal}
+		out[i] = ordinalSeries{series: r.value, ordinal: r.ordinal}
 	}
 	return out
 }
@@ -475,7 +475,8 @@ func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers 
 // Metadata returns metadata about metrics currently scraped by the metric name.
 func (m *MultiAPI) Metadata(ctx context.Context, metric, limit string) (map[string][]v1.Metadata, error) {
 	// Metadata has no warnings channel; adapt it to scatterGather's shape.
-	results, _, err := scatterGather(ctx, m, "query",
+	// Per-backend warnings are intentionally dropped because the upstream API.Metadata signature returns only (map, error).
+	results, _, err := scatterGather(ctx, m, "metadata",
 		func(ctx context.Context, api API) (map[string][]v1.Metadata, v1.Warnings, error) {
 			v, err := api.Metadata(ctx, metric, limit)
 			return v, nil, err

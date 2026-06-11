@@ -202,6 +202,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
 	}
 	if err != nil {
+		newState.Cancel(nil)
 		return err
 	}
 
@@ -426,7 +427,7 @@ func (p *ProxyStorage) WALReplayStatus() (tsdb.WALReplayStatus, error) {
 // Returns nil if no state has been applied yet.
 func (p *ProxyStorage) ServerGroups() []*servergroup.ServerGroup {
 	state := p.GetState()
-	if state == nil {
+	if state.sgs == nil {
 		return nil
 	}
 	return state.sgs
@@ -436,7 +437,7 @@ func (p *ProxyStorage) ServerGroups() []*servergroup.ServerGroup {
 // ApplyConfig call.
 func (p *ProxyStorage) Config() *proxyconfig.Config {
 	state := p.GetState()
-	if state == nil {
+	if state.cfg == nil {
 		return nil
 	}
 	return state.cfg

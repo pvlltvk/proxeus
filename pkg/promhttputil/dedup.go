@@ -2,7 +2,6 @@ package promhttputil
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/prometheus/common/model"
 )
@@ -58,6 +57,10 @@ func (s *DedupStats) record(winner, loser int) {
 //
 // This is intended only for cross-group merges where each group has distinct
 // external labels. Within-group HA dedup must continue to use MergeValues.
+//
+// Matrix exact-duplicates keep the first stream (no value interleaving) while
+// vector exact-duplicates apply first-non-zero-wins; the asymmetry is
+// intentional because this is cross-backend, not HA, dedup.
 func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[model.LabelName]struct{}) (model.Value, *DedupStats, error) {
 	if len(values) != len(ordinals) {
 		return nil, &DedupStats{}, fmt.Errorf("MergeValuesDeterministic: values/ordinals length mismatch (%d != %d)", len(values), len(ordinals))
@@ -122,7 +125,7 @@ func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[m
 		return result, stats, nil
 	}
 
-	return nil, stats, fmt.Errorf("unknown type! %v", reflect.TypeOf(nonNil[0].v))
+	return nil, stats, fmt.Errorf("unknown type! %v", nonNil[0].v.Type().String())
 }
 
 // mergeVectorsDeterministic merges N Vectors using reduced-fingerprint collision

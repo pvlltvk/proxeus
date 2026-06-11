@@ -70,8 +70,8 @@ func NewCrossGroupMultiAPI(
 		values := make([]model.Value, len(results))
 		ordinals := make([]int, len(results))
 		for i, r := range results {
-			values[i] = r.Value
-			ordinals[i] = r.Ordinal
+			values[i] = r.value
+			ordinals[i] = r.ordinal
 		}
 		merged, stats, err := promhttputil.MergeValuesDeterministic(values, ordinals, ignoreLabels)
 		if err != nil {
@@ -90,8 +90,8 @@ func NewCrossGroupMultiAPI(
 			sets := make([][]model.LabelSet, len(results))
 			ordinals := make([]int, len(results))
 			for i, r := range results {
-				sets[i] = r.Series
-				ordinals[i] = r.Ordinal
+				sets[i] = r.series
+				ordinals[i] = r.ordinal
 			}
 			merged, stats := mergeLabelSetsDeterministic(sets, ordinals, ignoreLabels)
 			if dedupMetadataCounter != nil {
