@@ -56,11 +56,7 @@ func crossGroupPartial(t *testing.T, apis []API, partial bool) *MultiAPI {
 		name := fmt.Sprintf("sg%d", i)
 		backends[i] = CrossGroupBackend{API: api, Name: name, Labels: model.LabelSet{"server_group": model.LabelValue(name)}}
 	}
-	m, err := NewCrossGroupMultiAPI(backends, CrossGroupOpts{PartialResponse: partial})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
-	return m
+	return newCrossGroupForTest(t, backends, CrossGroupOpts{PartialResponse: partial})
 }
 
 func vec(name, sg string) model.Vector {

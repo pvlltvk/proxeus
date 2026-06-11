@@ -56,13 +56,10 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 		Name: "test_b1_e2e_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "thanos", Labels: model.LabelSet{"backend": "thanos"}},
 		{API: api1, Name: "vm", Labels: model.LabelSet{"backend": "vm"}},
 	}, CrossGroupOpts{Collisions: counter})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	// First call to establish the reference.
 	v0, _, err := m.Query(context.Background(), "cpu", time.Now())
@@ -81,33 +78,28 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 	}
 
 	// Verify overlapping series carry the lower-ordinal backend's values.
+	// wantBackend == "" means the backend label is not checked (series
+	// unique to one backend, where the label is implied by the value).
+	wantSeries := map[model.LabelValue]struct {
+		wantValue   model.SampleValue
+		wantBackend model.LabelValue
+	}{
+		"cpu":  {wantValue: 1, wantBackend: "thanos"},
+		"mem":  {wantValue: 2, wantBackend: "thanos"},
+		"disk": {wantValue: 3},
+		"net":  {wantValue: 77},
+	}
 	for _, s := range vec0 {
 		name := s.Metric["__name__"]
-		switch name {
-		case "cpu":
-			if s.Value != 1 {
-				t.Fatalf("cpu: expected thanos value 1, got %v", s.Value)
-			}
-			if s.Metric["backend"] != "thanos" {
-				t.Fatalf("cpu: expected backend=thanos, got %q", s.Metric["backend"])
-			}
-		case "mem":
-			if s.Value != 2 {
-				t.Fatalf("mem: expected thanos value 2, got %v", s.Value)
-			}
-			if s.Metric["backend"] != "thanos" {
-				t.Fatalf("mem: expected backend=thanos, got %q", s.Metric["backend"])
-			}
-		case "disk":
-			if s.Value != 3 {
-				t.Fatalf("disk: expected thanos value 3, got %v", s.Value)
-			}
-		case "net":
-			if s.Value != 77 {
-				t.Fatalf("net: expected vm value 77, got %v", s.Value)
-			}
-		default:
+		want, ok := wantSeries[name]
+		if !ok {
 			t.Fatalf("unexpected series %q in result", name)
+		}
+		if s.Value != want.wantValue {
+			t.Fatalf("%s: expected value %v, got %v", name, want.wantValue, s.Value)
+		}
+		if want.wantBackend != "" && s.Metric["backend"] != want.wantBackend {
+			t.Fatalf("%s: expected backend=%s, got %q", name, want.wantBackend, s.Metric["backend"])
 		}
 	}
 
@@ -159,14 +151,11 @@ func TestB1E2E_ThreeBackendsNWayMerge(t *testing.T) {
 		},
 	}
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
 		{API: api2, Name: "sg2", Labels: model.LabelSet{"backend": "sg2"}},
 	}, CrossGroupOpts{})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	v, _, err := m.Query(context.Background(), "cpu", time.Now())
 	if err != nil {
@@ -232,13 +221,10 @@ func TestB1E2E_QueryRangeDedup(t *testing.T) {
 		},
 	}
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "thanos", Labels: model.LabelSet{"backend": "thanos"}},
 		{API: api1, Name: "vm", Labels: model.LabelSet{"backend": "vm"}},
 	}, CrossGroupOpts{})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	r := v1.Range{Start: time.Now().Add(-time.Hour), End: time.Now(), Step: time.Minute}
 	v, _, err := m.QueryRange(context.Background(), "cpu", r)

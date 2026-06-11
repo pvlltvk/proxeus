@@ -10,6 +10,18 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+// newCrossGroupForTest builds a *MultiAPI via NewCrossGroupMultiAPI and fails
+// the test immediately if construction errors, removing the repeated
+// constructor-call-plus-error-check boilerplate from each cross-group test.
+func newCrossGroupForTest(t *testing.T, backends []CrossGroupBackend, opts CrossGroupOpts) *MultiAPI {
+	t.Helper()
+	m, err := NewCrossGroupMultiAPI(backends, opts)
+	if err != nil {
+		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
+	}
+	return m
+}
+
 func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 	// api0 returns cpu with server_group=sg0 (ordinal 0, should win).
 	// api1 returns the same cpu metric (modulo server_group) with server_group=sg1.
@@ -37,13 +49,10 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 		Name: "test_cross_group_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"server_group": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"server_group": "sg1"}},
 	}, CrossGroupOpts{Collisions: counter})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	v, _, err := m.Query(context.Background(), "cpu", time.Now())
 	if err != nil {
@@ -109,15 +118,12 @@ func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
 		Name: "test_collision_counter_incremented_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
 	}, CrossGroupOpts{Collisions: counter})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
-	_, _, err = m.Query(context.Background(), "cpu", time.Now())
+	_, _, err := m.Query(context.Background(), "cpu", time.Now())
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -160,13 +166,10 @@ func TestNewCrossGroupMultiAPI_SeriesDedup(t *testing.T) {
 		Name: "test_series_dedup_metadata_collisions_total",
 	}, []string{"winner", "loser", "endpoint"})
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
 	}, CrossGroupOpts{DedupMetadata: true, MetadataCollisions: metaCounter})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	got, _, err := m.Series(context.Background(), []string{"up"}, time.Time{}, time.Time{})
 	if err != nil {
@@ -215,13 +218,10 @@ func TestNewCrossGroupMultiAPI_SeriesNoDedupWhenDisabled(t *testing.T) {
 		},
 	}
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
 	}, CrossGroupOpts{})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	got, _, err := m.Series(context.Background(), []string{"up"}, time.Time{}, time.Time{})
 	if err != nil {
@@ -269,14 +269,11 @@ func TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal(t *testing.T) {
 		Name: "test_collision_attribution_middle_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
 		{API: api2, Name: "sg2", Labels: model.LabelSet{"backend": "sg2"}},
 	}, CrossGroupOpts{Collisions: counter})
-	if err != nil {
-		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
-	}
 
 	v, _, err := m.Query(context.Background(), "cpu", time.Now())
 	if err != nil {
