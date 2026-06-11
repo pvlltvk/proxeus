@@ -18,7 +18,7 @@ type stubStorage struct {
 	sgs []*servergroup.ServerGroup
 }
 
-func (s *stubStorage) Config() *proxyconfig.Config                { return s.cfg }
+func (s *stubStorage) Config() *proxyconfig.Config              { return s.cfg }
 func (s *stubStorage) ServerGroups() []*servergroup.ServerGroup { return s.sgs }
 
 func sgCfg(name, scheme, pathPrefix string) *servergroup.Config {
@@ -30,9 +30,14 @@ func sgCfg(name, scheme, pathPrefix string) *servergroup.Config {
 	}
 }
 
+// testProbeClientTimeout is the HTTP client timeout used throughout this
+// test file, both for the prober itself and for the standalone client used
+// to drive probeTarget directly.
+const testProbeClientTimeout = 2 * time.Second
+
 func newTestProber() *Prober {
 	return &Prober{
-		client:   &http.Client{Timeout: 2 * time.Second},
+		client:   &http.Client{Timeout: testProbeClientTimeout},
 		results:  make(map[probeKey]ProbeResult),
 		interval: defaultProbeInterval,
 	}
@@ -41,7 +46,7 @@ func newTestProber() *Prober {
 // testClient is the HTTP client used to drive probeTarget directly in tests
 // (where there is no real server_group transport to derive one from).
 func testClient() *http.Client {
-	return &http.Client{Timeout: 2 * time.Second}
+	return &http.Client{Timeout: testProbeClientTimeout}
 }
 
 func TestProber_HealthyTarget(t *testing.T) {

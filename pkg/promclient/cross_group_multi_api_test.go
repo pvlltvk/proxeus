@@ -78,17 +78,10 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 	}
 
 	// Verify the dedup counter was incremented for the cpu collision.
-	val, err := counter.GetMetricWithLabelValues("sg0", "sg1")
-	if err != nil {
-		t.Fatalf("counter.GetMetricWithLabelValues: %v", err)
+	got2 := testutil.ToFloat64(counter.WithLabelValues("sg0", "sg1"))
+	if got2 != 1 {
+		t.Fatalf("expected collision counter winner=sg0 loser=sg1 to be 1, got %v", got2)
 	}
-	// Gather and check value.
-	ch := make(chan prometheus.Metric, 1)
-	val.Collect(ch)
-	m2 := <-ch
-	var pb model.SampleValue
-	_ = pb // avoid import issue; just verifying no panic above is enough for this test.
-	_ = m2
 }
 
 func TestNewCrossGroupMultiAPI_LengthMismatch(t *testing.T) {

@@ -11,8 +11,8 @@ package promclient
 //
 // The tests here use stubAPI (defined in multi_api_test.go, same package) and
 // NewCrossGroupMultiAPI to exercise the full integration path: config building,
-// ignoreLabels union, MergeFunc wiring, and resultIdx propagation in MultiAPI.
-// This is the clean extension point for B1 e2e coverage.
+// ignoreLabels union, MergeFunc wiring, and arrival-order fan-out/gather in
+// MultiAPI. This is the clean extension point for B1 e2e coverage.
 
 import (
 	"context"
@@ -134,12 +134,12 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 	}
 }
 
-// TestB1E2E_ThreeBackendsChainedMerge exercises the three-backend scenario
-// end-to-end through NewCrossGroupMultiAPI. MultiAPI reads from resultChans in
-// ordinal order (i=0,1,2), so resultIdx tracks the running minimum ordinal.
-// Backends 0 and 2 share the same "cpu" series modulo backend labels; backend 1
-// contributes a unique "mem" series. Source 0 must win.
-func TestB1E2E_ThreeBackendsChainedMerge(t *testing.T) {
+// TestB1E2E_ThreeBackendsNWayMerge exercises the three-backend scenario
+// end-to-end through NewCrossGroupMultiAPI. The single-pass n-way merge buckets
+// each series under its true origin ordinal (0, 1, 2) and resolves collisions
+// in one step. Backends 0 and 2 share the same "cpu" series modulo backend
+// labels; backend 1 contributes a unique "mem" series. Source 0 must win.
+func TestB1E2E_ThreeBackendsNWayMerge(t *testing.T) {
 	api0 := &stubAPI{
 		query: func() model.Value {
 			return model.Vector{

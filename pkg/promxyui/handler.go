@@ -1,6 +1,6 @@
 // Package promxyui provides the promxy-specific inventory UI.
 //
-// It exposes three routes under the /promxy/ prefix:
+// It exposes the following routes under the /promxy/ prefix:
 //
 //	GET /promxy/                  — 302 redirect to /promxy/backends
 //	GET /promxy/backends          — HTML inventory page (rendered from templates/inventory.html)

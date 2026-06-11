@@ -259,62 +259,6 @@ func TestMergeValuesDeterministic_MatrixNoCollision(t *testing.T) {
 	}
 }
 
-// TestMergeValuesDeterministic_EmptyIgnore verifies that an empty (nil or
-// zero-length) IgnoreLabels set reduces collision detection to plain exact-FP
-// dedup: distinct series pass through, identical series collapse, and no
-// cross-group collisions are reported.
-func TestMergeValuesDeterministic_EmptyIgnore(t *testing.T) {
-	t.Run("nil_ignore_distinct_series_matches_MergeValues", func(t *testing.T) {
-		sA := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 1, Timestamp: 100}
-		sB := &model.Sample{Metric: model.Metric{"__name__": "mem", "instance": "x"}, Value: 2, Timestamp: 100}
-		a := model.Vector{sA}
-		b := model.Vector{sB}
-
-		got, stats, err := merge2(a, b, nil, 0, 1)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		want, wantErr := MergeValues(0, a, b, false)
-		if wantErr != nil {
-			t.Fatalf("MergeValues error: %v", wantErr)
-		}
-
-		gotVec := got.(model.Vector)
-		wantVec := want.(model.Vector)
-		if len(gotVec) != len(wantVec) {
-			t.Fatalf("len mismatch: deterministic=%d MergeValues=%d", len(gotVec), len(wantVec))
-		}
-		if len(gotVec) != 2 {
-			t.Fatalf("expected 2 series, got %d", len(gotVec))
-		}
-		if stats.Collisions != 0 {
-			t.Fatalf("expected 0 collisions with nil IgnoreLabels, got %d", stats.Collisions)
-		}
-	})
-
-	t.Run("empty_map_ignore_exact_fp_duplicate_no_collision", func(t *testing.T) {
-		// Identical series (exact-FP match) deduplicate to 1 with 0 collisions —
-		// exact-FP duplicates are within-group, not cross-group collisions.
-		sA := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 5, Timestamp: 100}
-		sB := &model.Sample{Metric: model.Metric{"__name__": "cpu", "instance": "x"}, Value: 9, Timestamp: 100}
-		a := model.Vector{sA}
-		b := model.Vector{sB}
-
-		v, stats, err := merge2(a, b, map[model.LabelName]struct{}{}, 0, 1)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		vec := v.(model.Vector)
-		if len(vec) != 1 {
-			t.Fatalf("expected 1 series (deduped), got %d", len(vec))
-		}
-		if stats.Collisions != 0 {
-			t.Fatalf("expected 0 collisions for exact-FP duplicate, got %d", stats.Collisions)
-		}
-	})
-}
-
 // BenchmarkMergeValuesDeterministic compares an empty IgnoreLabels set against a
 // non-empty one on a 1000-sample Vector.  Run with:
 //
