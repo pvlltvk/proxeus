@@ -33,12 +33,14 @@ func TestHandlerBackendsJSON_Envelope(t *testing.T) {
 				Labels:  map[string]string{"backend": "thanos"},
 				Targets: []TargetInfo{
 					{
-						URL:         "http://thanos-query-frontend:10901",
-						Healthy:     true,
-						LastError:   "",
-						LastProbeAt: now,
+						URL: "http://thanos-query-frontend:10901",
+						ProbeResult: ProbeResult{
+							Healthy:     true,
+							LastError:   "",
+							LastProbeAt: now,
+							Version:     "0.36.0",
+						},
 						BackendType: BackendThanos,
-						Version:     "0.36.0",
 					},
 				},
 			},
@@ -58,7 +60,7 @@ func TestHandlerBackendsJSON_Envelope(t *testing.T) {
 		t.Errorf("expected application/json Content-Type, got %q", ct)
 	}
 
-	var envelope jsonResponse
+	var envelope Inventory
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
@@ -175,7 +177,7 @@ func TestHandlerBackendsJSON_EmptyGroups(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var envelope jsonResponse
+	var envelope Inventory
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

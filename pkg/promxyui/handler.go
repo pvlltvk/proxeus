@@ -15,36 +15,12 @@ import (
 	"net/http"
 	"path"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/jacksontj/promxy/pkg/proxystorage"
 )
-
-// jsonTarget is the wire shape for a single target in the JSON feed.
-type jsonTarget struct {
-	URL         string      `json:"url"`
-	Healthy     bool        `json:"healthy"`
-	LastError   string      `json:"lastError"`
-	LastProbeAt time.Time   `json:"lastProbeAt"`
-	BackendType BackendType `json:"backendType"`
-	Version     string      `json:"version"`
-}
-
-// jsonGroup is the wire shape for a single server_group in the JSON feed.
-type jsonGroup struct {
-	Name    string            `json:"name"`
-	Ordinal int               `json:"ordinal"`
-	Labels  map[string]string `json:"labels"`
-	Targets []jsonTarget      `json:"targets"`
-}
-
-// jsonResponse is the top-level JSON envelope.
-type jsonResponse struct {
-	GeneratedAt time.Time   `json:"generatedAt"`
-	Groups      []jsonGroup `json:"groups"`
-}
 
 // Handler serves the promxy inventory UI.
 type Handler struct {
@@ -52,11 +28,16 @@ type Handler struct {
 	tmpl   *template.Template
 
 	// routePrefix is the -web.route-prefix the UI is served under (e.g. "/" or
-	// "/foo"). Used to build absolute redirect targets that honor the prefix.
+	// "/foo"). Used to build absolute redirect targets that honor the prefix,
+	// and to strip incoming requests down to the prefix-agnostic patterns
+	// registered in mux.
 	routePrefix string
 
 	// inventoryFn, when non-nil, overrides prober.Inventory(). Used in tests.
 	inventoryFn func() Inventory
+
+	muxOnce sync.Once
+	mux     *http.ServeMux
 }
 
 // NewHandler constructs a Handler. ps is used to initialise the background
@@ -81,21 +62,44 @@ func (h *Handler) Run(ctx context.Context) {
 	h.prober.Run(ctx)
 }
 
-// ServeHTTP dispatches on path suffix.
+// ServeHTTP routes the request through mux after stripping routePrefix, so
+// the patterns registered in initMux stay prefix-agnostic regardless of
+// -web.route-prefix.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	p := r.URL.Path
-	switch {
-	case strings.HasSuffix(p, "/api/backends.json"):
-		h.serveJSON(w, r)
-	case strings.Contains(p, "/static/"):
-		h.serveStatic(w, r)
-	case strings.HasSuffix(p, "/backends") || strings.HasSuffix(p, "/backends/"):
-		h.serveIndex(w, r)
-	default:
-		// /promxy/ and any other sub-path: redirect to the backends page,
-		// honoring the route prefix (path.Join cleans "" → "/promxy/backends").
-		http.Redirect(w, r, path.Join(h.routePrefix, "/promxy/backends"), http.StatusFound)
+	h.muxOnce.Do(h.initMux)
+
+	p := strings.TrimPrefix(r.URL.Path, strings.TrimRight(h.routePrefix, "/"))
+	if p == r.URL.Path {
+		h.mux.ServeHTTP(w, r)
+		return
 	}
+	r2 := r.Clone(r.Context())
+	r2.URL.Path = p
+	h.mux.ServeHTTP(w, r2)
+}
+
+// initMux registers the routes served under /promxy/. Patterns are
+// prefix-agnostic — ServeHTTP strips -web.route-prefix before dispatch — and
+// the redirectToBackends handler reads h.routePrefix at request time to build
+// its Location header.
+func (h *Handler) initMux() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /promxy/api/backends.json", h.serveJSON)
+	mux.HandleFunc("GET /promxy/static/", h.serveStatic)
+	mux.HandleFunc("GET /promxy/backends", h.serveIndex)
+	mux.HandleFunc("GET /promxy/backends/", h.serveIndex)
+	// Exact "/promxy" and the "/promxy/" subtree (everything else under
+	// /promxy/ not matched above) both redirect to the backends page.
+	mux.HandleFunc("GET /promxy", h.redirectToBackends)
+	mux.HandleFunc("GET /promxy/", h.redirectToBackends)
+	h.mux = mux
+}
+
+// redirectToBackends sends /promxy/ and any other unmatched /promxy/* path to
+// the backends page, honoring the route prefix (path.Join cleans "" →
+// "/promxy/backends").
+func (h *Handler) redirectToBackends(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, path.Join(h.routePrefix, "/promxy/backends"), http.StatusFound)
 }
 
 func (h *Handler) inventory() Inventory {
@@ -116,29 +120,23 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveJSON(w http.ResponseWriter, r *http.Request) {
 	inv := h.inventory()
 
-	resp := jsonResponse{
+	resp := Inventory{
 		GeneratedAt: inv.GeneratedAt.UTC(),
-		Groups:      make([]jsonGroup, 0, len(inv.Groups)),
+		Groups:      make([]GroupInfo, 0, len(inv.Groups)),
 	}
 	for _, g := range inv.Groups {
-		jg := jsonGroup{
+		jg := GroupInfo{
 			Name:    g.Name,
 			Ordinal: g.Ordinal,
 			Labels:  g.Labels,
-			Targets: make([]jsonTarget, 0, len(g.Targets)),
+			Targets: make([]TargetInfo, 0, len(g.Targets)),
 		}
 		if jg.Labels == nil {
 			jg.Labels = map[string]string{}
 		}
 		for _, t := range g.Targets {
-			jg.Targets = append(jg.Targets, jsonTarget{
-				URL:         t.URL,
-				Healthy:     t.Healthy,
-				LastError:   t.LastError,
-				LastProbeAt: t.LastProbeAt.UTC(),
-				BackendType: t.BackendType,
-				Version:     t.Version,
-			})
+			t.LastProbeAt = t.LastProbeAt.UTC()
+			jg.Targets = append(jg.Targets, t)
 		}
 		resp.Groups = append(resp.Groups, jg)
 	}

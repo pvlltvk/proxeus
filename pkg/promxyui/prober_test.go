@@ -40,6 +40,7 @@ func newTestProber() *Prober {
 		client:   &http.Client{Timeout: testProbeClientTimeout},
 		results:  make(map[probeKey]ProbeResult),
 		interval: defaultProbeInterval,
+		timeout:  testProbeClientTimeout,
 	}
 }
 

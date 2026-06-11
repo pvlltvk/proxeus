@@ -37,8 +37,9 @@ type buildInfoEnvelope struct {
 // is handled by the server_group's declared backend_type config field, not
 // here — Thanos and VictoriaMetrics buildinfo bodies don't carry an
 // application identifier we can rely on.
+//
+// The caller (probeTarget) owns closing resp.Body; extractVersion only reads it.
 func extractVersion(resp *http.Response) string {
-	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return ""

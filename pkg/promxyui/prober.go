@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,34 +38,31 @@ type probeKey struct {
 // type info is correct before the first probe completes and stays in sync
 // with config reloads.
 type ProbeResult struct {
-	Healthy     bool
-	LastError   string
-	LastProbeAt time.Time
-	Version     string
+	Healthy     bool      `json:"healthy"`
+	LastError   string    `json:"lastError"`
+	LastProbeAt time.Time `json:"lastProbeAt"`
+	Version     string    `json:"version"`
 }
 
 // TargetInfo combines resolved URL with the latest probe result.
 type TargetInfo struct {
-	URL         string
-	Healthy     bool
-	LastError   string
-	LastProbeAt time.Time
-	BackendType BackendType
-	Version     string
+	URL string `json:"url"`
+	ProbeResult
+	BackendType BackendType `json:"backendType"`
 }
 
 // GroupInfo carries the full inventory snapshot for a single server_group.
 type GroupInfo struct {
-	Name    string
-	Ordinal int
-	Labels  map[string]string
-	Targets []TargetInfo
+	Name    string            `json:"name"`
+	Ordinal int               `json:"ordinal"`
+	Labels  map[string]string `json:"labels"`
+	Targets []TargetInfo      `json:"targets"`
 }
 
 // Inventory is the snapshot returned to the HTTP handler.
 type Inventory struct {
-	GeneratedAt time.Time
-	Groups      []GroupInfo
+	GeneratedAt time.Time   `json:"generatedAt"`
+	Groups      []GroupInfo `json:"groups"`
 }
 
 // storageAccessor is the subset of ProxyStorage the prober needs.
@@ -80,6 +78,7 @@ type Prober struct {
 	ps       storageAccessor
 	client   *http.Client
 	interval time.Duration
+	timeout  time.Duration
 
 	mu      sync.RWMutex
 	results map[probeKey]ProbeResult
@@ -98,6 +97,7 @@ func newProber(ps storageAccessor) *Prober {
 			Timeout: defaultProbeTimeout,
 		},
 		interval: defaultProbeInterval,
+		timeout:  defaultProbeTimeout,
 		results:  make(map[probeKey]ProbeResult),
 	}
 }
@@ -178,7 +178,7 @@ func (p *Prober) clientForGroup(sg *servergroup.ServerGroup) *http.Client {
 	if sg == nil {
 		return p.client
 	}
-	return &http.Client{Transport: sg, Timeout: defaultProbeTimeout}
+	return &http.Client{Transport: sg, Timeout: p.timeout}
 }
 
 // probeTarget performs a single health check against one target (host:port)
@@ -202,24 +202,21 @@ func (p *Prober) probeTarget(ctx context.Context, client *http.Client, sgCfg *se
 	resp, err := client.Do(req)
 	probeAt := time.Now()
 	if err != nil {
-		logrus.WithError(err).WithFields(logrus.Fields{"target": rawTarget}).Debug("promxyui probe failed")
-		errStr := err.Error()
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || strings.Contains(errStr, "timeout") {
-			errStr = "probe timed out"
-		}
-		logrus.WithFields(logrus.Fields{"target": rawTarget}).Debugf("promxyui probe error: %s", errStr)
+		errStr := classifyProbeError(err)
+		logrus.WithError(err).WithFields(logrus.Fields{"target": rawTarget}).Debugf("promxyui probe error: %s", errStr)
 		return ProbeResult{
 			Healthy:     false,
 			LastError:   errStr,
 			LastProbeAt: probeAt,
 		}
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		// buildinfo non-200 — try /api/v1/labels as a liveness fallback.
-		// Drain and close the buildinfo response so the connection can be reused.
+		// Drain the buildinfo response so the connection can be reused; the
+		// deferred Close above releases it.
 		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		resp.Body.Close()
 		healthy, fallbackErr := p.checkLabelsEndpoint(ctx, client, base)
 		return ProbeResult{
 			Healthy:     healthy,
@@ -235,6 +232,19 @@ func (p *Prober) probeTarget(ctx context.Context, client *http.Client, sgCfg *se
 		LastProbeAt: probeAt,
 		Version:     version,
 	}
+}
+
+// classifyProbeError turns a probe transport error into the LastError string
+// surfaced to the UI. Context cancellation/deadline and any net.Error
+// reporting Timeout() are normalized to "probe timed out" so flaky-network
+// blips don't leak raw dial/transport error text into the inventory.
+func classifyProbeError(err error) string {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		(errors.As(err, &netErr) && netErr.Timeout()) {
+		return "probe timed out"
+	}
+	return err.Error()
 }
 
 // checkLabelsEndpoint hits /api/v1/labels (under the same base URL) to confirm
@@ -298,11 +308,8 @@ func (p *Prober) Inventory() Inventory {
 					result := p.results[key]
 					gi.Targets = append(gi.Targets, TargetInfo{
 						URL:         backendBaseURL(sgCfg, target),
-						Healthy:     result.Healthy,
-						LastError:   result.LastError,
-						LastProbeAt: result.LastProbeAt,
+						ProbeResult: result,
 						BackendType: backendType,
-						Version:     result.Version,
 					})
 				}
 			}
