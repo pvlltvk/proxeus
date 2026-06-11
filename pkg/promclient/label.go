@@ -46,12 +46,18 @@ func MergeLabelSets(a, b []model.LabelSet) []model.LabelSet {
 	return a
 }
 
+// OrdinalLabelSets pairs one backend's Series() result with its source
+// ordinal (its index within the apis slice / YAML server_group order).
+type OrdinalLabelSets struct {
+	Ordinal int
+	Sets    []model.LabelSet
+}
+
 // mergeLabelSetsDeterministic merges N backends' /series results in one pass,
 // each tagged with its source ordinal, resolving collisions (labelsets that
 // match modulo ignore) by lowest ordinal. The winning labelset keeps its full
 // label set (including the backend's external labels) so the /series response is
-// honest about origin. sets[i] is the result from the backend at ordinals[i];
-// the two slices must have equal length.
+// honest about origin.
 //
 // Because every labelset is bucketed under its true origin ordinal, the returned
 // stats attribute each collision to the exact winner/loser regardless of input
@@ -59,8 +65,7 @@ func MergeLabelSets(a, b []model.LabelSet) []model.LabelSet {
 //
 // This is intended only for cross-group merges where each group has distinct
 // external labels. Within-group HA dedup must continue to use MergeLabelSets.
-// Callers must pass equal-length sets and ordinals slices.
-func mergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *promhttputil.DedupStats) {
+func mergeLabelSetsDeterministic(inputs []OrdinalLabelSets, ignore map[model.LabelName]struct{}) ([]model.LabelSet, *promhttputil.DedupStats) {
 	stats := &promhttputil.DedupStats{}
 
 	type entry struct {
@@ -69,16 +74,16 @@ func mergeLabelSetsDeterministic(sets [][]model.LabelSet, ordinals []int, ignore
 	}
 
 	total := 0
-	for _, s := range sets {
-		total += len(s)
+	for _, in := range inputs {
+		total += len(in.Sets)
 	}
 	fullFPIndex := make(map[model.Fingerprint]int, total)
 	reducedFPEntry := make(map[model.Fingerprint]*entry, total)
 	result := make([]model.LabelSet, 0, total)
 
-	for si, set := range sets {
-		ord := ordinals[si]
-		for _, ls := range set {
+	for _, in := range inputs {
+		ord := in.Ordinal
+		for _, ls := range in.Sets {
 			fullFP := ls.Fingerprint()
 			if _, ok := fullFPIndex[fullFP]; ok {
 				continue

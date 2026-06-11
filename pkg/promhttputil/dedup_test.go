@@ -19,7 +19,17 @@ func ignoreSet(keys ...model.LabelName) map[model.LabelName]struct{} {
 // merge2 merges exactly two values at the given ordinals — a convenience wrapper
 // over the n-way MergeValuesDeterministic for the many two-backend test cases.
 func merge2(a, b model.Value, ignore map[model.LabelName]struct{}, ordA, ordB int) (model.Value, *DedupStats, error) {
-	return MergeValuesDeterministic([]model.Value{a, b}, []int{ordA, ordB}, ignore)
+	return MergeValuesDeterministic([]OrdinalValue{{Ordinal: ordA, Value: a}, {Ordinal: ordB, Value: b}}, ignore)
+}
+
+// ordinalValues zips parallel values/ordinals slices into MergeValuesDeterministic's
+// input shape — a convenience wrapper for the n-backend test cases.
+func ordinalValues(values []model.Value, ordinals []int) []OrdinalValue {
+	out := make([]OrdinalValue, len(values))
+	for i := range values {
+		out[i] = OrdinalValue{Ordinal: ordinals[i], Value: values[i]}
+	}
+	return out
 }
 
 func TestMergeValuesDeterministic_NilInputs(t *testing.T) {

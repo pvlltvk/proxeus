@@ -32,18 +32,15 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"sg0", "sg1"}
-	groupLabels := []model.LabelSet{
-		{"server_group": "sg0"},
-		{"server_group": "sg1"},
-	}
-
 	// Register a counter to verify collision counting.
 	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "test_cross_group_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"server_group": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"server_group": "sg1"}},
+	}, CrossGroupOpts{Collisions: counter})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -84,21 +81,6 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 	}
 }
 
-func TestNewCrossGroupMultiAPI_LengthMismatch(t *testing.T) {
-	_, err := NewCrossGroupMultiAPI(
-		[]API{&stubAPI{}},
-		[]string{"a", "b"},
-		[]model.LabelSet{{"x": "1"}},
-		nil,
-		false,
-		nil,
-		false,
-	)
-	if err == nil {
-		t.Fatal("expected error on length mismatch")
-	}
-}
-
 // TestNewCrossGroupMultiAPI_CollisionCounterIncremented verifies that the
 // dedupCounter passed to NewCrossGroupMultiAPI is incremented exactly once for
 // each colliding series, with the correct winner/loser label values.
@@ -122,18 +104,15 @@ func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"sg0", "sg1"}
-	groupLabels := []model.LabelSet{
-		{"backend": "sg0"},
-		{"backend": "sg1"},
-	}
-
 	// Use an unregistered counter so this test does not touch the global registry.
 	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "test_collision_counter_incremented_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{Collisions: counter})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -177,17 +156,14 @@ func TestNewCrossGroupMultiAPI_SeriesDedup(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"sg0", "sg1"}
-	groupLabels := []model.LabelSet{
-		{"backend": "sg0"},
-		{"backend": "sg1"},
-	}
-
 	metaCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "test_series_dedup_metadata_collisions_total",
 	}, []string{"winner", "loser", "endpoint"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, true, metaCounter, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{DedupMetadata: true, MetadataCollisions: metaCounter})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -239,10 +215,10 @@ func TestNewCrossGroupMultiAPI_SeriesNoDedupWhenDisabled(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"sg0", "sg1"}
-	groupLabels := []model.LabelSet{{"backend": "sg0"}, {"backend": "sg1"}}
-
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -289,14 +265,15 @@ func TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"sg0", "sg1", "sg2"}
-	groupLabels := []model.LabelSet{{"backend": "sg0"}, {"backend": "sg1"}, {"backend": "sg2"}}
-
 	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "test_collision_attribution_middle_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1, api2}, groupNames, groupLabels, counter, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+		{API: api2, Name: "sg2", Labels: model.LabelSet{"backend": "sg2"}},
+	}, CrossGroupOpts{Collisions: counter})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}

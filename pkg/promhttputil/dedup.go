@@ -46,12 +46,18 @@ func (s *DedupStats) Record(winner, loser int) {
 	s.Pairs[[2]int{winner, loser}]++
 }
 
+// OrdinalValue pairs one backend's value result with its source ordinal (its
+// index within the apis slice / YAML server_group order).
+type OrdinalValue struct {
+	Ordinal int
+	Value   model.Value
+}
+
 // MergeValuesDeterministic merges N per-backend values in a single pass, each
 // tagged with its source ordinal, resolving cross-backend collisions (series
 // that match modulo ignore) by lowest ordinal. The winning sample/stream retains
 // its full Metric (including its own backend label) so the response is honest
-// about its origin. values[i] is the result from the backend at ordinals[i]; the
-// two slices must have equal length.
+// about its origin.
 //
 // Callers should pass the inputs in ascending-ordinal order for a deterministic
 // result ordering, but correctness (which series wins, and collision attribution)
@@ -63,20 +69,13 @@ func (s *DedupStats) Record(winner, loser int) {
 // Matrix exact-duplicates keep the first stream (no value interleaving) while
 // vector exact-duplicates apply first-non-zero-wins; the asymmetry is
 // intentional because this is cross-backend, not HA, dedup.
-func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[model.LabelName]struct{}) (model.Value, *DedupStats, error) {
-	if len(values) != len(ordinals) {
-		return nil, &DedupStats{}, fmt.Errorf("MergeValuesDeterministic: values/ordinals length mismatch (%d != %d)", len(values), len(ordinals))
-	}
+func MergeValuesDeterministic(inputs []OrdinalValue, ignore map[model.LabelName]struct{}) (model.Value, *DedupStats, error) {
 	stats := &DedupStats{}
 
-	type ordinalValue struct {
-		v   model.Value
-		ord int
-	}
-	nonNil := make([]ordinalValue, 0, len(values))
-	for i, v := range values {
-		if v != nil {
-			nonNil = append(nonNil, ordinalValue{v: v, ord: ordinals[i]})
+	nonNil := make([]OrdinalValue, 0, len(inputs))
+	for _, in := range inputs {
+		if in.Value != nil {
+			nonNil = append(nonNil, in)
 		}
 	}
 
@@ -84,13 +83,13 @@ func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[m
 	case 0:
 		return nil, stats, nil
 	case 1:
-		return nonNil[0].v, stats, nil
+		return nonNil[0].Value, stats, nil
 	}
 
-	typ := nonNil[0].v.Type()
+	typ := nonNil[0].Value.Type()
 	for _, x := range nonNil[1:] {
-		if x.v.Type() != typ {
-			return nil, stats, fmt.Errorf("mismatch type %v!=%v", typ, x.v.Type())
+		if x.Value.Type() != typ {
+			return nil, stats, fmt.Errorf("mismatch type %v!=%v", typ, x.Value.Type())
 		}
 	}
 
@@ -99,8 +98,8 @@ func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[m
 		vectors := make([]model.Vector, len(nonNil))
 		ords := make([]int, len(nonNil))
 		for i, x := range nonNil {
-			vectors[i] = x.v.(model.Vector)
-			ords[i] = x.ord
+			vectors[i] = x.Value.(model.Vector)
+			ords[i] = x.Ordinal
 		}
 		return mergeVectorsDeterministic(vectors, ords, ignore, stats), stats, nil
 
@@ -108,17 +107,17 @@ func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[m
 		matrices := make([]model.Matrix, len(nonNil))
 		ords := make([]int, len(nonNil))
 		for i, x := range nonNil {
-			matrices[i] = x.v.(model.Matrix)
-			ords[i] = x.ord
+			matrices[i] = x.Value.(model.Matrix)
+			ords[i] = x.Ordinal
 		}
 		return mergeMatricesDeterministic(matrices, ords, ignore, stats), stats, nil
 
 	case model.ValScalar, model.ValString:
 		// Scalar/String have no series identity to dedup; fold pairwise with the
 		// existing first-non-zero / first-wins semantics, lowest ordinal first.
-		result := nonNil[0].v
+		result := nonNil[0].Value
 		for _, x := range nonNil[1:] {
-			merged, err := MergeValues(0, result, x.v, false)
+			merged, err := MergeValues(0, result, x.Value, false)
 			if err != nil {
 				return nil, stats, err
 			}
@@ -127,7 +126,7 @@ func MergeValuesDeterministic(values []model.Value, ordinals []int, ignore map[m
 		return result, stats, nil
 	}
 
-	return nil, stats, fmt.Errorf("unknown type! %v", nonNil[0].v.Type().String())
+	return nil, stats, fmt.Errorf("unknown type! %v", nonNil[0].Value.Type().String())
 }
 
 // mergeVectorsDeterministic merges N Vectors using reduced-fingerprint collision

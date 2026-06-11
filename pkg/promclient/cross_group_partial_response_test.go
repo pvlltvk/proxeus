@@ -3,6 +3,7 @@ package promclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -50,9 +51,12 @@ func (s *blockingStub) Query(ctx context.Context, _ string, _ time.Time) (model.
 
 func crossGroupPartial(t *testing.T, apis []API, partial bool) *MultiAPI {
 	t.Helper()
-	names := []string{"sg0", "sg1"}
-	labels := []model.LabelSet{{"server_group": "sg0"}, {"server_group": "sg1"}}
-	m, err := NewCrossGroupMultiAPI(apis, names, labels, nil, false, nil, partial)
+	backends := make([]CrossGroupBackend, len(apis))
+	for i, api := range apis {
+		name := fmt.Sprintf("sg%d", i)
+		backends[i] = CrossGroupBackend{API: api, Name: name, Labels: model.LabelSet{"server_group": model.LabelValue(name)}}
+	}
+	m, err := NewCrossGroupMultiAPI(backends, CrossGroupOpts{PartialResponse: partial})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}

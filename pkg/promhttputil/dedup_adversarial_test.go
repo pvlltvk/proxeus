@@ -127,8 +127,7 @@ func TestMergeValuesDeterministic_ThreeBackendLowestOrdinalWins(t *testing.T) {
 	}
 
 	final, stats, err := MergeValuesDeterministic(
-		[]model.Value{src0, src1, src2},
-		[]int{0, 1, 2},
+		ordinalValues([]model.Value{src0, src1, src2}, []int{0, 1, 2}),
 		ignore,
 	)
 	if err != nil {
@@ -186,8 +185,7 @@ func TestMergeValuesDeterministic_OrderIndependent(t *testing.T) {
 
 	// Permuted input order [2, 0, 1] with matching ordinals.
 	final, stats, err := MergeValuesDeterministic(
-		[]model.Value{src2, src0, src1},
-		[]int{2, 0, 1},
+		ordinalValues([]model.Value{src2, src0, src1}, []int{2, 0, 1}),
 		ignore,
 	)
 	if err != nil {
@@ -283,8 +281,7 @@ func TestMergeValuesDeterministic_CollisionCounting(t *testing.T) {
 			}
 		}
 		final, stats, err := MergeValuesDeterministic(
-			[]model.Value{series("sg0", 1), series("sg1", 2), series("sg2", 3)},
-			[]int{0, 1, 2},
+			ordinalValues([]model.Value{series("sg0", 1), series("sg1", 2), series("sg2", 3)}, []int{0, 1, 2}),
 			ignore,
 		)
 		if err != nil {

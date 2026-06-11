@@ -183,21 +183,22 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		err      error
 	)
 	if c.CrossGroupDedup {
-		groupNames := make([]string, len(c.ServerGroups))
-		groupLabels := make([]model.LabelSet, len(c.ServerGroups))
+		backends := make([]promclient.CrossGroupBackend, len(c.ServerGroups))
 		for i, sg := range c.ServerGroups {
-			groupNames[i] = sg.Name
-			groupLabels[i] = sg.Labels
+			backends[i] = promclient.CrossGroupBackend{
+				API:    apis[i],
+				Name:   sg.Name,
+				Labels: sg.Labels,
+			}
 		}
 		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t)",
 			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse)
-		multiApi, err = promclient.NewCrossGroupMultiAPI(
-			apis, groupNames, groupLabels,
-			crossGroupDedupCollisions,
-			c.CrossGroupDedupMetadata,
-			crossGroupDedupMetadataCollisions,
-			c.CrossGroupPartialResponse,
-		)
+		multiApi, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
+			DedupMetadata:      c.CrossGroupDedupMetadata,
+			PartialResponse:    c.CrossGroupPartialResponse,
+			Collisions:         crossGroupDedupCollisions,
+			MetadataCollisions: crossGroupDedupMetadataCollisions,
+		})
 	} else {
 		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
 	}

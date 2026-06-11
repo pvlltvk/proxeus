@@ -1,65 +1,73 @@
 package promclient
 
 import (
-	"fmt"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 
 	"github.com/jacksontj/promxy/pkg/promhttputil"
 )
 
+// CrossGroupBackend is one server_group's API client plus the identity
+// (name and external labels) used for cross-group dedup and collision
+// attribution.
+type CrossGroupBackend struct {
+	API    API
+	Name   string
+	Labels model.LabelSet
+}
+
+// CrossGroupOpts configures the cross-group dedup behavior of
+// NewCrossGroupMultiAPI. Collisions and MetadataCollisions may be nil to skip
+// the corresponding metric.
+type CrossGroupOpts struct {
+	// DedupMetadata, when true, additionally wires reduced-fingerprint dedup
+	// into MultiAPI.Series so /api/v1/series collapses series that differ only
+	// by per-group external labels.
+	DedupMetadata bool
+
+	// PartialResponse, when true, relaxes the fan-out so a query succeeds as
+	// long as at least one backend responded.
+	PartialResponse bool
+
+	// Collisions, if non-nil, is incremented on query-path (Query / QueryRange)
+	// collisions with label values {winner, loser} identifying the group names.
+	Collisions *prometheus.CounterVec
+
+	// MetadataCollisions mirrors Collisions for the /api/v1/series dedup path
+	// (only used when DedupMetadata is true).
+	MetadataCollisions *prometheus.CounterVec
+}
+
 // NewCrossGroupMultiAPI builds a MultiAPI that performs deterministic
 // cross-group dedup: collisions modulo the union of per-group `labels`
-// keys are resolved by lowest ordinal (YAML order).
-//
-// apis, groupNames, and groupLabels must all have the same length; element i
-// is the API/name/labels for the server_group at index i.
-//
-// dedupCounter may be nil; if non-nil it is incremented on query-path
-// (Query / QueryRange) collisions with label values {winner, loser} identifying
-// the group names.
-//
-// dedupMetadata, when true, additionally wires reduced-fingerprint dedup into
-// MultiAPI.Series so /api/v1/series collapses series that differ only by
-// per-group external labels. dedupMetadataCounter mirrors dedupCounter for
-// that path; pass nil to skip the metric.
-func NewCrossGroupMultiAPI(
-	apis []API,
-	groupNames []string,
-	groupLabels []model.LabelSet,
-	dedupCounter *prometheus.CounterVec,
-	dedupMetadata bool,
-	dedupMetadataCounter *prometheus.CounterVec,
-	partialResponse bool,
-) (*MultiAPI, error) {
-	if len(apis) != len(groupNames) || len(apis) != len(groupLabels) {
-		return nil, fmt.Errorf("apis, groupNames, and groupLabels must have the same length")
-	}
+// keys are resolved by lowest ordinal (YAML order, i.e. backends[i]'s
+// position in the slice).
+func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*MultiAPI, error) {
+	apis := make([]API, len(backends))
+	names := make([]string, len(backends))
 
 	// ignoreLabels is the union of all per-group label keys. Series that
 	// differ only in these keys are considered the same underlying series.
 	ignoreLabels := make(map[model.LabelName]struct{})
-	for _, ls := range groupLabels {
-		for k := range ls {
+	for i, b := range backends {
+		apis[i] = b.API
+		names[i] = b.Name
+		for k := range b.Labels {
 			ignoreLabels[k] = struct{}{}
 		}
 	}
 
 	// requiredCount=1: each server_group has unique labels, so it occupies its
-	// own fingerprint bucket of size 1. With partialResponse=false this means
+	// own fingerprint bucket of size 1. With PartialResponse=false this means
 	// EVERY backend must respond (any one error fails the whole query — see
-	// MultiAPI.missingRequired); partialResponse=true relaxes that to "at least
+	// MultiAPI.missingRequired); PartialResponse=true relaxes that to "at least
 	// one backend responded", returning partial results with a warning.
 	// antiAffinity/preferMax disabled — those are within-group HA concerns.
 	m, err := NewMultiAPI(apis, model.TimeFromUnix(0), nil, 1, false)
 	if err != nil {
 		return nil, err
 	}
-	m.partialResponse = partialResponse
-
-	names := make([]string, len(groupNames))
-	copy(names, groupNames)
+	m.partialResponse = opts.PartialResponse
 
 	// N-way merge in a single pass: every series is bucketed under its true
 	// origin ordinal, so collisions are attributed to the exact winner/loser
@@ -67,36 +75,32 @@ func NewCrossGroupMultiAPI(
 	// minimum ordinal). MultiAPI feeds these hooks the successful results sorted
 	// by ascending ordinal.
 	m.mergeFn = func(results []gathered[model.Value]) (model.Value, error) {
-		values := make([]model.Value, len(results))
-		ordinals := make([]int, len(results))
+		inputs := make([]promhttputil.OrdinalValue, len(results))
 		for i, r := range results {
-			values[i] = r.value
-			ordinals[i] = r.ordinal
+			inputs[i] = promhttputil.OrdinalValue{Ordinal: r.ordinal, Value: r.value}
 		}
-		merged, stats, err := promhttputil.MergeValuesDeterministic(values, ordinals, ignoreLabels)
+		merged, stats, err := promhttputil.MergeValuesDeterministic(inputs, ignoreLabels)
 		if err != nil {
 			return nil, err
 		}
-		if dedupCounter != nil {
+		if opts.Collisions != nil {
 			for pair, count := range stats.Pairs {
-				dedupCounter.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
+				opts.Collisions.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
 			}
 		}
 		return merged, nil
 	}
 
-	if dedupMetadata {
+	if opts.DedupMetadata {
 		m.mergeSeriesFn = func(results []gathered[[]model.LabelSet]) []model.LabelSet {
-			sets := make([][]model.LabelSet, len(results))
-			ordinals := make([]int, len(results))
+			inputs := make([]OrdinalLabelSets, len(results))
 			for i, r := range results {
-				sets[i] = r.value
-				ordinals[i] = r.ordinal
+				inputs[i] = OrdinalLabelSets{Ordinal: r.ordinal, Sets: r.value}
 			}
-			merged, stats := mergeLabelSetsDeterministic(sets, ordinals, ignoreLabels)
-			if dedupMetadataCounter != nil {
+			merged, stats := mergeLabelSetsDeterministic(inputs, ignoreLabels)
+			if opts.MetadataCollisions != nil {
 				for pair, count := range stats.Pairs {
-					dedupMetadataCounter.WithLabelValues(names[pair[0]], names[pair[1]], "series").Add(float64(count))
+					opts.MetadataCollisions.WithLabelValues(names[pair[0]], names[pair[1]], "series").Add(float64(count))
 				}
 			}
 			return merged

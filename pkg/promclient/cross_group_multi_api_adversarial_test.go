@@ -52,17 +52,14 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"thanos", "vm"}
-	groupLabels := []model.LabelSet{
-		{"backend": "thanos"},
-		{"backend": "vm"},
-	}
-
 	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "test_b1_e2e_dedup_collisions_total",
 	}, []string{"winner", "loser"})
 
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, counter, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "thanos", Labels: model.LabelSet{"backend": "thanos"}},
+		{API: api1, Name: "vm", Labels: model.LabelSet{"backend": "vm"}},
+	}, CrossGroupOpts{Collisions: counter})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -162,14 +159,11 @@ func TestB1E2E_ThreeBackendsNWayMerge(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"sg0", "sg1", "sg2"}
-	groupLabels := []model.LabelSet{
-		{"backend": "sg0"},
-		{"backend": "sg1"},
-		{"backend": "sg2"},
-	}
-
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1, api2}, groupNames, groupLabels, nil, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+		{API: api2, Name: "sg2", Labels: model.LabelSet{"backend": "sg2"}},
+	}, CrossGroupOpts{})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
@@ -238,13 +232,10 @@ func TestB1E2E_QueryRangeDedup(t *testing.T) {
 		},
 	}
 
-	groupNames := []string{"thanos", "vm"}
-	groupLabels := []model.LabelSet{
-		{"backend": "thanos"},
-		{"backend": "vm"},
-	}
-
-	m, err := NewCrossGroupMultiAPI([]API{api0, api1}, groupNames, groupLabels, nil, false, nil, false)
+	m, err := NewCrossGroupMultiAPI([]CrossGroupBackend{
+		{API: api0, Name: "thanos", Labels: model.LabelSet{"backend": "thanos"}},
+		{API: api1, Name: "vm", Labels: model.LabelSet{"backend": "vm"}},
+	}, CrossGroupOpts{})
 	if err != nil {
 		t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 	}
