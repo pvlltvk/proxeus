@@ -84,3 +84,17 @@ type PromxyConfig struct {
 	// cross-group fan-out, so it requires CrossGroupDedup to also be true.
 	CrossGroupPartialResponse bool `yaml:"cross_group_partial_response"`
 }
+
+// Validate checks the cross-group flag dependencies. Both
+// CrossGroupDedupMetadata and CrossGroupPartialResponse only affect the
+// cross-group fan-out/dedup machinery, so neither makes sense without
+// CrossGroupDedup also being enabled.
+func (c *PromxyConfig) Validate() error {
+	if c.CrossGroupDedupMetadata && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
+	}
+	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
+	}
+	return nil
+}

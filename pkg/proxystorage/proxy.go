@@ -114,9 +114,35 @@ func (p *ProxyStorage) GetState() *proxyStorageState {
 
 // ApplyConfig updates the current state of this ProxyStorage
 func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+
 	oldState := p.GetState() // Fetch the old state
 
 	failed := false
+
+	// Assign ordinals and default names before anything else, since both the
+	// label-uniqueness check below and the server group build loop depend on
+	// them.
+	for i, sgCfg := range c.ServerGroups {
+		sgCfg.Ordinal = i
+		if sgCfg.Name == "" {
+			sgCfg.Name = fmt.Sprintf("sg-%d", i)
+		}
+	}
+
+	// Pre-flight: every server_group should carry a unique, non-empty labels set.
+	// This is mandatory when cross_group_dedup is on (dedup uses these labels for
+	// series identity — a collision would silently merge unrelated series). With
+	// dedup off it's only a hygiene concern (ambiguous provenance), so we warn
+	// rather than refuse to start, preserving historical promxy behavior.
+	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
+		if c.CrossGroupDedup {
+			return err
+		}
+		logrus.Warnf("%s (not fatal without cross_group_dedup, but provenance will be ambiguous)", err)
+	}
 
 	apis := make([]promclient.API, len(c.ServerGroups))
 	newState := &proxyStorageState{
@@ -124,10 +150,6 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		cfg: c,
 	}
 	for i, sgCfg := range c.ServerGroups {
-		sgCfg.Ordinal = i
-		if sgCfg.Name == "" {
-			sgCfg.Name = fmt.Sprintf("sg-%d", i)
-		}
 		tmp, err := servergroup.NewServerGroup()
 		if err != nil {
 			failed = true
@@ -150,32 +172,6 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	if failed {
 		newState.Cancel(nil)
 		return fmt.Errorf("error applying config to one or more server group(s)")
-	}
-
-	// Pre-flight: every server_group should carry a unique, non-empty labels set.
-	// This is mandatory when cross_group_dedup is on (dedup uses these labels for
-	// series identity — a collision would silently merge unrelated series). With
-	// dedup off it's only a hygiene concern (ambiguous provenance), so we warn
-	// rather than refuse to start, preserving historical promxy behavior.
-	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
-		if c.CrossGroupDedup {
-			newState.Cancel(nil)
-			return err
-		}
-		logrus.Warnf("%s (not fatal without cross_group_dedup, but provenance will be ambiguous)", err)
-	}
-
-	// Pre-flight: metadata dedup is meaningless without query dedup — both
-	// rely on the same per-group external-label trust assumption.
-	if c.CrossGroupDedupMetadata && !c.CrossGroupDedup {
-		newState.Cancel(nil)
-		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
-	}
-
-	// Pre-flight: partial response only affects the cross-group fan-out.
-	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
-		newState.Cancel(nil)
-		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
 	}
 
 	var (
