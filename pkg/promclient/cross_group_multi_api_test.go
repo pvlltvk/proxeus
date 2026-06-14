@@ -54,33 +54,37 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"server_group": "sg1"}},
 	}, CrossGroupOpts{Collisions: counter})
 
-	v, _, err := m.Query(context.Background(), "cpu", time.Now())
-	if err != nil {
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
-	vec, ok := v.(model.Vector)
-	if !ok {
-		t.Fatalf("expected model.Vector, got %T", v)
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
 	}
 
 	// Expect: cpu (winner sg0), mem (only in sg0), disk (only in sg1) = 3 series.
-	if len(vec) != 3 {
-		t.Fatalf("expected 3 series, got %d: %v", len(vec), vec)
+	if len(mat) != 3 {
+		t.Fatalf("expected 3 series, got %d: %v", len(mat), mat)
 	}
 
-	// The cpu series must come from sg0 (lower ordinal wins).
-	var cpuSample *model.Sample
-	for _, s := range vec {
+	// The cpu series must come from sg0 (lower ordinal wins), and the
+	// always-Matrix path yields a single-sample stream for the instant query.
+	var cpuStream *model.SampleStream
+	for _, s := range mat {
 		if s.Metric["__name__"] == "cpu" {
-			cpuSample = s
+			cpuStream = s
 		}
 	}
-	if cpuSample == nil {
+	if cpuStream == nil {
 		t.Fatal("cpu series not found in result")
 	}
-	if cpuSample.Metric["server_group"] != "sg0" {
-		t.Fatalf("expected cpu winner 'sg0', got %q", cpuSample.Metric["server_group"])
+	if cpuStream.Metric["server_group"] != "sg0" {
+		t.Fatalf("expected cpu winner 'sg0', got %q", cpuStream.Metric["server_group"])
+	}
+	if len(cpuStream.Values) != 1 {
+		t.Fatalf("expected a single-sample stream for an instant query, got %d samples", len(cpuStream.Values))
 	}
 
 	// Verify the dedup counter was incremented for the cpu collision.
@@ -123,9 +127,11 @@ func TestNewCrossGroupMultiAPI_CollisionCounterIncremented(t *testing.T) {
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
 	}, CrossGroupOpts{Collisions: counter})
 
-	_, _, err := m.Query(context.Background(), "cpu", time.Now())
-	if err != nil {
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
 		t.Fatalf("Query: %v", err)
+	}
+	for ss.Next() {
 	}
 
 	// One cpu series collided; sg0 (ordinal 0) wins over sg1 (ordinal 1).
@@ -275,17 +281,17 @@ func TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal(t *testing.T) {
 		{API: api2, Name: "sg2", Labels: model.LabelSet{"backend": "sg2"}},
 	}, CrossGroupOpts{Collisions: counter})
 
-	v, _, err := m.Query(context.Background(), "cpu", time.Now())
-	if err != nil {
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
 	// cpu must come from sg1 (lower of the two contributing ordinals).
-	vec, ok := v.(model.Vector)
-	if !ok {
-		t.Fatalf("expected model.Vector, got %T", v)
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
 	}
-	for _, s := range vec {
+	for _, s := range mat {
 		if s.Metric["__name__"] == "cpu" && s.Metric["backend"] != "sg1" {
 			t.Fatalf("cpu: expected winner backend sg1, got %q", s.Metric["backend"])
 		}

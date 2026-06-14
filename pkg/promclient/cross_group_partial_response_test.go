@@ -8,9 +8,20 @@ import (
 	"testing"
 	"time"
 
-	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/annotations"
 )
+
+// warningStrings flattens annotations.Annotations into the error strings, for
+// tests that assert on warning text.
+func warningStrings(a annotations.Annotations) []string {
+	out := make([]string, 0, len(a))
+	for _, err := range a {
+		out = append(out, err.Error())
+	}
+	return out
+}
 
 // keyedStub is an API whose Key() returns a distinct labelset, so each instance
 // occupies its own fingerprint bucket — exactly how real server_groups behave
@@ -25,8 +36,11 @@ type keyedStub struct {
 
 func (s *keyedStub) Key() model.LabelSet { return s.key }
 
-func (s *keyedStub) Query(_ context.Context, _ string, _ time.Time) (model.Value, v1.Warnings, error) {
-	return s.val, nil, s.err
+func (s *keyedStub) Query(_ context.Context, _ string, _ time.Time) storage.SeriesSet {
+	if s.err != nil {
+		return storage.ErrSeriesSet(s.err)
+	}
+	return ModelValueToSeriesSet(s.val, nil, nil)
 }
 
 // blockingStub is a keyed API whose Query blocks until its context is canceled
@@ -41,12 +55,12 @@ type blockingStub struct {
 
 func (s *blockingStub) Key() model.LabelSet { return s.key }
 
-func (s *blockingStub) Query(ctx context.Context, _ string, _ time.Time) (model.Value, v1.Warnings, error) {
+func (s *blockingStub) Query(ctx context.Context, _ string, _ time.Time) storage.SeriesSet {
 	if s.block {
 		<-ctx.Done()
-		return nil, nil, ctx.Err()
+		return storage.ErrSeriesSet(ctx.Err())
 	}
-	return s.val, nil, nil
+	return ModelValueToSeriesSet(s.val, nil, nil)
 }
 
 func crossGroupPartial(t *testing.T, apis []API, partial bool) *MultiAPI {
@@ -72,8 +86,8 @@ func TestCrossGroupPartialResponse_DisabledFailsHard(t *testing.T) {
 	}
 	m := crossGroupPartial(t, apis, false)
 
-	_, _, err := m.Query(context.Background(), "cpu", time.Now())
-	if err == nil {
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err == nil {
 		t.Fatal("expected error when a backend fails and partial_response is disabled")
 	}
 }
@@ -87,14 +101,20 @@ func TestCrossGroupPartialResponse_EnabledReturnsPartial(t *testing.T) {
 	}
 	m := crossGroupPartial(t, apis, true)
 
-	v, warnings, err := m.Query(context.Background(), "cpu", time.Now())
-	if err != nil {
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
 		t.Fatalf("expected success with partial_response, got error: %v", err)
 	}
-	res, ok := v.(model.Vector)
-	if !ok || len(res) != 1 || res[0].Metric["server_group"] != "sg0" {
-		t.Fatalf("expected the healthy sg0 series, got %v", v)
+
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
 	}
+	if len(mat) != 1 || mat[0].Metric["server_group"] != "sg0" {
+		t.Fatalf("expected the healthy sg0 series, got %v", mat)
+	}
+
+	warnings := warningStrings(ss.Warnings())
 	if len(warnings) == 0 {
 		t.Fatal("expected a degradation warning, got none")
 	}
@@ -119,16 +139,20 @@ func TestCrossGroupPartialResponse_SlowLowOrdinalHonorsDeadline(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	v, warnings, err := m.Query(ctx, "cpu", time.Now())
+	ss := m.Query(ctx, "cpu", time.Now())
 	elapsed := time.Since(start)
 
-	if err != nil {
+	if err := ss.Err(); err != nil {
 		t.Fatalf("expected partial success when a low-ordinal backend hangs, got error: %v", err)
 	}
-	res, ok := v.(model.Vector)
-	if !ok || len(res) != 1 || res[0].Metric["server_group"] != "sg1" {
-		t.Fatalf("expected the healthy sg1 series, got %v", v)
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
 	}
+	if len(mat) != 1 || mat[0].Metric["server_group"] != "sg1" {
+		t.Fatalf("expected the healthy sg1 series, got %v", mat)
+	}
+	warnings := warningStrings(ss.Warnings())
 	if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "|"), "partial_response") {
 		t.Fatalf("expected a partial_response warning, got %v", warnings)
 	}
@@ -151,10 +175,10 @@ func TestCrossGroupPartialResponse_DisabledSlowBackendHonorsDeadline(t *testing.
 	defer cancel()
 
 	start := time.Now()
-	_, _, err := m.Query(ctx, "cpu", time.Now())
+	ss := m.Query(ctx, "cpu", time.Now())
 	elapsed := time.Since(start)
 
-	if err == nil {
+	if err := ss.Err(); err == nil {
 		t.Fatal("expected a context error when a backend hangs and partial_response is off")
 	}
 	if elapsed > 2*time.Second {
@@ -171,7 +195,7 @@ func TestCrossGroupPartialResponse_AllBackendsFail(t *testing.T) {
 	}
 	m := crossGroupPartial(t, apis, true)
 
-	if _, _, err := m.Query(context.Background(), "cpu", time.Now()); err == nil {
+	if ss := m.Query(context.Background(), "cpu", time.Now()); ss.Err() == nil {
 		t.Fatal("expected error when all backends fail, even with partial_response")
 	}
 }

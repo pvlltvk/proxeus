@@ -61,20 +61,22 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 		{API: api1, Name: "vm", Labels: model.LabelSet{"backend": "vm"}},
 	}, CrossGroupOpts{Collisions: counter})
 
-	// First call to establish the reference.
-	v0, _, err := m.Query(context.Background(), "cpu", time.Now())
-	if err != nil {
+	// First call to establish the reference. The cross-group merge always
+	// routes through the Matrix path, so an instant query yields one
+	// single-sample stream per series.
+	ss0 := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss0.Err(); err != nil {
 		t.Fatalf("Query iteration 0: %v", err)
 	}
 
-	vec0, ok := v0.(model.Vector)
-	if !ok {
-		t.Fatalf("expected model.Vector, got %T", v0)
+	mat0, err := SeriesSetToMatrix(ss0)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix iteration 0: %v", err)
 	}
 
 	// Expect: cpu (thanos wins), mem (thanos wins), disk (thanos only), net (vm only) = 4 series.
-	if len(vec0) != 4 {
-		t.Fatalf("expected 4 series, got %d: %v", len(vec0), vec0)
+	if len(mat0) != 4 {
+		t.Fatalf("expected 4 series, got %d: %v", len(mat0), mat0)
 	}
 
 	// Verify overlapping series carry the lower-ordinal backend's values.
@@ -89,31 +91,38 @@ func TestB1E2E_TwoBackendsLowerOrdinalWins(t *testing.T) {
 		"disk": {wantValue: 3},
 		"net":  {wantValue: 77},
 	}
-	for _, s := range vec0 {
+	for _, s := range mat0 {
 		name := s.Metric["__name__"]
 		want, ok := wantSeries[name]
 		if !ok {
 			t.Fatalf("unexpected series %q in result", name)
 		}
-		if s.Value != want.wantValue {
-			t.Fatalf("%s: expected value %v, got %v", name, want.wantValue, s.Value)
+		if len(s.Values) != 1 {
+			t.Fatalf("%s: expected a single-sample stream for an instant query, got %d samples", name, len(s.Values))
+		}
+		if s.Values[0].Value != want.wantValue {
+			t.Fatalf("%s: expected value %v, got %v", name, want.wantValue, s.Values[0].Value)
 		}
 		if want.wantBackend != "" && s.Metric["backend"] != want.wantBackend {
 			t.Fatalf("%s: expected backend=%s, got %q", name, want.wantBackend, s.Metric["backend"])
 		}
 	}
 
-	ref, err := json.Marshal(v0)
+	ref, err := json.Marshal(mat0)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 
 	for i := 1; i < iterations; i++ {
-		vi, _, err := m.Query(context.Background(), "cpu", time.Now())
-		if err != nil {
+		ssi := m.Query(context.Background(), "cpu", time.Now())
+		if err := ssi.Err(); err != nil {
 			t.Fatalf("Query iteration %d: %v", i, err)
 		}
-		got, err := json.Marshal(vi)
+		mati, err := SeriesSetToMatrix(ssi)
+		if err != nil {
+			t.Fatalf("iteration %d SeriesSetToMatrix: %v", i, err)
+		}
+		got, err := json.Marshal(mati)
 		if err != nil {
 			t.Fatalf("iteration %d json.Marshal: %v", i, err)
 		}
@@ -157,34 +166,37 @@ func TestB1E2E_ThreeBackendsNWayMerge(t *testing.T) {
 		{API: api2, Name: "sg2", Labels: model.LabelSet{"backend": "sg2"}},
 	}, CrossGroupOpts{})
 
-	v, _, err := m.Query(context.Background(), "cpu", time.Now())
-	if err != nil {
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
-	vec, ok := v.(model.Vector)
-	if !ok {
-		t.Fatalf("expected model.Vector, got %T", v)
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
 	}
 
-	if len(vec) != 2 {
-		t.Fatalf("expected 2 series (cpu + mem), got %d: %v", len(vec), vec)
+	if len(mat) != 2 {
+		t.Fatalf("expected 2 series (cpu + mem), got %d: %v", len(mat), mat)
 	}
 
-	var cpuSample *model.Sample
-	for _, s := range vec {
+	var cpuStream *model.SampleStream
+	for _, s := range mat {
 		if s.Metric["__name__"] == "cpu" {
-			cpuSample = s
+			cpuStream = s
 		}
 	}
-	if cpuSample == nil {
+	if cpuStream == nil {
 		t.Fatal("cpu series not found in result")
 	}
-	if cpuSample.Metric["backend"] != "sg0" {
-		t.Fatalf("expected lowest-ordinal winner 'sg0', got %q", cpuSample.Metric["backend"])
+	if cpuStream.Metric["backend"] != "sg0" {
+		t.Fatalf("expected lowest-ordinal winner 'sg0', got %q", cpuStream.Metric["backend"])
 	}
-	if cpuSample.Value != 1 {
-		t.Fatalf("expected sg0 value 1, got %v", cpuSample.Value)
+	if len(cpuStream.Values) != 1 {
+		t.Fatalf("expected a single-sample stream for an instant query, got %d samples", len(cpuStream.Values))
+	}
+	if cpuStream.Values[0].Value != 1 {
+		t.Fatalf("expected sg0 value 1, got %v", cpuStream.Values[0].Value)
 	}
 }
 
@@ -227,14 +239,14 @@ func TestB1E2E_QueryRangeDedup(t *testing.T) {
 	}, CrossGroupOpts{})
 
 	r := v1.Range{Start: time.Now().Add(-time.Hour), End: time.Now(), Step: time.Minute}
-	v, _, err := m.QueryRange(context.Background(), "cpu", r)
-	if err != nil {
+	ss := m.QueryRange(context.Background(), "cpu", r)
+	if err := ss.Err(); err != nil {
 		t.Fatalf("QueryRange: %v", err)
 	}
 
-	mat, ok := v.(model.Matrix)
-	if !ok {
-		t.Fatalf("expected model.Matrix, got %T", v)
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
 	}
 
 	// Expect: cpu (thanos wins), disk (thanos only), net (vm only) = 3 streams.
