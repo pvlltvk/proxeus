@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/common/model"
+
 	proxyconfig "github.com/jacksontj/promxy/pkg/config"
 	"github.com/jacksontj/promxy/pkg/servergroup"
-	"github.com/prometheus/common/model"
 )
 
 // stubStorage satisfies storageAccessor for tests.

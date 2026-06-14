@@ -175,7 +175,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	}
 
 	var (
-		multiApi *promclient.MultiAPI
+		multiAPI *promclient.MultiAPI
 		err      error
 	)
 	if c.CrossGroupDedup {
@@ -189,21 +189,21 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		}
 		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t)",
 			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse)
-		multiApi, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
+		multiAPI, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
 			DedupMetadata:      c.CrossGroupDedupMetadata,
 			PartialResponse:    c.CrossGroupPartialResponse,
 			Collisions:         crossGroupDedupCollisions,
 			MetadataCollisions: crossGroupDedupMetadataCollisions,
 		})
 	} else {
-		multiApi, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
+		multiAPI, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), nil, len(apis), false)
 	}
 	if err != nil {
 		newState.Cancel(nil)
 		return err
 	}
 
-	newState.client = promclient.NewTimeTruncate(multiApi)
+	newState.client = promclient.NewTimeTruncate(multiAPI)
 
 	// Check for remote_write (for appender)
 	if c.PromConfig.RemoteWriteConfigs != nil {

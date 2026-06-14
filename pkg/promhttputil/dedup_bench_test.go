@@ -35,7 +35,7 @@ func benchVector(backend string, nSeries, sharedSeries int) model.Vector {
 	return v
 }
 
-// benchMatrix is benchVector's range-query analogue: each series carries
+// benchMatrix is benchVector's range-query analog: each series carries
 // nSamples points, approximating a downsampled long-range query.
 func benchMatrix(backend string, nSeries, sharedSeries, nSamples int) model.Matrix {
 	m := make(model.Matrix, nSeries)

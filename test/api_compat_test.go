@@ -64,8 +64,8 @@ func TestSeriesDedup_HTTP(t *testing.T) {
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
-				backendA.Shutdown(ctx)
-				backendB.Shutdown(ctx)
+				_ = backendA.Shutdown(ctx)
+				_ = backendB.Shutdown(ctx)
 				<-stopA
 				<-stopB
 			}()
@@ -92,7 +92,7 @@ promxy:
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
-				proxySrv.Shutdown(ctx)
+				_ = proxySrv.Shutdown(ctx)
 				<-stopP
 			}()
 
@@ -191,9 +191,9 @@ promxy:
 	return "http://" + proxyAddr, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		proxySrv.Shutdown(ctx)
-		backendA.Shutdown(ctx)
-		backendB.Shutdown(ctx)
+		_ = proxySrv.Shutdown(ctx)
+		_ = backendA.Shutdown(ctx)
+		_ = backendB.Shutdown(ctx)
 		<-stopP
 		<-stopA
 		<-stopB

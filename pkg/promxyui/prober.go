@@ -103,7 +103,7 @@ func newProber(ps storageAccessor) *Prober {
 }
 
 // Run starts the probe loop. It probes immediately on entry, then every interval.
-// It returns when ctx is cancelled.
+// It returns when ctx is canceled.
 func (p *Prober) Run(ctx context.Context) {
 	p.probeAll(ctx)
 	ticker := time.NewTicker(p.interval)
@@ -137,7 +137,7 @@ func (p *Prober) probeAll(ctx context.Context) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(maxProbeConcurrency)
 
-	for _, sgCfg := range cfg.PromxyConfig.ServerGroups {
+	for _, sgCfg := range cfg.ServerGroups {
 		sg, ok := sgByName[sgCfg.Name]
 		if !ok {
 			continue
@@ -288,7 +288,7 @@ func (p *Prober) Inventory() Inventory {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	for i, sgCfg := range cfg.PromxyConfig.ServerGroups {
+	for i, sgCfg := range cfg.ServerGroups {
 		gi := GroupInfo{
 			Name:    sgCfg.Name,
 			Ordinal: i,

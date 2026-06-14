@@ -190,7 +190,7 @@ func mergeVectorsDeterministic(vectors []model.Vector, ordinals []int, ignore ma
 	return result
 }
 
-// mergeMatricesDeterministic is mergeVectorsDeterministic's range-query analogue.
+// mergeMatricesDeterministic is mergeVectorsDeterministic's range-query analog.
 // Streams are not interleaved (this is cross-backend, not HA dedup); the
 // lowest-ordinal source's stream wins each bucket.
 func mergeMatricesDeterministic(matrices []model.Matrix, ordinals []int, ignore map[model.LabelName]struct{}, stats *DedupStats) model.Matrix {

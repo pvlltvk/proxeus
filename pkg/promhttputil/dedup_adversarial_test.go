@@ -446,7 +446,7 @@ func TestMergeValuesDeterministic_IgnoreLabelMissingOnOneSource(t *testing.T) {
 	}
 }
 
-// TestMergeValuesDeterministic_DuplicateReducedFPWithinSource pins the behaviour
+// TestMergeValuesDeterministic_DuplicateReducedFPWithinSource pins the behavior
 // when a single input Vector contains two samples with the same reduced
 // fingerprint (which can't happen from a real Prometheus, but the implementation
 // must not panic or produce incorrect output). The first sample seen for a

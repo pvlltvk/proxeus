@@ -40,7 +40,7 @@ type Handler struct {
 	mux     *http.ServeMux
 }
 
-// NewHandler constructs a Handler. ps is used to initialise the background
+// NewHandler constructs a Handler. ps is used to initialize the background
 // Prober which health-checks every (group, target) every 30 s. routePrefix is
 // the -web.route-prefix the UI is served under and is used to build redirect
 // targets that honor the prefix.
@@ -56,7 +56,7 @@ func NewHandler(ps *proxystorage.ProxyStorage, routePrefix string) (*Handler, er
 	}, nil
 }
 
-// Run starts the background health-probe loop. It blocks until ctx is cancelled.
+// Run starts the background health-probe loop. It blocks until ctx is canceled.
 // Intended usage: go h.Run(ctx).
 func (h *Handler) Run(ctx context.Context) {
 	h.prober.Run(ctx)
