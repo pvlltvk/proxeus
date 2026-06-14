@@ -22,7 +22,9 @@ import (
 
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/storage"
 )
 
 // TestB1E2E_TwoBackendsLowerOrdinalWins is the primary end-to-end integration
@@ -268,5 +270,211 @@ func TestB1E2E_QueryRangeDedup(t *testing.T) {
 	}
 	if cpuStream.Values[0].Value != 10 {
 		t.Fatalf("expected thanos first value 10, got %v", cpuStream.Values[0].Value)
+	}
+}
+
+// TestB1E2E_WinnerArrivesAfterLoserOnTheWire verifies that scatterMerge's
+// shared result channel does not corrupt ordinal attribution when the
+// lower-ordinal ("winner") backend's response arrives on the wire AFTER the
+// higher-ordinal ("loser") backend's. ordinal travels with each chanResult
+// (not inferred from arrival order/loop index), and sortOrdinalSeriesSets
+// re-sorts by ordinal before merging -- so the lower-ordinal backend (sg0)
+// must still win the "cpu" collision and be the recorded winner, even though
+// sg1 answers first.
+func TestB1E2E_WinnerArrivesAfterLoserOnTheWire(t *testing.T) {
+	api0 := &stubAPI{ // ordinal 0 (winner), but slow to respond
+		query: func() model.Value {
+			time.Sleep(50 * time.Millisecond)
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg0"}, Value: 1, Timestamp: 100},
+			}
+		},
+	}
+	api1 := &stubAPI{ // ordinal 1 (loser), responds immediately
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg1"}, Value: 99, Timestamp: 100},
+			}
+		},
+	}
+
+	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_winner_after_loser_collisions_total",
+	}, []string{"winner", "loser"})
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{Collisions: counter})
+
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
+	}
+
+	if len(mat) != 1 {
+		t.Fatalf("expected 1 series (cpu), got %d: %v", len(mat), mat)
+	}
+	if got := mat[0].Metric["backend"]; got != "sg0" {
+		t.Fatalf("expected lower-ordinal sg0 to win despite arriving second, got backend=%q", got)
+	}
+
+	// Collision must be attributed sg0-wins-over-sg1, never the reverse.
+	if got := testutil.ToFloat64(counter.WithLabelValues("sg0", "sg1")); got != 1 {
+		t.Fatalf("expected collision counter winner=sg0 loser=sg1 to be 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(counter.WithLabelValues("sg1", "sg0")); got != 0 {
+		t.Fatalf("collision misattributed in reverse (winner=sg1 loser=sg0): got %v, want 0", got)
+	}
+}
+
+// TestB1E2E_SingleBackend verifies the degenerate single-backend case: with
+// only one server_group configured, NewCrossGroupMultiAPI must construct
+// successfully (requiredCount=1 is satisfiable by one API) and Query must
+// pass the backend's data through unchanged.
+func TestB1E2E_SingleBackend(t *testing.T) {
+	api0 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg0"}, Value: 42, Timestamp: 100},
+			}
+		},
+	}
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+	}, CrossGroupOpts{})
+
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
+	}
+	if len(mat) != 1 {
+		t.Fatalf("expected 1 series, got %d: %v", len(mat), mat)
+	}
+	if mat[0].Values[0].Value != 42 {
+		t.Fatalf("expected value 42, got %v", mat[0].Values[0].Value)
+	}
+}
+
+// TestB1E2E_EmptySeriesSetAmongHealthyBackends verifies that a backend
+// returning a successful-but-empty result (zero series, no error) does not
+// disrupt the merge: the other backend's series must still appear in the
+// merged result, and the empty backend contributes nothing.
+func TestB1E2E_EmptySeriesSetAmongHealthyBackends(t *testing.T) {
+	api0 := &stubAPI{ // returns no series at all
+		query: func() model.Value {
+			return model.Vector{}
+		},
+	}
+	api1 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"__name__": "cpu", "backend": "sg1"}, Value: 5, Timestamp: 100},
+			}
+		},
+	}
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{})
+
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
+	}
+	if len(mat) != 1 {
+		t.Fatalf("expected 1 series from the non-empty backend, got %d: %v", len(mat), mat)
+	}
+	if mat[0].Metric["backend"] != "sg1" {
+		t.Fatalf("expected the sg1 series, got %v", mat[0])
+	}
+}
+
+// TestB1E2E_DuplicateFullLabelSeriesAcrossGroups covers D2: two backends
+// returning a series with IDENTICAL full labels (including the per-group
+// external "backend" label -- not just the reduced fingerprint). This is the
+// near-impossible-in-practice exact-dup case the spec calls out: the
+// always-Matrix path's "keep first" rule must apply without crashing or
+// double-counting a collision (the reduced-fingerprint bucket sees an exact
+// labelset match, which mergeMatricesDeterministic treats as "keep first",
+// not a collision).
+func TestB1E2E_DuplicateFullLabelSeriesAcrossGroups(t *testing.T) {
+	dup := model.Metric{"__name__": "cpu", "instance": "x", "backend": "shared"}
+
+	api0 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: dup.Clone(), Value: 1, Timestamp: 100},
+			}
+		},
+	}
+	api1 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: dup.Clone(), Value: 1, Timestamp: 100},
+			}
+		},
+	}
+
+	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_duplicate_full_label_collisions_total",
+	}, []string{"winner", "loser"})
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{Collisions: counter})
+
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
+	}
+	if len(mat) != 1 {
+		t.Fatalf("expected exact full-label duplicates to collapse to 1 series, got %d: %v", len(mat), mat)
+	}
+	if mat[0].Metric["backend"] != "shared" {
+		t.Fatalf("expected the shared-label series, got %v", mat[0])
+	}
+
+	// An exact full-label duplicate is "keep first", not a genuine collision;
+	// the collision counter must not be incremented for it.
+	if got := testutil.ToFloat64(counter.WithLabelValues("sg0", "sg1")); got != 0 {
+		t.Fatalf("exact full-label duplicate should not count as a collision, got %v", got)
+	}
+}
+
+// regressionEmptySeriesSet is a sanity check that storage.EmptySeriesSet()
+// (used as stubAPI's zero value) round-trips through drainToMatrix as a
+// non-nil, zero-length model.Matrix with no error -- the shape
+// mergeMatricesDeterministic must tolerate when one input is empty.
+func TestDrainToMatrix_EmptySeriesSet(t *testing.T) {
+	mat, err := drainToMatrix(storage.EmptySeriesSet())
+	if err != nil {
+		t.Fatalf("drainToMatrix: %v", err)
+	}
+	if len(mat) != 0 {
+		t.Fatalf("expected empty matrix, got %d streams: %v", len(mat), mat)
 	}
 }
