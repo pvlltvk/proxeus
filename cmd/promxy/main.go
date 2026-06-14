@@ -269,7 +269,11 @@ func buildInjectedReactApp(opts *web.Options, headScript, navScript string) ([]b
 	// served at a sub-path like /backends. Under a route prefix the upstream
 	// web handler serves the bundled assets at <prefix>/assets/.
 	idx = checkedReplaceAll(idx, []byte(`"./assets/`), []byte(`"`+prefix+`/assets/`), "double-quoted asset path prefix")
-	idx = checkedReplaceAll(idx, []byte(`'./assets/`), []byte(`'`+prefix+`/assets/`), "single-quoted asset path prefix")
+	// The single-quoted form is an optional defensive variant: Vite emits the
+	// entry script/style with double quotes, so this form is normally absent.
+	// Rewrite it when present, but unlike the double-quoted form its absence is
+	// expected and harmless, so use a plain ReplaceAll that does not warn.
+	idx = bytes.ReplaceAll(idx, []byte(`'./assets/`), []byte(`'`+prefix+`/assets/`))
 
 	// Expose the route prefix to the injected scripts so they can build their
 	// own absolute paths. Must be injected before headScript so head.js
