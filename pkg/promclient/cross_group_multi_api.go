@@ -3,9 +3,18 @@ package promclient
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/storage"
 
 	"github.com/jacksontj/promxy/pkg/promhttputil"
 )
+
+// drainToMatrix materializes ss into a model.Matrix, one *model.SampleStream
+// per series (labels + all samples). This is the boundary between the
+// SeriesSet world and promhttputil's tested model.Value dedup core
+// (MergeValuesDeterministic), which cross-group dedup reuses unchanged.
+func drainToMatrix(ss storage.SeriesSet) (model.Matrix, error) {
+	return SeriesSetToMatrix(ss)
+}
 
 // CrossGroupBackend is one server_group's API client plus the identity
 // (name and external labels) used for cross-group dedup and collision
@@ -72,23 +81,37 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	// N-way merge in a single pass: every series is bucketed under its true
 	// origin ordinal, so collisions are attributed to the exact winner/loser
 	// server_group (the chained binary form misattributed them to the running
-	// minimum ordinal). MultiAPI feeds these hooks the successful results sorted
-	// by ascending ordinal.
-	m.mergeFn = func(results []gathered[model.Value]) (model.Value, error) {
-		inputs := make([]promhttputil.OrdinalValue, len(results))
-		for i, r := range results {
-			inputs[i] = promhttputil.OrdinalValue{Ordinal: r.ordinal, Value: r.value}
+	// minimum ordinal). scatterMerge feeds this hook the successful SeriesSets
+	// sorted by ascending ordinal.
+	//
+	// Cross-group dedup buckets on the reduced fingerprint (full labels minus
+	// the per-group external labels), which a label-sorted streaming merge
+	// can't bucket without a re-sort, and the lowest-ordinal winner for any
+	// bucket may arrive in any input -- so this is a pipeline barrier
+	// regardless. We materialize each group's SeriesSet into a model.Matrix
+	// and reuse the tested promhttputil.MergeValuesDeterministic core
+	// (always via its ValMatrix branch: instant queries become single-sample
+	// streams, the same shape PromAPIV1.Query already produces via
+	// ModelValueToSeriesSet).
+	m.seriesSetMergeFn = func(sets []ordinalSeriesSet) storage.SeriesSet {
+		inputs := make([]promhttputil.OrdinalValue, len(sets))
+		for i, s := range sets {
+			matrix, err := drainToMatrix(s.ss)
+			if err != nil {
+				return ModelValueToSeriesSet(nil, nil, err)
+			}
+			inputs[i] = promhttputil.OrdinalValue{Ordinal: s.ordinal, Value: matrix}
 		}
 		merged, stats, err := promhttputil.MergeValuesDeterministic(inputs, ignoreLabels)
 		if err != nil {
-			return nil, err
+			return ModelValueToSeriesSet(nil, nil, err)
 		}
 		if opts.Collisions != nil {
 			for pair, count := range stats.Pairs {
 				opts.Collisions.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
 			}
 		}
-		return merged, nil
+		return ModelValueToSeriesSet(merged, nil, nil)
 	}
 
 	if opts.DedupMetadata {

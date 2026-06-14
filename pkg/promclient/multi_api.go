@@ -391,13 +391,12 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 		ls      model.Fingerprint
 		ordinal int
 	}
-	resultChans := make([]chan chanResult, len(m.apis))
+	resultChan := make(chan chanResult, len(m.apis))
 	outstandingRequests := make(map[model.Fingerprint]int)
 
 	for i, api := range m.apis {
-		resultChans[i] = make(chan chanResult, 1)
 		outstandingRequests[m.apiFingerprints[i]]++
-		go func(i int, retChan chan chanResult, api API) {
+		go func(i int, api API) {
 			start := time.Now()
 			ss := call(childContext, api)
 			took := time.Since(start)
@@ -406,15 +405,15 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 				status = "error"
 			}
 			m.recordMetric(i, op, status, took.Seconds())
-			retChan <- chanResult{ss: ss, ls: m.apiFingerprints[i], ordinal: i}
-		}(i, resultChans[i], api)
+			resultChan <- chanResult{ss: ss, ls: m.apiFingerprints[i], ordinal: i}
+		}(i, api)
 	}
 
 	var sets []ordinalSeriesSet
 	var warnings annotations.Annotations
 	var lastError error
 	successMap := make(map[model.Fingerprint]int)
-	for i := 0; i < len(m.apis); i++ {
+	for range m.apis {
 		select {
 		case <-ctx.Done():
 			// Caller deadline/cancel fired. In partial-response mode, keep what
@@ -427,7 +426,7 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 			}
 			return promapi.NewSeriesSet(nil, warnings, ctx.Err())
 
-		case ret := <-resultChans[i]:
+		case ret := <-resultChan:
 			outstandingRequests[ret.ls]--
 			warnings = MergeAnnotations(warnings, ret.ss.Warnings())
 			if err := NormalizePromError(ret.ss.Err()); err != nil {
