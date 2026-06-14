@@ -37,6 +37,11 @@ promxy:
         - targets:
           - localhost:9090
 
+      # Optional human-readable name for this server group; shown in logs and
+      # exposed as the `name` label on the server_group_targets metric. The
+      # group's ordinal is always included regardless of whether a name is set.
+      name: primary-cluster
+
       # labels to be added to metrics retrieved from this server_group
       labels:
         sg: localhost_9090
@@ -178,6 +183,22 @@ promxy:
           __name__:
             - up
 
+      # inject_matchers is a list of label matchers that are injected into every selector
+      # of every request sent to this server_group. This effectively scopes the server_group
+      # to the subset of downstream data matching these matchers -- even for queries that
+      # never reference the labels being injected (e.g. with `cluster="A"` configured,
+      # `count(up)` is sent downstream as `count(up{cluster="A"})`).
+      # Each entry is a single matcher in promql syntax (no enclosing braces).
+      # Unlike `labels` (which only adds labels to responses) and `label_filter` (which only
+      # drops queries that can't match), `inject_matchers` always adds the matchers to the
+      # queries themselves. A common use-case is presenting a per-tenant view of a merged
+      # downstream (e.g. a single Mimir/Thanos/Prometheus holding many clusters) by running a
+      # promxy per tenant -- see https://github.com/jacksontj/promxy/issues/698
+      # NOTE: this is not a "secure" mechanism; it only mutates the request matchers and
+      #       relies on the downstream honoring them.
+      inject_matchers:
+        - 'cluster="A"'
+
       # Map of HTTP headers to add to remote read HTTP calls made to this downstream
       # the main use-case for this is to support the X-Scope-OrgID header required by Mimir and Cortex
       # in multi-tenancy mode.
@@ -191,7 +212,8 @@ promxy:
         X-Promxy-Source: promxy-1
 
     # as many additional server groups as you have
-    - static_configs:
+    - name: secondary-cluster
+      static_configs:
         - targets:
           - localhost:9091
       labels:

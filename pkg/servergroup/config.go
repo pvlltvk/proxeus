@@ -2,6 +2,7 @@ package servergroup
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	config_util "github.com/prometheus/common/config"
@@ -11,7 +12,9 @@ import (
 	"github.com/jacksontj/promxy/pkg/promclient"
 
 	"github.com/prometheus/prometheus/discovery"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
+	"github.com/prometheus/prometheus/promql/parser"
 )
 
 var (
@@ -44,7 +47,7 @@ type Config struct {
 	// Name is the human-readable identifier for this server group, used as the
 	// "server_group" label on per-backend metrics and in error messages.
 	// When left empty, ApplyConfig in proxystorage populates it with "sg-<Ordinal>".
-	Name string `yaml:"name"`
+	Name string `yaml:"name,omitempty"`
 	// RemoteRead directs promxy to load RAW data (meaning matrix selectors such as `foo[1h]`)
 	// through the RemoteRead API on prom.
 	// Pros:
@@ -218,6 +221,27 @@ type Config struct {
 
 	LabelFilterConfig *promclient.LabelFilterConfig `yaml:"label_filter"`
 
+	// InjectMatchers is a list of label matchers that are injected into every selector
+	// of every request sent to this servergroup. This effectively scopes the servergroup
+	// to the subset of downstream data matching these matchers -- even for queries that
+	// never reference the labels being injected (e.g. with `cluster="A"` configured,
+	// `count(up)` is sent downstream as `count(up{cluster="A"})`).
+	//
+	// Each entry is a single matcher in promql syntax (no enclosing braces), e.g.:
+	//
+	//    inject_matchers:
+	//      - 'cluster="A"'
+	//      - 'region=~"us-.*"'
+	//
+	// Unlike `labels` (which only adds labels to responses) and `label_filter` (which only
+	// drops queries that can't match), `inject_matchers` always adds the matchers to the
+	// queries themselves. A common use-case is presenting a per-tenant view of a merged
+	// downstream (e.g. a single Mimir/Thanos/Prometheus holding many clusters) -- see
+	// https://github.com/jacksontj/promxy/issues/698
+	// NOTE: this is not a "secure" mechanism; it only mutates the request matchers and
+	// relies on the downstream honoring them.
+	InjectMatchers []string `yaml:"inject_matchers,omitempty"`
+
 	PreferMax bool `yaml:"prefer_max,omitempty"`
 
 	// HTTPClientHeaders are a map of HTTP headers to add to remote read HTTP calls made to this downstream
@@ -242,6 +266,21 @@ func (c *Config) GetPreferMax() bool {
 	return c.PreferMax
 }
 
+// GetInjectMatchers parses the configured InjectMatchers entries into label matchers.
+// It returns nil if no matchers are configured.
+func (c *Config) GetInjectMatchers() ([]*labels.Matcher, error) {
+	if len(c.InjectMatchers) == 0 {
+		return nil, nil
+	}
+	// Join the individual matcher entries into a single selector and parse it. Each entry
+	// is expected to be a bare matcher (e.g. `cluster="A"`) without enclosing braces.
+	matchers, err := parser.ParseMetricSelector("{" + strings.Join(c.InjectMatchers, ",") + "}")
+	if err != nil {
+		return nil, fmt.Errorf("error parsing inject_matchers: %w", err)
+	}
+	return matchers, nil
+}
+
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
 func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	*c = DefaultConfig
@@ -251,6 +290,12 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 
 	if err := c.validateAuthConfig(); err != nil {
+		return err
+	}
+
+	// Validate inject_matchers parses at config-load time rather than failing later
+	// during a discovery sync.
+	if _, err := c.GetInjectMatchers(); err != nil {
 		return err
 	}
 

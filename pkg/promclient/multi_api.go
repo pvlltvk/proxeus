@@ -13,7 +13,10 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/annotations"
 
+	"github.com/jacksontj/promxy/pkg/promapi"
 	"github.com/jacksontj/promxy/pkg/promhttputil"
 )
 
@@ -61,17 +64,19 @@ func NormalizePromError(err error) error {
 // the specific API calls made through this multi client
 type MultiAPIMetricFunc func(i int, api, status string, took float64)
 
-// mergeFunc folds the successful per-backend values into a single result. The
-// inputs are provided sorted by ascending ordinal, so a fold preserves
-// YAML/server_group priority regardless of the order the backends actually
-// responded in. The default implementation (NewMultiAPI) does within-group HA
-// merging and ignores ordinals; the cross-group implementation does
-// deterministic n-way dedup keyed on ordinal.
-//
-// Collection order is intentionally decoupled from merge order: MultiAPI gathers
-// responses as they arrive (no head-of-line blocking, partial-response aware on
-// cancellation) but always merges in ascending-ordinal order here.
-type mergeFunc func(results []gathered[model.Value]) (model.Value, error)
+// ordinalSeriesSet tags one backend's SeriesSet with the source index (its
+// position in the apis slice / YAML server_group order).
+type ordinalSeriesSet struct {
+	ordinal int
+	ss      storage.SeriesSet
+}
+
+// seriesSetMergeFunc folds the fanned-out, per-backend SeriesSets (tagged with
+// their source ordinal) into a single result. The default implementation
+// (NewMultiAPI) strips ordinals and does within-group HA anti-affinity merging
+// via MergeSeriesSets; the cross-group implementation does deterministic
+// n-way dedup keyed on ordinal.
+type seriesSetMergeFunc func(sets []ordinalSeriesSet) storage.SeriesSet
 
 // mergeSeriesFunc folds the successful per-backend Series() results into one
 // labelset slice, inputs sorted by ascending ordinal. The default set-unions
@@ -117,23 +122,14 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		requiredCount:   requiredCount,
 		preferMax:       preferMax,
 	}
-	// Default merge: within-group HA semantics; ordinals are ignored. Inputs are
-	// sorted by ascending ordinal, so this left-fold matches the historical
-	// index-order merge exactly.
-	m.mergeFn = func(results []gathered[model.Value]) (model.Value, error) {
-		var merged model.Value
-		for _, r := range results {
-			if merged == nil {
-				merged = r.value
-				continue
-			}
-			v, err := promhttputil.MergeValues(m.antiAffinity, merged, r.value, m.preferMax)
-			if err != nil {
-				return nil, err
-			}
-			merged = v
+	// Default merge: within-group HA semantics; ordinals are ignored.
+	// MergeSeriesSets applies anti-affinity dedup across the fanned-out sets.
+	m.seriesSetMergeFn = func(sets []ordinalSeriesSet) storage.SeriesSet {
+		stripped := make([]storage.SeriesSet, len(sets))
+		for i, s := range sets {
+			stripped[i] = s.ss
 		}
-		return merged, nil
+		return MergeSeriesSets(m.antiAffinity, m.preferMax, stripped...)
 	}
 	// Default series merge: set union; ordinals are ignored.
 	m.mergeSeriesFn = func(results []gathered[[]model.LabelSet]) []model.LabelSet {
@@ -152,14 +148,14 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 
 // MultiAPI implements the API interface while merging the results from the apis it wraps
 type MultiAPI struct {
-	apis            []API
-	apiFingerprints []model.Fingerprint
-	antiAffinity    model.Time
-	metricFunc      MultiAPIMetricFunc
-	requiredCount   int // number "per key" that we require to respond
-	preferMax       bool
-	mergeFn         mergeFunc
-	mergeSeriesFn   mergeSeriesFunc
+	apis             []API
+	apiFingerprints  []model.Fingerprint
+	antiAffinity     model.Time
+	metricFunc       MultiAPIMetricFunc
+	requiredCount    int // number "per key" that we require to respond
+	preferMax        bool
+	seriesSetMergeFn seriesSetMergeFunc
+	mergeSeriesFn    mergeSeriesFunc
 
 	// partialResponse, when true, relaxes requiredCount: the fan-out returns
 	// whatever responded (plus a warning per failed backend) instead of failing
@@ -200,10 +196,16 @@ func (m *MultiAPI) missingRequired(outstanding, success map[model.Fingerprint]in
 	return false
 }
 
+// partialResponseErr formats the degradation warning attached when a backend
+// fails in partial-response mode.
+func partialResponseErr(i int, err error) error {
+	return fmt.Errorf("partial_response: backend[%d] unavailable: %s", i, err.Error())
+}
+
 // partialWarning formats the degradation warning attached when a backend fails
-// in partial-response mode.
+// in partial-response mode (v1.Warnings variant, used by scatterGather).
 func partialWarning(i int, err error) v1.Warnings {
-	return v1.Warnings{fmt.Sprintf("partial_response: backend[%d] unavailable: %s", i, err.Error())}
+	return v1.Warnings{partialResponseErr(i, err).Error()}
 }
 
 // gathered is one backend's successful response plus the ordinal it came from.
@@ -374,40 +376,102 @@ func (m *MultiAPI) LabelNames(ctx context.Context, matchers []string, startTime 
 	return stringResult, warnings.Warnings(), nil
 }
 
+// scatterMerge fans `call` out across all members, applies the
+// success/requiredCount HA logic (relaxed when m.partialResponse is set), and
+// merges the successful SeriesSets via m.seriesSetMergeFn. Each result is
+// tagged with its source ordinal so the merge hook can fold deterministically
+// (e.g. lowest-ordinal-wins cross-group dedup) regardless of arrival order.
+// Warnings are unioned across all responses.
+func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(context.Context, API) storage.SeriesSet) storage.SeriesSet {
+	childContext, childContextCancel := context.WithCancel(ctx)
+	defer childContextCancel()
+
+	type chanResult struct {
+		ss      storage.SeriesSet
+		ls      model.Fingerprint
+		ordinal int
+	}
+	resultChans := make([]chan chanResult, len(m.apis))
+	outstandingRequests := make(map[model.Fingerprint]int)
+
+	for i, api := range m.apis {
+		resultChans[i] = make(chan chanResult, 1)
+		outstandingRequests[m.apiFingerprints[i]]++
+		go func(i int, retChan chan chanResult, api API) {
+			start := time.Now()
+			ss := call(childContext, api)
+			took := time.Since(start)
+			status := "success"
+			if ss.Err() != nil {
+				status = "error"
+			}
+			m.recordMetric(i, op, status, took.Seconds())
+			retChan <- chanResult{ss: ss, ls: m.apiFingerprints[i], ordinal: i}
+		}(i, resultChans[i], api)
+	}
+
+	var sets []ordinalSeriesSet
+	var warnings annotations.Annotations
+	var lastError error
+	successMap := make(map[model.Fingerprint]int)
+	for i := 0; i < len(m.apis); i++ {
+		select {
+		case <-ctx.Done():
+			// Caller deadline/cancel fired. In partial-response mode, keep what
+			// already succeeded rather than discarding it; otherwise honor it.
+			if m.partialResponse && len(sets) > 0 {
+				warnings.Add(fmt.Errorf("partial_response: %s returning %d/%d backends after cancellation: %w",
+					op, len(sets), len(m.apis), ctx.Err()))
+				sortOrdinalSeriesSets(sets)
+				return WithWarnings(m.seriesSetMergeFn(sets), warnings)
+			}
+			return promapi.NewSeriesSet(nil, warnings, ctx.Err())
+
+		case ret := <-resultChans[i]:
+			outstandingRequests[ret.ls]--
+			warnings = MergeAnnotations(warnings, ret.ss.Warnings())
+			if err := NormalizePromError(ret.ss.Err()); err != nil {
+				if m.abortOnError(ret.ls, outstandingRequests, successMap) {
+					return promapi.NewSeriesSet(nil, warnings, err)
+				}
+				if m.partialResponse {
+					warnings.Add(partialResponseErr(ret.ordinal, err))
+				}
+				lastError = err
+			} else {
+				successMap[ret.ls]++
+				sets = append(sets, ordinalSeriesSet{ordinal: ret.ordinal, ss: ret.ss})
+			}
+		}
+	}
+
+	if m.missingRequired(outstandingRequests, successMap) {
+		return promapi.NewSeriesSet(nil, warnings, errors.Wrap(lastError, "Unable to fetch from downstream servers"))
+	}
+
+	sortOrdinalSeriesSets(sets)
+	return WithWarnings(m.seriesSetMergeFn(sets), warnings)
+}
+
+// sortOrdinalSeriesSets orders results by ascending source ordinal, so merge
+// hooks fold deterministically (lowest server_group first) independent of
+// arrival order.
+func sortOrdinalSeriesSets(sets []ordinalSeriesSet) {
+	sort.Slice(sets, func(i, j int) bool { return sets[i].ordinal < sets[j].ordinal })
+}
+
 // Query performs a query for the given time.
-func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) (model.Value, v1.Warnings, error) {
-	results, warnings, err := scatterGather(ctx, m, "query",
-		func(ctx context.Context, api API) (model.Value, v1.Warnings, error) {
-			return api.Query(ctx, query, ts)
-		})
-	if err != nil {
-		return nil, warnings.Warnings(), err
-	}
-
-	merged, err := m.mergeFn(results)
-	if err != nil {
-		return nil, warnings.Warnings(), err
-	}
-
-	return merged, warnings.Warnings(), nil
+func (m *MultiAPI) Query(ctx context.Context, query string, ts time.Time) storage.SeriesSet {
+	return m.scatterMerge(ctx, "query", func(c context.Context, api API) storage.SeriesSet {
+		return api.Query(c, query, ts)
+	})
 }
 
 // QueryRange performs a query for the given range.
-func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) (model.Value, v1.Warnings, error) {
-	results, warnings, err := scatterGather(ctx, m, "query_range",
-		func(ctx context.Context, api API) (model.Value, v1.Warnings, error) {
-			return api.QueryRange(ctx, query, r)
-		})
-	if err != nil {
-		return nil, warnings.Warnings(), err
-	}
-
-	merged, err := m.mergeFn(results)
-	if err != nil {
-		return nil, warnings.Warnings(), err
-	}
-
-	return merged, warnings.Warnings(), nil
+func (m *MultiAPI) QueryRange(ctx context.Context, query string, r v1.Range) storage.SeriesSet {
+	return m.scatterMerge(ctx, "query_range", func(c context.Context, api API) storage.SeriesSet {
+		return api.QueryRange(c, query, r)
+	})
 }
 
 // Series finds series by label matchers.
@@ -423,22 +487,11 @@ func (m *MultiAPI) Series(ctx context.Context, matches []string, startTime time.
 	return m.mergeSeriesFn(results), warnings.Warnings(), nil
 }
 
-// GetValue fetches a `model.Value` which represents the actual collected data
-func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers []*labels.Matcher) (model.Value, v1.Warnings, error) {
-	results, warnings, err := scatterGather(ctx, m, "get_value",
-		func(ctx context.Context, api API) (model.Value, v1.Warnings, error) {
-			return api.GetValue(ctx, start, end, matchers)
-		})
-	if err != nil {
-		return nil, warnings.Warnings(), err
-	}
-
-	merged, err := m.mergeFn(results)
-	if err != nil {
-		return nil, warnings.Warnings(), err
-	}
-
-	return merged, warnings.Warnings(), nil
+// GetValue fetches the raw collected data, merged across HA members.
+func (m *MultiAPI) GetValue(ctx context.Context, start, end time.Time, matchers []*labels.Matcher) storage.SeriesSet {
+	return m.scatterMerge(ctx, "get_value", func(c context.Context, api API) storage.SeriesSet {
+		return api.GetValue(c, start, end, matchers)
+	})
 }
 
 // Metadata returns metadata about metrics currently scraped by the metric name.

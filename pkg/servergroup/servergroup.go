@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
+	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/sigv4"
 	"github.com/sirupsen/logrus"
@@ -42,11 +44,21 @@ var (
 		Name: "promxy_server_group_request_errors_total",
 		Help: "Total number of failed requests to servergroup instances",
 	}, []string{"server_group", "host", "call"})
+
+	// serverGroupTargets tracks the number of targets currently discovered for
+	// each server group, so a zero-target group can be alerted on (e.g.
+	// `server_group_targets == 0`). The ordinal is guaranteed unique; the name
+	// label is the optional, human-readable group name (empty when unset).
+	serverGroupTargets = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "server_group_targets",
+		Help: "Number of targets currently discovered for a server group.",
+	}, []string{"ordinal", "name"})
 )
 
 func init() {
 	prometheus.MustRegister(serverGroupSummary)
 	prometheus.MustRegister(serverGroupRequestErrors)
+	prometheus.MustRegister(serverGroupTargets)
 }
 
 // New creates a new servergroup
@@ -104,6 +116,40 @@ type ServerGroup struct {
 	OriginalURLs []string
 
 	state atomic.Value
+}
+
+// groupIdentifier returns a human-readable identifier for this server group for
+// use in logs. The ordinal is always included (it is guaranteed unique); the
+// optional, non-unique name is appended when set.
+func (s *ServerGroup) groupIdentifier() string {
+	if s.Cfg == nil {
+		return "unknown"
+	}
+	if s.Cfg.Name != "" {
+		return fmt.Sprintf("ord=%d name=%s", s.Cfg.Ordinal, s.Cfg.Name)
+	}
+	return fmt.Sprintf("ord=%d", s.Cfg.Ordinal)
+}
+
+func (s *ServerGroup) logTargetTransition(oldCount, newCount int, initial bool) {
+	fields := logrus.Fields{
+		"old_targets": oldCount,
+		"new_targets": newCount,
+	}
+	if s.Cfg != nil {
+		fields["ordinal"] = s.Cfg.Ordinal
+		if s.Cfg.Name != "" {
+			fields["name"] = s.Cfg.Name
+		}
+	}
+
+	ident := s.groupIdentifier()
+	switch {
+	case initial && newCount == 0:
+		logrus.WithFields(fields).Warnf("ServerGroup %s started with zero targets; check service discovery configuration and relabel rules", ident)
+	case oldCount > 0 && newCount == 0:
+		logrus.WithFields(fields).Warnf("ServerGroup %s transitioned to zero targets; check service discovery configuration and relabel rules", ident)
+	}
 }
 
 // Cancel stops backround processes (e.g. discovery manager)
@@ -171,6 +217,11 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 	apiClients := make([]promclient.API, 0)
 
 	ctx, ctxCancel := context.WithCancel(context.Background())
+	oldState := s.State()
+	oldCount := 0
+	if oldState != nil {
+		oldCount = len(oldState.Targets)
+	}
 	defer func() {
 		if err != nil {
 			ctxCancel()
@@ -282,6 +333,19 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 					}
 				})
 
+				// Inject static matchers into all requests sent to this target. This is
+				// applied beneath the label-manipulation wrappers below so the matchers
+				// reach the downstream verbatim, without interacting with label_filter's
+				// query filtering or metrics_relabel's matcher reversal.
+				if injectMatchers, err := s.Cfg.GetInjectMatchers(); err != nil {
+					return err
+				} else if len(injectMatchers) > 0 {
+					apiClient, err = promclient.NewInjectMatchersClient(apiClient, injectMatchers)
+					if err != nil {
+						return err
+					}
+				}
+
 				// Add labels
 				apiClient = &promclient.AddLabelClient{apiClient, modelLabelSet.Merge(s.Cfg.Labels)}
 
@@ -309,7 +373,12 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 		}
 	}
 
+	// The "server_group" metric label must never be empty: fall back to
+	// "sg-<ordinal>" the same way ApplyConfig resolves the default name.
 	sgName := s.Cfg.Name
+	if sgName == "" {
+		sgName = fmt.Sprintf("sg-%d", s.Cfg.Ordinal)
+	}
 
 	logrus.Debugf("Updating targets from discovery manager: %v", targets)
 	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), apiClientMetricFunc(sgName, targets), 1, s.Cfg.GetPreferMax())
@@ -333,7 +402,9 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 		newState.apiClient = &promclient.DowngradeErrorAPI{newState.apiClient}
 	}
 
-	oldState := s.State()   // Fetch the current state (so we can stop it)
+	s.logTargetTransition(oldCount, len(targets), !s.loaded)
+	serverGroupTargets.WithLabelValues(strconv.Itoa(s.Cfg.Ordinal), s.Cfg.Name).Set(float64(len(targets)))
+
 	s.state.Store(newState) // Store new state
 	if oldState != nil {
 		oldState.ctxCancel() // Cancel the old state
@@ -421,17 +492,17 @@ func (s *ServerGroup) State() *ServerGroupState {
 }
 
 // GetValue loads the raw data for a given set of matchers in the time range
-func (s *ServerGroup) GetValue(ctx context.Context, start, end time.Time, matchers []*labels.Matcher) (model.Value, v1.Warnings, error) {
+func (s *ServerGroup) GetValue(ctx context.Context, start, end time.Time, matchers []*labels.Matcher) storage.SeriesSet {
 	return s.State().apiClient.GetValue(ctx, start, end, matchers)
 }
 
 // Query performs a query for the given time.
-func (s *ServerGroup) Query(ctx context.Context, query string, ts time.Time) (model.Value, v1.Warnings, error) {
+func (s *ServerGroup) Query(ctx context.Context, query string, ts time.Time) storage.SeriesSet {
 	return s.State().apiClient.Query(ctx, query, ts)
 }
 
 // QueryRange performs a query for the given range.
-func (s *ServerGroup) QueryRange(ctx context.Context, query string, r v1.Range) (model.Value, v1.Warnings, error) {
+func (s *ServerGroup) QueryRange(ctx context.Context, query string, r v1.Range) storage.SeriesSet {
 	return s.State().apiClient.QueryRange(ctx, query, r)
 }
 
