@@ -49,6 +49,7 @@ import (
 
 	"github.com/jacksontj/promxy/pkg/alertbackfill"
 	proxyconfig "github.com/jacksontj/promxy/pkg/config"
+	"github.com/jacksontj/promxy/pkg/federate"
 	"github.com/jacksontj/promxy/pkg/logging"
 	"github.com/jacksontj/promxy/pkg/middleware"
 	"github.com/jacksontj/promxy/pkg/promxyui"
@@ -638,10 +639,20 @@ func main() {
 	promxyPathPrefix := path.Join(webOptions.RoutePrefix, "/promxy")
 	debugStripPrefix := strings.Trim(webOptions.RoutePrefix, "/")
 
+	// promxy's own /federate handler: a faster encoder for the common
+	// text/plain path (issue #784) that delegates other formats to the vendored
+	// handler. Kept in sync with the configured external_labels on reload.
+	federateHandler := federate.New(ps, opts.QueryLookbackDelta, webHandler.GetRouter())
+	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{F: func(cfg *config.Config) error {
+		federateHandler.SetExternalLabels(cfg.GlobalConfig.ExternalLabels)
+		return nil
+	}}))
+
 	// Create our router
 	r := httprouter.New()
 
 	r.HandlerFunc("GET", opts.MetricsPath, promhttp.Handler().ServeHTTP)
+	r.HandlerFunc("GET", path.Join(webOptions.RoutePrefix, "/federate"), federateHandler.ServeHTTP)
 
 	stopping := false
 	r.NotFound = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -116,6 +116,24 @@ type ServerGroup struct {
 	OriginalURLs []string
 
 	state atomic.Value
+
+	// histogramCache backs IsHistogramMetric. The background refresh loop is
+	// only started when Cfg.HistogramMetadataRefresh > 0; when zero, the
+	// cache stays empty and IsHistogramMetric always returns false (AST-only
+	// routing). See pkg/servergroup/histogram_cache.go.
+	histogramCache histogramMetadataCache
+}
+
+// IsHistogramMetric reports whether the given metric name is known to be a
+// histogram metric in this server group's most recent metadata snapshot.
+// Returns false when the metadata cache is disabled (the default), when no
+// fetch has succeeded yet, or when the name simply isn't a histogram.
+//
+// Used by the proxy-level histogram routing decision to disable HTTP-API
+// pushdown for queries that touch histogram metrics, even when the query
+// doesn't invoke one of the histogram-only PromQL functions.
+func (s *ServerGroup) IsHistogramMetric(name string) bool {
+	return s.histogramCache.Contains(name)
 }
 
 // groupIdentifier returns a human-readable identifier for this server group for
@@ -325,6 +343,13 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 					}
 				}
 
+				// Optionally re-stamp step-aligned query_range results back onto the
+				// requested step grid. Enabled per-server-group for backends (e.g.
+				// Mimir/Cortex) that snap query_range output to the epoch grid; see #787.
+				if s.Cfg.AlignQueryRangeWithStep {
+					apiClient = &promclient.StepAlignClient{API: apiClient}
+				}
+
 				// We remove all private labels after we set the target entry
 				modelLabelSet := make(model.LabelSet, lset.Len())
 				lset.Range(func(lbl labels.Label) {
@@ -381,7 +406,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 	}
 
 	logrus.Debugf("Updating targets from discovery manager: %v", targets)
-	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), apiClientMetricFunc(sgName, targets), 1, s.Cfg.GetPreferMax())
+	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), s.Cfg.AntiAffinityDynamic, apiClientMetricFunc(sgName, targets), 1, s.Cfg.GetPreferMax())
 	if err != nil {
 		return err
 	}
@@ -479,6 +504,25 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 	if err := s.targetManager.ApplyConfig(map[string]discovery.Configs{"foo": cfg.ServiceDiscoveryConfigs}); err != nil {
 		return err
 	}
+
+	// Start the metadata cache if histogram routing is configured to use it.
+	// The cache's start is idempotent — repeated ApplyConfig calls won't
+	// spawn duplicate goroutines.
+	s.histogramCache.start(
+		s.ctx,
+		func() promclient.API {
+			st := s.State()
+			if st == nil {
+				return nil
+			}
+			return st.apiClient
+		},
+		cfg.NativeHistogram.MetadataRefresh,
+		logrus.WithFields(logrus.Fields{
+			"component": "histogram-metadata-cache",
+			"sg":        cfg.Ordinal,
+		}),
+	)
 	return nil
 }
 
@@ -524,4 +568,9 @@ func (s *ServerGroup) Series(ctx context.Context, matches []string, startTime, e
 // Metadata returns metadata about metrics currently scraped by the metric name.
 func (s *ServerGroup) Metadata(ctx context.Context, metric, limit string) (map[string][]v1.Metadata, error) {
 	return s.State().apiClient.Metadata(ctx, metric, limit)
+}
+
+// QueryExemplars performs a query for exemplars by the given query and time range.
+func (s *ServerGroup) QueryExemplars(ctx context.Context, query string, startTime, endTime time.Time) ([]v1.ExemplarQueryResult, error) {
+	return s.State().apiClient.QueryExemplars(ctx, query, startTime, endTime)
 }

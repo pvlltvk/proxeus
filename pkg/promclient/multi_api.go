@@ -85,16 +85,21 @@ type seriesSetMergeFunc func(sets []ordinalSeriesSet) storage.SeriesSet
 type mergeSeriesFunc func(results []gathered[[]model.LabelSet]) []model.LabelSet
 
 // NewMustMultiAPI returns a MultiAPI
-func NewMustMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
-	a, err := NewMultiAPI(apis, antiAffinity, metricFunc, requiredCount, preferMax)
+func NewMustMultiAPI(apis []API, antiAffinity model.Time, antiAffinityDynamic bool, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) *MultiAPI {
+	a, err := NewMultiAPI(apis, antiAffinity, antiAffinityDynamic, metricFunc, requiredCount, preferMax)
 	if err != nil {
 		panic(err)
 	}
 	return a
 }
 
-// NewMultiAPI returns a MultiAPI
-func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) (*MultiAPI, error) {
+// NewMultiAPI returns a MultiAPI. When antiAffinityDynamic is true,
+// MergeSampleStream infers the per-series anti-affinity from the inter-
+// sample spacing of the data, using antiAffinity only as a fallback when
+// too few samples are present to estimate. This lets a single server-
+// group host series with mixed scrape intervals without forcing one
+// global buffer that's wrong for half the metrics. See #734.
+func NewMultiAPI(apis []API, antiAffinity model.Time, antiAffinityDynamic bool, metricFunc MultiAPIMetricFunc, requiredCount int, preferMax bool) (*MultiAPI, error) {
 	fingerprintCounts := make(map[model.Fingerprint]int)
 	apiFingerprints := make([]model.Fingerprint, len(apis))
 	for i, api := range apis {
@@ -115,12 +120,13 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 	}
 
 	m := &MultiAPI{
-		apis:            apis,
-		apiFingerprints: apiFingerprints,
-		antiAffinity:    antiAffinity,
-		metricFunc:      metricFunc,
-		requiredCount:   requiredCount,
-		preferMax:       preferMax,
+		apis:                apis,
+		apiFingerprints:     apiFingerprints,
+		antiAffinity:        antiAffinity,
+		antiAffinityDynamic: antiAffinityDynamic,
+		metricFunc:          metricFunc,
+		requiredCount:       requiredCount,
+		preferMax:           preferMax,
 	}
 	// Default merge: within-group HA semantics; ordinals are ignored.
 	// MergeSeriesSets applies anti-affinity dedup across the fanned-out sets.
@@ -129,7 +135,7 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 		for i, s := range sets {
 			stripped[i] = s.ss
 		}
-		return MergeSeriesSets(m.antiAffinity, m.preferMax, stripped...)
+		return MergeSeriesSets(m.antiAffinity, m.antiAffinityDynamic, m.preferMax, stripped...)
 	}
 	// Default series merge: set union; ordinals are ignored.
 	m.mergeSeriesFn = func(results []gathered[[]model.LabelSet]) []model.LabelSet {
@@ -148,14 +154,15 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, metricFunc MultiAPIMetricF
 
 // MultiAPI implements the API interface while merging the results from the apis it wraps
 type MultiAPI struct {
-	apis             []API
-	apiFingerprints  []model.Fingerprint
-	antiAffinity     model.Time
-	metricFunc       MultiAPIMetricFunc
-	requiredCount    int // number "per key" that we require to respond
-	preferMax        bool
-	seriesSetMergeFn seriesSetMergeFunc
-	mergeSeriesFn    mergeSeriesFunc
+	apis                []API
+	apiFingerprints     []model.Fingerprint
+	antiAffinity        model.Time
+	antiAffinityDynamic bool
+	metricFunc          MultiAPIMetricFunc
+	requiredCount       int // number "per key" that we require to respond
+	preferMax           bool
+	seriesSetMergeFn    seriesSetMergeFunc
+	mergeSeriesFn       mergeSeriesFunc
 
 	// partialResponse, when true, relaxes requiredCount: the fan-out returns
 	// whatever responded (plus a warning per failed backend) instead of failing
@@ -522,4 +529,87 @@ func (m *MultiAPI) Metadata(ctx context.Context, metric, limit string) (map[stri
 	}
 
 	return result, nil
+}
+
+// QueryExemplars performs a query for exemplars by the given query and time range.
+// We fan the query out to every server-group and concatenate the per-series
+// exemplar lists, deduplicating by series labels (sum-style merge — the union of
+// exemplars from all server-groups for the same series).
+func (m *MultiAPI) QueryExemplars(ctx context.Context, query string, startTime, endTime time.Time) ([]v1.ExemplarQueryResult, error) {
+	childContext, childContextCancel := context.WithCancel(ctx)
+	defer childContextCancel()
+
+	type chanResult struct {
+		v   []v1.ExemplarQueryResult
+		err error
+		ls  model.Fingerprint
+	}
+
+	resultChans := make([]chan chanResult, len(m.apis))
+	outstandingRequests := make(map[model.Fingerprint]int)
+
+	for i, api := range m.apis {
+		resultChans[i] = make(chan chanResult, 1)
+		outstandingRequests[m.apiFingerprints[i]]++
+		go func(i int, retChan chan chanResult, api API) {
+			start := time.Now()
+			result, err := api.QueryExemplars(childContext, query, startTime, endTime)
+			took := time.Since(start)
+			if err != nil {
+				m.recordMetric(i, "query_exemplars", "error", took.Seconds())
+			} else {
+				m.recordMetric(i, "query_exemplars", "success", took.Seconds())
+			}
+			retChan <- chanResult{
+				v:   result,
+				err: NormalizePromError(err),
+				ls:  m.apiFingerprints[i],
+			}
+		}(i, resultChans[i], api)
+	}
+
+	// Wait for results, merging by series labels.
+	merged := map[model.Fingerprint]*v1.ExemplarQueryResult{}
+	var lastError error
+	successMap := make(map[model.Fingerprint]int)
+	for i := 0; i < len(m.apis); i++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
+		case ret := <-resultChans[i]:
+			outstandingRequests[ret.ls]--
+			if ret.err != nil {
+				if (outstandingRequests[ret.ls] + successMap[ret.ls]) < m.requiredCount {
+					return nil, ret.err
+				}
+				lastError = ret.err
+				continue
+			}
+			successMap[ret.ls]++
+			for j := range ret.v {
+				qr := ret.v[j]
+				fp := qr.SeriesLabels.Fingerprint()
+				existing, ok := merged[fp]
+				if !ok {
+					cp := qr
+					merged[fp] = &cp
+					continue
+				}
+				existing.Exemplars = append(existing.Exemplars, qr.Exemplars...)
+			}
+		}
+	}
+
+	for k := range outstandingRequests {
+		if successMap[k] < m.requiredCount {
+			return nil, errors.Wrap(lastError, "Unable to fetch from downstream servers")
+		}
+	}
+
+	out := make([]v1.ExemplarQueryResult, 0, len(merged))
+	for _, qr := range merged {
+		out = append(out, *qr)
+	}
+	return out, nil
 }

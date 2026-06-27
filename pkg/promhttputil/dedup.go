@@ -117,7 +117,7 @@ func MergeValuesDeterministic(inputs []OrdinalValue, ignore map[model.LabelName]
 		// existing first-non-zero / first-wins semantics, lowest ordinal first.
 		result := nonNil[0].Value
 		for _, x := range nonNil[1:] {
-			merged, err := MergeValues(0, result, x.Value, false)
+			merged, err := MergeValues(0, false, result, x.Value, false)
 			if err != nil {
 				return nil, stats, err
 			}

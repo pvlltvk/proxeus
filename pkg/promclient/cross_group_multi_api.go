@@ -72,7 +72,7 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	// MultiAPI.missingRequired); PartialResponse=true relaxes that to "at least
 	// one backend responded", returning partial results with a warning.
 	// antiAffinity/preferMax disabled — those are within-group HA concerns.
-	m, err := NewMultiAPI(apis, model.TimeFromUnix(0), nil, 1, false)
+	m, err := NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, 1, false)
 	if err != nil {
 		return nil, err
 	}

@@ -50,6 +50,17 @@ promxy:
       # Best practice for this value is to set it to your scrape interval
       anti_affinity: 10s
 
+      # When true, the merge layer infers each series's anti-affinity buffer
+      # from the inter-sample spacing of the data (half the median gap) and
+      # uses `anti_affinity` only as the fallback when too few samples are
+      # available. Set this when a single server_group hosts metrics scraped
+      # at different intervals (e.g. some jobs at 15s, some at 1m) — a
+      # single static `anti_affinity` is too tight for the slow series (gaps
+      # look like missed scrapes and get filled, doubling count_over_time)
+      # or too wide for the fast one (legitimate fresh samples get deduped).
+      # See https://github.com/jacksontj/promxy/issues/734.
+      anti_affinity_dynamic: false
+
       # time to wait for a server's response headers after fully writing the request (including its body, if any).
       # This time does not include the time to read the response body.
       timeout: 5s
@@ -60,6 +71,21 @@ promxy:
 
       # configures the path to send remote read requests to. The default is "api/v1/read"
       remote_read_path: api/v1/read
+
+      # Per-server-group native histogram routing. The zero-value (no block
+      # at all) is "AST-only detection, fail loud when remote_read can't
+      # preserve fidelity" — the safe default.
+      native_histogram:
+        # metadata_refresh enables a metric-name → type cache so that
+        # queries which touch histogram metrics WITHOUT invoking one of
+        # the histogram-only functions (e.g. rate(my_hist[5m])) are also
+        # routed via remote_read. When unset, detection is pure AST.
+        metadata_refresh: 5m
+        # allow_lossy controls behavior when a histogram-bearing query
+        # hits this group with no remote_read configured. Default false:
+        # error out before fan-out. Set true to accept the JSON-API
+        # fidelity loss and serve the query anyway.
+        allow_lossy: false
 
       # path_prefix defines a prefix to prepend to all queries to hosts in this servergroup
       # This can be relabeled using __path_prefix__

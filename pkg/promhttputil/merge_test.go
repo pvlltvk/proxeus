@@ -1136,7 +1136,7 @@ func TestMergeValues(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := MergeValues(test.antiAffinity, test.a, test.b, test.preferMax)
+			result, err := MergeValues(test.antiAffinity, false, test.a, test.b, test.preferMax)
 			if err != test.err {
 				t.Fatalf("mismatch err in %s expected=%v actual=%v", test.name, test.err, err)
 			}
@@ -1242,12 +1242,46 @@ func TestMergeValuesHistograms(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := MergeValues(test.antiAffinity, test.a, test.b, false)
+			result, err := MergeValues(test.antiAffinity, false, test.a, test.b, false)
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			if !reflect.DeepEqual(result, test.r) {
 				t.Fatalf("mismatch in %s\nexpected=%v\nactual=%v", test.name, test.r, result)
+			}
+		})
+	}
+}
+
+func TestToAnnotationError_StripsPositionSuffix(t *testing.T) {
+	cases := []struct {
+		in  string
+		out string
+	}{
+		{
+			in:  `PromQL warning: vector contains a mix of classic and native histograms for metric name "series" (1:25)`,
+			out: `PromQL warning: vector contains a mix of classic and native histograms for metric name "series"`,
+		},
+		{
+			in:  `PromQL info: ignored timestamp clause (12:34)`,
+			out: `PromQL info: ignored timestamp clause`,
+		},
+		{
+			// No position — passthrough.
+			in:  `PromQL warning: something happened`,
+			out: `PromQL warning: something happened`,
+		},
+		{
+			// Non-prefixed warning still gets the position stripped.
+			in:  `plain warning text (5:6)`,
+			out: `plain warning text`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := toAnnotationError(tc.in).Error()
+			if got != tc.out {
+				t.Fatalf("toAnnotationError(%q).Error() = %q, want %q", tc.in, got, tc.out)
 			}
 		})
 	}
