@@ -1,0 +1,83 @@
+# golangci-lint configuration for promxy (schema v2 — needs golangci-lint >= 2.x).
+#
+# Modeled on the upstream Prometheus config but trimmed to this fork's toolchain:
+# gofmt -s + goimports (not gofumpt), staticcheck, and a small set of high-value
+# linters. Run with `make lint`. Vendored code is excluded by default.
+version: "2"
+
+run:
+  timeout: 5m
+  # Lint the same build the binary ships with. builtinassets is intentionally
+  # omitted so linting uses the embed_stub.go path and needs no generated UI.
+  build-tags:
+    - netgo
+
+linters:
+  # "standard" = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - errorlint      # wrapped-error comparisons (==) vs errors.Is/As
+    - misspell       # common spelling mistakes in comments/strings
+    - predeclared    # shadowing predeclared identifiers (len, error, ...)
+    - revive         # golint successor, configured light below
+    - unconvert      # redundant type conversions
+    - usestdlibvars  # use stdlib constants (http.StatusOK, ...) over literals
+    - whitespace     # leading/trailing whitespace in funcs
+
+  settings:
+    govet:
+      # Drop the "composites" check: it flags every unkeyed struct literal from
+      # imported packages (model.Sample, model.SampleStream, ...), which this
+      # codebase and its tests use heavily. Not in standard `go vet`; pure noise.
+      disable:
+        - composites
+    misspell:
+      locale: US
+    staticcheck:
+      checks:
+        - all
+    revive:
+      # Keep it light: the fork inherits a large surface from upstream and we
+      # don't want to require doc comments on every exported symbol.
+      rules:
+        - name: unreachable-code
+        - name: errorf
+        - name: unnecessary-stmt
+        - name: superfluous-else
+        - name: defer
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # promxy implements prometheus' storage.SeriesSet / chunkenc.Iterator,
+      # whose Seek(int64) bool signature is non-standard by Go's stdmethods
+      # heuristic. Intentional — mirrors the upstream interface.
+      - linters: [govet, staticcheck]
+        text: "Seek"
+        path: pkg/promclient/iterators\.go
+      # Converting a prometheus histogram value copies a struct that embeds a
+      # lock; the copy is of a by-value snapshot, not shared state. Pre-existing.
+      - linters: [govet]
+        text: "copylocks"
+        path: pkg/promclient/histogram_convert\.go
+    paths:
+      - vendor
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/jacksontj/promxy

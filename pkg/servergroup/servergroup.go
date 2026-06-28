@@ -35,11 +35,15 @@ import (
 )
 
 var (
-	// TODO: have a marker for "which" servergroup
 	serverGroupSummary = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "server_group_request_duration_seconds",
 		Help: "Summary of calls to servergroup instances",
-	}, []string{"host", "call", "status"})
+	}, []string{"server_group", "host", "call", "status"})
+
+	serverGroupRequestErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "promxy_server_group_request_errors_total",
+		Help: "Total number of failed requests to servergroup instances",
+	}, []string{"server_group", "host", "call"})
 
 	// serverGroupTargets tracks the number of targets currently discovered for
 	// each server group, so a zero-target group can be alerted on (e.g.
@@ -53,6 +57,7 @@ var (
 
 func init() {
 	prometheus.MustRegister(serverGroupSummary)
+	prometheus.MustRegister(serverGroupRequestErrors)
 	prometheus.MustRegister(serverGroupTargets)
 }
 
@@ -209,6 +214,18 @@ func (s *ServerGroup) Sync() {
 					return
 				}
 			}
+		}
+	}
+}
+
+// apiClientMetricFunc returns a promclient.MultiAPIMetricFunc that records
+// per-target request duration and error metrics for the given server group,
+// tagging each observation with the target host at index i in targets.
+func apiClientMetricFunc(sgName string, targets []string) promclient.MultiAPIMetricFunc {
+	return func(i int, api, status string, took float64) {
+		serverGroupSummary.WithLabelValues(sgName, targets[i], api, status).Observe(took)
+		if status == "error" {
+			serverGroupRequestErrors.WithLabelValues(sgName, targets[i], api).Inc()
 		}
 	}
 }
@@ -381,12 +398,15 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 		}
 	}
 
-	apiClientMetricFunc := func(i int, api, status string, took float64) {
-		serverGroupSummary.WithLabelValues(targets[i], api, status).Observe(took)
+	// The "server_group" metric label must never be empty: fall back to
+	// "sg-<ordinal>" the same way ApplyConfig resolves the default name.
+	sgName := s.Cfg.Name
+	if sgName == "" {
+		sgName = fmt.Sprintf("sg-%d", s.Cfg.Ordinal)
 	}
 
 	logrus.Debugf("Updating targets from discovery manager: %v", targets)
-	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), s.Cfg.AntiAffinityDynamic, apiClientMetricFunc, 1, s.Cfg.GetPreferMax())
+	apiClient, err := promclient.NewMultiAPI(apiClients, s.Cfg.GetAntiAffinity(), s.Cfg.AntiAffinityDynamic, apiClientMetricFunc(sgName, targets), 1, s.Cfg.GetPreferMax())
 	if err != nil {
 		return err
 	}

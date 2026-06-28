@@ -43,7 +43,10 @@ const (
 // This is where the vast majority of options exist.
 type Config struct {
 	Ordinal int `yaml:"-"`
-	// Name is an optional human-readable identifier for this server group.
+
+	// Name is the human-readable identifier for this server group, used as the
+	// "server_group" label on per-backend metrics and in error messages.
+	// When left empty, ApplyConfig in proxystorage populates it with "sg-<Ordinal>".
 	Name string `yaml:"name,omitempty"`
 	// RemoteRead directs promxy to load RAW data (meaning matrix selectors such as `foo[1h]`)
 	// through the RemoteRead API on prom.
@@ -141,6 +144,12 @@ type Config struct {
 	ServiceDiscoveryConfigs discovery.Configs `yaml:"-"`
 	// PathPrefix to prepend to all queries to hosts in this servergroup
 	PathPrefix string `yaml:"path_prefix"`
+	// BackendType identifies the kind of backend for inventory-UI display
+	// (e.g. "thanos", "victoriametrics", "prometheus", "cortex", "mimir").
+	// Free-form; not validated. Auto-detection from /api/v1/status/buildinfo
+	// is unreliable (Thanos and VM omit the application field), so this is
+	// the canonical signal. Empty means the UI shows "unknown".
+	BackendType string `yaml:"backend_type,omitempty"`
 	// QueryParams are a map of query params to add to all HTTP calls made to this downstream
 	// the main use-case for this is to add `nocache=1` to VictoriaMetrics downstreams
 	// (see https://github.com/jacksontj/promxy/issues/202)

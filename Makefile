@@ -4,6 +4,9 @@ GOFILES := $(shell find . -name "*.go" -type f ! -path "./vendor/*")
 GOFMT ?= gofmt
 GOIMPORTS ?= goimports -local=github.com/jacksontj/promxy
 STATICCHECK ?= staticcheck
+GOLANGCI_LINT ?= golangci-lint
+# Revision new code is compared against in `make lint-new`.
+LINT_BASE_REV ?= origin/master
 
 .PHONY: clean
 clean:
@@ -13,6 +16,22 @@ clean:
 .PHONY: static-check
 static-check:
 	$(STATICCHECK) ./...
+
+# Full golangci-lint pass over the whole module (vendor excluded via config).
+.PHONY: lint
+lint:
+	$(GOLANGCI_LINT) run
+
+# Auto-fix the mechanical findings (gofmt, goimports, whitespace, unconvert...).
+.PHONY: lint-fix
+lint-fix:
+	$(GOLANGCI_LINT) run --fix
+
+# Report only issues on code changed versus LINT_BASE_REV — the gate to run
+# after making changes, so the inherited baseline does not drown new findings.
+.PHONY: lint-new
+lint-new:
+	$(GOLANGCI_LINT) run --new-from-rev=$(LINT_BASE_REV)
 
 .PHONY: fmt
 fmt:

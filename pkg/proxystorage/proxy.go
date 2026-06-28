@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -124,9 +125,35 @@ func (p *ProxyStorage) GetState() *proxyStorageState {
 
 // ApplyConfig updates the current state of this ProxyStorage
 func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+
 	oldState := p.GetState() // Fetch the old state
 
 	failed := false
+
+	// Assign ordinals and default names before anything else, since both the
+	// label-uniqueness check below and the server group build loop depend on
+	// them.
+	for i, sgCfg := range c.ServerGroups {
+		sgCfg.Ordinal = i
+		if sgCfg.Name == "" {
+			sgCfg.Name = fmt.Sprintf("sg-%d", i)
+		}
+	}
+
+	// Pre-flight: every server_group should carry a unique, non-empty labels set.
+	// This is mandatory when cross_group_dedup is on (dedup uses these labels for
+	// series identity — a collision would silently merge unrelated series). With
+	// dedup off it's only a hygiene concern (ambiguous provenance), so we warn
+	// rather than refuse to start, preserving historical promxy behavior.
+	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
+		if c.CrossGroupDedup {
+			return err
+		}
+		logrus.Warnf("%s (not fatal without cross_group_dedup, but provenance will be ambiguous)", err)
+	}
 
 	apis := make([]promclient.API, len(c.ServerGroups))
 	newState := &proxyStorageState{
@@ -134,7 +161,6 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		cfg: c,
 	}
 	for i, sgCfg := range c.ServerGroups {
-		sgCfg.Ordinal = i
 		tmp, err := servergroup.NewServerGroup()
 		if err != nil {
 			failed = true
@@ -159,12 +185,36 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		return fmt.Errorf("error applying config to one or more server group(s)")
 	}
 
-	multiApi, err := promclient.NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, len(apis), false)
+	var (
+		multiAPI *promclient.MultiAPI
+		err      error
+	)
+	if c.CrossGroupDedup {
+		backends := make([]promclient.CrossGroupBackend, len(c.ServerGroups))
+		for i, sg := range c.ServerGroups {
+			backends[i] = promclient.CrossGroupBackend{
+				API:    apis[i],
+				Name:   sg.Name,
+				Labels: sg.Labels,
+			}
+		}
+		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t)",
+			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse)
+		multiAPI, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
+			DedupMetadata:      c.CrossGroupDedupMetadata,
+			PartialResponse:    c.CrossGroupPartialResponse,
+			Collisions:         crossGroupDedupCollisions,
+			MetadataCollisions: crossGroupDedupMetadataCollisions,
+		})
+	} else {
+		multiAPI, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, len(apis), false)
+	}
 	if err != nil {
+		newState.Cancel(nil)
 		return err
 	}
 
-	newState.client = promclient.NewTimeTruncate(multiApi)
+	newState.client = promclient.NewTimeTruncate(multiAPI)
 
 	// Check for remote_write (for appender)
 	if c.PromConfig.RemoteWriteConfigs != nil {
@@ -257,7 +307,7 @@ func (p *ProxyStorage) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	b, err := json.Marshal(v)
 	if err != nil {
-		logrus.Error("msg", "error marshaling json response", "err", err)
+		logrus.WithError(err).Error("error marshaling json response")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -265,7 +315,7 @@ func (p *ProxyStorage) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if n, err := w.Write(b); err != nil {
-		logrus.Error("msg", "error writing response", "bytesWritten", n, "err", err)
+		logrus.WithError(err).WithField("bytesWritten", n).Error("error writing response")
 	}
 }
 
@@ -314,7 +364,7 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	b, err := json.Marshal(v)
 	if err != nil {
-		logrus.Error("msg", "error marshaling json response", "err", err)
+		logrus.WithError(err).Error("error marshaling json response")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -322,9 +372,35 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if n, err := w.Write(b); err != nil {
-		logrus.Error("msg", "error writing response", "bytesWritten", n, "err", err)
+		logrus.WithError(err).WithField("bytesWritten", n).Error("error writing response")
 	}
 
+}
+
+// WalReplayHandler implements /api/v1/status/walreplay. Promxy has no WAL,
+// so it reports a steady "fully replayed" state to keep Grafana's health
+// checks quiet. Without this override, upstream's handler returns HTTP 500
+// with a malformed double-JSON body.
+func (p *ProxyStorage) WalReplayHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(`{"status":"success","data":{"min":0,"max":0,"current":0}}`)); err != nil {
+		logrus.WithError(err).Error("error writing response")
+	}
+}
+
+// FlagsHandler implements /api/v1/status/flags. Upstream's handler returns
+// promxy's Go struct field names (e.g. `BindAddr`, `RoutePrefix`) instead of
+// Prometheus' dotted CLI names (`web.listen-address`, `web.route-prefix`),
+// which breaks any client that probes flags to detect server capabilities.
+// Promxy is not a Prometheus server, so we return an empty data object —
+// honest about the absence rather than misleading about its shape.
+func (p *ProxyStorage) FlagsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(`{"status":"success","data":{}}`)); err != nil {
+		logrus.WithError(err).Error("error writing response")
+	}
 }
 
 // Querier returns a new Querier on the storage.
@@ -370,6 +446,26 @@ func (p *ProxyStorage) Stats(statsByLabelName string, _ int) (*tsdb.Stats, error
 }
 func (p *ProxyStorage) WALReplayStatus() (tsdb.WALReplayStatus, error) {
 	return tsdb.WALReplayStatus{}, errors.New("not implemented")
+}
+
+// ServerGroups returns the resolved server groups from the current state.
+// Returns nil if no state has been applied yet.
+func (p *ProxyStorage) ServerGroups() []*servergroup.ServerGroup {
+	state := p.GetState()
+	if state.sgs == nil {
+		return nil
+	}
+	return state.sgs
+}
+
+// Config returns the current configuration. Returns nil before the first
+// ApplyConfig call.
+func (p *ProxyStorage) Config() *proxyconfig.Config {
+	state := p.GetState()
+	if state.cfg == nil {
+		return nil
+	}
+	return state.cfg
 }
 
 // vectorToStepMatrix converts an instant-query SeriesSet (one sample per
@@ -1163,6 +1259,52 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 func durationMilliseconds(d time.Duration) int64 {
 	return int64(d / (time.Millisecond / time.Nanosecond))
+}
+
+// validateUniqueServerGroupLabels ensures that every server_group carries a
+// non-empty labels set and that no two groups share the same label fingerprint.
+// It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
+// internally so the check is consistent with the one inside promclient.
+//
+// Single-group configurations are exempt: with only one group there is no
+// cross-group identity to disambiguate and no dedup partner, so empty labels
+// are unambiguous.
+func validateUniqueServerGroupLabels(groups []*servergroup.Config) error {
+	if len(groups) < 2 {
+		return nil
+	}
+
+	type entry struct {
+		name   string
+		labels model.LabelSet
+	}
+	seen := make(map[model.Fingerprint][]entry)
+
+	for _, cfg := range groups {
+		if len(cfg.Labels) == 0 {
+			return fmt.Errorf(
+				"server_group label collision: group %s has empty labels — every server_group must declare a unique non-empty 'labels' set",
+				cfg.Name,
+			)
+		}
+		fp := cfg.Labels.FastFingerprint()
+		seen[fp] = append(seen[fp], entry{name: cfg.Name, labels: cfg.Labels})
+	}
+
+	for _, entries := range seen {
+		if len(entries) < 2 {
+			continue
+		}
+		parts := make([]string, len(entries))
+		for i, e := range entries {
+			parts[i] = fmt.Sprintf("%s (labels=%s)", e.name, e.labels)
+		}
+		return fmt.Errorf(
+			"server_group label collision: groups [%s] share the same labels — every server_group must declare a unique non-empty 'labels' set",
+			strings.Join(parts, ", "),
+		)
+	}
+	return nil
 }
 
 // fillStaleNaNGaps inserts StaleNaN markers at the step timestamps where the

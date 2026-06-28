@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +42,7 @@ import (
 	promlogging "github.com/prometheus/prometheus/util/logging"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
+	ui "github.com/prometheus/prometheus/web/ui"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 	"k8s.io/klog"
@@ -49,8 +52,11 @@ import (
 	"github.com/jacksontj/promxy/pkg/federate"
 	"github.com/jacksontj/promxy/pkg/logging"
 	"github.com/jacksontj/promxy/pkg/middleware"
+	"github.com/jacksontj/promxy/pkg/promxyui"
 	"github.com/jacksontj/promxy/pkg/proxystorage"
 	"github.com/jacksontj/promxy/pkg/server"
+
+	injectionUI "github.com/jacksontj/promxy/cmd/promxy/ui"
 )
 
 var (
@@ -153,6 +159,149 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, rls .
 	noStepSuqueryInterval.Set(cfg.PromConfig.GlobalConfig.EvaluationInterval)
 	reloadTime.Set(float64(time.Now().Unix()))
 	return nil
+}
+
+// loadReactScripts reads the embedded head.js/nav.js files used to inject
+// promxy-specific behavior into the Mantine UI and wraps each in a <script>
+// tag. The embedded files are part of the binary, so a read failure here
+// indicates a build problem and is treated as a hard startup error by the
+// caller.
+func loadReactScripts() (headScript, navScript string, err error) {
+	head, err := injectionUI.Scripts.ReadFile("head.js")
+	if err != nil {
+		return "", "", fmt.Errorf("embedded head.js missing: %w", err)
+	}
+	nav, err := injectionUI.Scripts.ReadFile("nav.js")
+	if err != nil {
+		return "", "", fmt.Errorf("embedded nav.js missing: %w", err)
+	}
+	return "<script>" + string(head) + "</script>", "<script>" + string(nav) + "</script>", nil
+}
+
+// reactRouteSet is the set of exact path segments that the Mantine UI handles.
+// These match newUIReactRouterPaths + newUIReactRouterServerPaths in web/web.go.
+var reactRouteSet = map[string]bool{
+	"/config":                 true,
+	"/flags":                  true,
+	"/service-discovery":      true,
+	"/alertmanager-discovery": true,
+	"/status":                 true,
+	"/targets":                true,
+	"/alerts":                 true,
+	"/query":                  true,
+	"/rules":                  true,
+	"/tsdb-status":            true,
+	"/agent":                  true,
+	"/backends":               true,
+}
+
+// isReactRoute reports whether urlPath (the full, possibly route-prefixed
+// request path) targets one of the Mantine UI routes. It strips routePrefix
+// before comparing against the unprefixed reactRouteSet keys. At the root
+// (routePrefix "/" or ""), the trim is a no-op so "/query" matches as before.
+func isReactRoute(routePrefix, urlPath string) bool {
+	trimmed := strings.TrimRight(routePrefix, "/")
+	rel := strings.TrimPrefix(urlPath, trimmed)
+	// Under a non-root prefix, require that the prefix was actually present;
+	// otherwise an unprefixed "/query" would be misrouted to the React app.
+	if trimmed != "" && rel == urlPath {
+		return false
+	}
+	return reactRouteSet[rel]
+}
+
+// checkedReplaceAll behaves like bytes.ReplaceAll, but if marker is not
+// present in src it logs a loud warning naming the missing marker before
+// returning src unchanged. This guards against a future upstream Mantine
+// build renaming or removing a placeholder/injection point we depend on,
+// which would otherwise cause the substitution to silently no-op.
+func checkedReplaceAll(src, marker, replacement []byte, what string) []byte {
+	if !bytes.Contains(src, marker) {
+		logrus.Warnf("React index.html missing expected marker %q (%s); promxy UI customization will not be applied", marker, what)
+		return src
+	}
+	return bytes.ReplaceAll(src, marker, replacement)
+}
+
+// buildInjectedReactApp opens index.html from the embedded Mantine UI assets,
+// applies the same placeholder substitutions that upstream web.Handler does,
+// and injects navScript immediately before </body>. The result depends only
+// on opts (and the embedded head/nav scripts), which are fixed for the
+// process lifetime, so callers compute it once at startup and serve the same
+// bytes for every request via serveInjectedReactApp.
+func buildInjectedReactApp(opts *web.Options, headScript, navScript string) ([]byte, error) {
+	const indexPath = "/static/mantine-ui/index.html"
+	f, err := ui.Assets.Open(indexPath)
+	if err != nil {
+		// Assets not built (stub FS). The caller falls back to an error
+		// response — the upstream handler would produce its own, more
+		// informative message in this case.
+		return nil, fmt.Errorf("error opening React index.html: %w", err)
+	}
+	defer f.Close()
+	idx, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("error reading React index.html: %w", err)
+	}
+
+	// Apply the same placeholder replacements as upstream serveReactApp.
+	consolesPath := ""
+	if opts.ExternalURL != nil {
+		if _, statErr := os.Stat(opts.ConsoleTemplatesPath + "/index.html"); !os.IsNotExist(statErr) {
+			consolesPath = opts.ExternalURL.Path + "/consoles/index.html"
+		}
+	}
+	idx = checkedReplaceAll(idx, []byte("CONSOLES_LINK_PLACEHOLDER"), []byte(consolesPath), "consoles link placeholder")
+	idx = checkedReplaceAll(idx, []byte("TITLE_PLACEHOLDER"), []byte(opts.PageTitle), "title placeholder")
+	idx = checkedReplaceAll(idx, []byte("AGENT_MODE_PLACEHOLDER"), []byte(strconv.FormatBool(opts.IsAgent)), "agent mode placeholder")
+	idx = checkedReplaceAll(idx, []byte("READY_PLACEHOLDER"), []byte("true"), "ready placeholder")
+	lookbackStr := model.Duration(opts.LookbackDelta).String()
+	idx = checkedReplaceAll(idx, []byte("LOOKBACKDELTA_PLACEHOLDER"), []byte(lookbackStr), "lookback delta placeholder")
+
+	// prefix is "" at root and "/foo" under -web.route-prefix=/foo. All
+	// absolute UI/asset paths below are built from it so the page works
+	// whether served at the root or at a sub-path.
+	prefix := strings.TrimRight(opts.RoutePrefix, "/")
+
+	// Replace Prometheus favicon with Promxy icon.
+	idx = checkedReplaceAll(idx, []byte(`href="./favicon.svg"`), []byte(`href="`+prefix+`/promxy/static/promxy-icon.svg"`), "favicon link")
+
+	// Make asset URLs absolute so they resolve correctly when the page is
+	// served at a sub-path like /backends. Under a route prefix the upstream
+	// web handler serves the bundled assets at <prefix>/assets/.
+	idx = checkedReplaceAll(idx, []byte(`"./assets/`), []byte(`"`+prefix+`/assets/`), "double-quoted asset path prefix")
+	// The single-quoted form is an optional defensive variant: Vite emits the
+	// entry script/style with double quotes, so this form is normally absent.
+	// Rewrite it when present, but unlike the double-quoted form its absence is
+	// expected and harmless, so use a plain ReplaceAll that does not warn.
+	idx = bytes.ReplaceAll(idx, []byte(`'./assets/`), []byte(`'`+prefix+`/assets/`))
+
+	// Expose the route prefix to the injected scripts so they can build their
+	// own absolute paths. Must be injected before headScript so head.js
+	// can read it.
+	prefixScript := fmt.Sprintf("<script>window.__PROMXY_ROUTE_PREFIX__=%q;</script>", prefix)
+
+	// Inject head script (blocks React Router navigation on /backends).
+	idx = checkedReplaceAll(idx, []byte("<head>"), []byte("<head>"+prefixScript+headScript), "<head> injection point")
+
+	// Inject our nav script just before </body>.
+	idx = checkedReplaceAll(idx, []byte("</body>"), []byte(navScript+"</body>"), "</body> injection point")
+
+	return idx, nil
+}
+
+// serveInjectedReactApp writes the precomputed injected Mantine UI page (from
+// buildInjectedReactApp), or replays its build error as a 500 if the page
+// could not be built at startup.
+func serveInjectedReactApp(w http.ResponseWriter, page []byte, buildErr error) {
+	if buildErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, buildErr.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(page)
 }
 
 func main() {
@@ -429,6 +578,7 @@ func main() {
 		ListenAddresses: []string{opts.BindAddr},
 
 		Flags:       opts.ToFlags(),
+		PageTitle:   "Promxy",
 		RoutePrefix: opts.RoutePrefix,
 		ExternalURL: externalUrl,
 		Version: &web.PrometheusVersion{
@@ -461,6 +611,34 @@ func main() {
 	// Register API endpoint with correct route prefix
 	webHandler.Getv1API().Register(webHandler.GetRouter().WithPrefix(apiPrefix))
 
+	// Create the promxy inventory UI handler.
+	promxyUIHandler, err := promxyui.NewHandler(ps, webOptions.RoutePrefix)
+	if err != nil {
+		logrus.Fatalf("Error creating promxy UI handler: %v", err)
+	}
+	// Tie the prober loop to the main context so it stops on shutdown.
+	go promxyUIHandler.Run(ctx)
+
+	// Precompute the injected Mantine UI page once: it depends only on
+	// webOptions and the embedded head/nav scripts, both fixed for the
+	// process lifetime.
+	reactHeadScript, reactNavScript, err := loadReactScripts()
+	if err != nil {
+		logrus.Fatalf("Error loading embedded UI scripts: %v", err)
+	}
+	injectedReactPage, injectedReactPageErr := buildInjectedReactApp(webOptions, reactHeadScript, reactNavScript)
+
+	// Precompute the route-prefixed paths matched in r.NotFound below;
+	// webOptions.RoutePrefix never changes after startup.
+	debugPathPrefix := path.Join(webOptions.RoutePrefix, "/debug")
+	readyPath := path.Join(webOptions.RoutePrefix, "/-/ready")
+	configPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/config")
+	metadataPath := path.Join(webOptions.RoutePrefix, "/api/v1/metadata")
+	walReplayPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/walreplay")
+	flagsPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/flags")
+	promxyPathPrefix := path.Join(webOptions.RoutePrefix, "/promxy")
+	debugStripPrefix := strings.Trim(webOptions.RoutePrefix, "/")
+
 	// promxy's own /federate handler: a faster encoder for the common
 	// text/plain path (issue #784) that delegates other formats to the vendored
 	// handler. Kept in sync with the configured external_labels on reload.
@@ -479,19 +657,30 @@ func main() {
 	stopping := false
 	r.NotFound = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Have our fallback rules
-		if strings.HasPrefix(r.URL.Path, path.Join(webOptions.RoutePrefix, "/debug")) {
-			http.StripPrefix(strings.Trim(webOptions.RoutePrefix, "/"), http.DefaultServeMux).ServeHTTP(w, r)
-		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/-/ready") {
+		if strings.HasPrefix(r.URL.Path, debugPathPrefix) {
+			http.StripPrefix(debugStripPrefix, http.DefaultServeMux).ServeHTTP(w, r)
+		} else if r.URL.Path == readyPath {
 			if stopping {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				fmt.Fprintf(w, "Promxy is Stopping.\n")
 			} else {
 				webHandler.GetRouter().ServeHTTP(w, r)
 			}
-		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/status/config") {
+		} else if r.URL.Path == configPath {
 			ps.ConfigHandler(w, r)
-		} else if r.URL.Path == path.Join(webOptions.RoutePrefix, "/api/v1/metadata") {
+		} else if r.URL.Path == metadataPath {
 			ps.MetadataHandler(w, r)
+		} else if r.URL.Path == walReplayPath {
+			ps.WalReplayHandler(w, r)
+		} else if r.URL.Path == flagsPath {
+			ps.FlagsHandler(w, r)
+		} else if isReactRoute(webOptions.RoutePrefix, r.URL.Path) {
+			// Serve Mantine index.html with our nav injection.
+			// This must come before the /promxy prefix check so that
+			// /backends is served through the Mantine shell.
+			serveInjectedReactApp(w, injectedReactPage, injectedReactPageErr)
+		} else if strings.HasPrefix(r.URL.Path, promxyPathPrefix) {
+			promxyUIHandler.ServeHTTP(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
 			webHandler.GetRouter().ServeHTTP(w, r)

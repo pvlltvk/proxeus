@@ -114,4 +114,41 @@ func (c *Config) String() string {
 type PromxyConfig struct {
 	// Config for each of the server groups promxy is configured to aggregate
 	ServerGroups []*servergroup.Config `yaml:"server_groups"`
+
+	// CrossGroupDedup, when true, enables deterministic cross-server_group
+	// deduplication: series that match modulo each server_group's external
+	// `labels` collapse to one. The lower-ordinal server_group wins; ordinal
+	// is the index in `server_groups[]` (YAML order). Default false preserves
+	// historical behavior — both backends' series are returned.
+	CrossGroupDedup bool `yaml:"cross_group_dedup"`
+
+	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to
+	// /api/v1/series so Grafana label browsers and dashboards don't show one
+	// row per backend for what is logically a single target. Requires
+	// CrossGroupDedup to also be true; promxy will refuse to start otherwise.
+	// Default false preserves historical behavior.
+	CrossGroupDedupMetadata bool `yaml:"cross_group_dedup_metadata"`
+
+	// CrossGroupPartialResponse, when true, lets a query succeed when only some
+	// server_groups respond: results from the healthy backends are returned and
+	// a warning is attached for each that failed (Grafana surfaces it). When
+	// false (default) any single backend error fails the whole query — correct
+	// for HA replicas, but undesirable for federating disjoint data, where a
+	// Thanos outage should not blank out VM-sourced series. Only affects the
+	// cross-group fan-out, so it requires CrossGroupDedup to also be true.
+	CrossGroupPartialResponse bool `yaml:"cross_group_partial_response"`
+}
+
+// Validate checks the cross-group flag dependencies. Both
+// CrossGroupDedupMetadata and CrossGroupPartialResponse only affect the
+// cross-group fan-out/dedup machinery, so neither makes sense without
+// CrossGroupDedup also being enabled.
+func (c *PromxyConfig) Validate() error {
+	if c.CrossGroupDedupMetadata && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
+	}
+	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
+	}
+	return nil
 }
