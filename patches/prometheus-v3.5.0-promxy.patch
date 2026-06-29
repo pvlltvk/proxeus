@@ -1,0 +1,629 @@
+diff --git a/promql/engine.go b/promql/engine.go
+index adf49ed..7b00ed2 100644
+--- a/promql/engine.go
++++ b/promql/engine.go
+@@ -347,6 +347,7 @@ type Engine struct {
+ 	enablePerStepStats       bool
+ 	enableDelayedNameRemoval bool
+ 	enableTypeAndUnitLabels  bool
++	NodeReplacer             parser.NodeReplacer
+ }
+ 
+ // NewEngine returns a new engine.
+@@ -481,7 +482,10 @@ func (ng *Engine) SetQueryLogger(l QueryLogger) {
+ 
+ // NewInstantQuery returns an evaluation query for the given expression at the given time.
+ func (ng *Engine) NewInstantQuery(ctx context.Context, q storage.Queryable, opts QueryOpts, qs string, ts time.Time) (Query, error) {
+-	pExpr, qry := ng.newQuery(q, qs, opts, ts, ts, 0)
++	pExpr, qry, err := ng.newQuery(q, qs, opts, ts, ts, 0)
++	if err != nil {
++		return nil, err
++	}
+ 	finishQueue, err := ng.queueActive(ctx, qry)
+ 	if err != nil {
+ 		return nil, err
+@@ -502,7 +506,10 @@ func (ng *Engine) NewInstantQuery(ctx context.Context, q storage.Queryable, opts
+ // NewRangeQuery returns an evaluation query for the given time range and with
+ // the resolution set by the interval.
+ func (ng *Engine) NewRangeQuery(ctx context.Context, q storage.Queryable, opts QueryOpts, qs string, start, end time.Time, interval time.Duration) (Query, error) {
+-	pExpr, qry := ng.newQuery(q, qs, opts, start, end, interval)
++	pExpr, qry, err := ng.newQuery(q, qs, opts, start, end, interval)
++	if err != nil {
++		return nil, err
++	}
+ 	finishQueue, err := ng.queueActive(ctx, qry)
+ 	if err != nil {
+ 		return nil, err
+@@ -523,7 +530,7 @@ func (ng *Engine) NewRangeQuery(ctx context.Context, q storage.Queryable, opts Q
+ 	return qry, err
+ }
+ 
+-func (ng *Engine) newQuery(q storage.Queryable, qs string, opts QueryOpts, start, end time.Time, interval time.Duration) (*parser.Expr, *query) {
++func (ng *Engine) newQuery(q storage.Queryable, qs string, opts QueryOpts, start, end time.Time, interval time.Duration) (*parser.Expr, *query, error) {
+ 	if opts == nil {
+ 		opts = NewPrometheusQueryOpts(false, 0)
+ 	}
+@@ -539,6 +546,7 @@ func (ng *Engine) newQuery(q storage.Queryable, qs string, opts QueryOpts, start
+ 		Interval:      interval,
+ 		LookbackDelta: lookbackDelta,
+ 	}
++
+ 	qry := &query{
+ 		q:           qs,
+ 		stmt:        es,
+@@ -547,7 +555,7 @@ func (ng *Engine) newQuery(q storage.Queryable, qs string, opts QueryOpts, start
+ 		sampleStats: stats.NewQuerySamples(ng.enablePerStepStats && opts.EnablePerStepStats()),
+ 		queryable:   q,
+ 	}
+-	return &es.Expr, qry
++	return &es.Expr, qry, nil
+ }
+ 
+ var (
+@@ -560,10 +568,8 @@ func (ng *Engine) validateOpts(expr parser.Expr) error {
+ 		return nil
+ 	}
+ 
+-	var atModifierUsed, negativeOffsetUsed bool
+-
+-	var validationErr error
+-	parser.Inspect(expr, func(node parser.Node, _ []parser.Node) error {
++	_, err := parser.Inspect(context.TODO(), &parser.EvalStmt{Expr: expr}, func(node parser.Node, path []parser.Node) error {
++		var atModifierUsed, negativeOffsetUsed bool
+ 		switch n := node.(type) {
+ 		case *parser.VectorSelector:
+ 			if n.Timestamp != nil || n.StartOrEnd == parser.START || n.StartOrEnd == parser.END {
+@@ -592,18 +598,16 @@ func (ng *Engine) validateOpts(expr parser.Expr) error {
+ 		}
+ 
+ 		if atModifierUsed && !ng.enableAtModifier {
+-			validationErr = ErrValidationAtModifierDisabled
+-			return validationErr
++			return ErrValidationAtModifierDisabled
+ 		}
+ 		if negativeOffsetUsed && !ng.enableNegativeOffset {
+-			validationErr = ErrValidationNegativeOffsetDisabled
+-			return validationErr
++			return ErrValidationNegativeOffsetDisabled
+ 		}
+ 
+ 		return nil
+-	})
++	}, nil)
+ 
+-	return validationErr
++	return err
+ }
+ 
+ // NewTestQuery injects special behaviour into Query for testing.
+@@ -720,7 +724,7 @@ func durationMilliseconds(d time.Duration) int64 {
+ // execEvalStmt evaluates the expression of an evaluation statement for the given time range.
+ func (ng *Engine) execEvalStmt(ctx context.Context, query *query, s *parser.EvalStmt) (parser.Value, annotations.Annotations, error) {
+ 	prepareSpanTimer, ctxPrepare := query.stats.GetSpanTimer(ctx, stats.QueryPreparationTime, ng.metrics.queryPrepareTime)
+-	mint, maxt := FindMinMaxTime(s)
++	mint, maxt := ng.findMinMaxTime(s)
+ 	querier, err := query.queryable.Querier(mint, maxt)
+ 	if err != nil {
+ 		prepareSpanTimer.Finish()
+@@ -728,7 +732,10 @@ func (ng *Engine) execEvalStmt(ctx context.Context, query *query, s *parser.Eval
+ 	}
+ 	defer querier.Close()
+ 
+-	ng.populateSeries(ctxPrepare, querier, s)
++	if err := ng.populateSeries(ctxPrepare, querier, s); err != nil {
++		prepareSpanTimer.Finish()
++		return nil, nil, err
++	}
+ 	prepareSpanTimer.Finish()
+ 
+ 	// Modify the offset of vector and matrix selectors for the @ modifier
+@@ -871,19 +878,31 @@ func subqueryTimes(path []parser.Node) (time.Duration, time.Duration, *int64) {
+ 	return subqOffset, subqRange, tsp
+ }
+ 
+-// FindMinMaxTime returns the time in milliseconds of the earliest and latest point in time the statement will try to process.
++// findMinMaxTime returns the time in milliseconds of the earliest and latest point in time the statement will try to process.
+ // This takes into account offsets, @ modifiers, and range selectors.
+-// If the statement does not select series, then FindMinMaxTime returns (0, 0).
+-func FindMinMaxTime(s *parser.EvalStmt) (int64, int64) {
++// If the statement does not select series, then findMinMaxTime returns (0, 0).
++func (ng *Engine) findMinMaxTime(s *parser.EvalStmt) (int64, int64) {
+ 	var minTimestamp, maxTimestamp int64 = math.MaxInt64, math.MinInt64
+ 	// Whenever a MatrixSelector is evaluated, evalRange is set to the corresponding range.
+ 	// The evaluation of the VectorSelector inside then evaluates the given range and unsets
+ 	// the variable.
+-	var evalRange time.Duration
+-	parser.Inspect(s.Expr, func(node parser.Node, path []parser.Node) error {
++	//var evalRange time.Duration
++
++	// Since this fork allows for parallel execution of the tree Walk we need a more
++	// sophisticated datastructure (to avoid conflicts)
++	ranges := make([]evalRange, 0, 10) // TODO: better size guess?
++	// We are dual-purposing the lock for both the `ranges` and the `min/max` timestamp variables
++	l := sync.RWMutex{}
++
++	parser.Inspect(context.TODO(), s, func(node parser.Node, path []parser.Node) error {
+ 		switch n := node.(type) {
+ 		case *parser.VectorSelector:
+-			start, end := getTimeRangesForSelector(s, n, path, evalRange)
++			l.RLock()
++			evalRange := findPathRange(path, ranges)
++			l.RUnlock()
++
++			start, end := ng.getTimeRangesForSelector(s, n, path, evalRange)
++			l.Lock()
+ 			if start < minTimestamp {
+ 				minTimestamp = start
+ 			}
+@@ -891,11 +910,19 @@ func FindMinMaxTime(s *parser.EvalStmt) (int64, int64) {
+ 				maxTimestamp = end
+ 			}
+ 			evalRange = 0
++			l.Unlock()
++
+ 		case *parser.MatrixSelector:
+-			evalRange = n.Range
++			l.Lock()
++			prefix := make([]posrange.PositionRange, len(path))
++			for i, p := range path {
++				prefix[i] = p.PositionRange()
++			}
++			ranges = append(ranges, evalRange{Prefix: prefix, Range: n.Range})
++			l.Unlock()
+ 		}
+ 		return nil
+-	})
++	}, nil)
+ 
+ 	if maxTimestamp == math.MinInt64 {
+ 		// This happens when there was no selector. Hence no time range to select.
+@@ -906,7 +933,7 @@ func FindMinMaxTime(s *parser.EvalStmt) (int64, int64) {
+ 	return minTimestamp, maxTimestamp
+ }
+ 
+-func getTimeRangesForSelector(s *parser.EvalStmt, n *parser.VectorSelector, path []parser.Node, evalRange time.Duration) (int64, int64) {
++func (ng *Engine) getTimeRangesForSelector(s *parser.EvalStmt, n *parser.VectorSelector, path []parser.Node, evalRange time.Duration) (int64, int64) {
+ 	start, end := timestamp.FromTime(s.Start), timestamp.FromTime(s.End)
+ 	subqOffset, subqRange, subqTs := subqueryTimes(path)
+ 
+@@ -930,7 +957,11 @@ func getTimeRangesForSelector(s *parser.EvalStmt, n *parser.VectorSelector, path
+ 		// Reduce the start by one fewer ms than the lookback delta
+ 		// because wo want to exclude samples that are precisely the
+ 		// lookback delta before the eval time.
+-		start -= durationMilliseconds(s.LookbackDelta) - 1
++		lookback := s.LookbackDelta
++		if lookback <= 0 {
++			lookback = ng.lookbackDelta
++		}
++		start -= durationMilliseconds(n.GetLookbackDelta(lookback)) - 1
+ 	} else {
+ 		// For all matrix queries we want to ensure that we have
+ 		// (end-start) + range selected this way we have `range` data
+@@ -960,16 +991,28 @@ func (ng *Engine) getLastSubqueryInterval(path []parser.Node) time.Duration {
+ 	return interval
+ }
+ 
+-func (ng *Engine) populateSeries(ctx context.Context, querier storage.Querier, s *parser.EvalStmt) {
++func (ng *Engine) populateSeries(ctx context.Context, querier storage.Querier, s *parser.EvalStmt) error {
+ 	// Whenever a MatrixSelector is evaluated, evalRange is set to the corresponding range.
+ 	// The evaluation of the VectorSelector inside then evaluates the given range and unsets
+ 	// the variable.
+-	var evalRange time.Duration
++	//var evalRange time.Duration
+ 
+-	parser.Inspect(s.Expr, func(node parser.Node, path []parser.Node) error {
++	// Since this fork allows for parallel execution of the tree Walk we need a more
++	// sophisticated datastructure (to avoid conflicts)
++	ranges := make([]evalRange, 0, 10) // TODO: better size guess?
++	l := sync.RWMutex{}
++
++	n, err := parser.Inspect(ctx, s, func(node parser.Node, path []parser.Node) error {
+ 		switch n := node.(type) {
+ 		case *parser.VectorSelector:
+-			start, end := getTimeRangesForSelector(s, n, path, evalRange)
++			l.RLock()
++			evalRange := findPathRange(path, ranges)
++			l.RUnlock()
++
++			if n.UnexpandedSeriesSet != nil {
++				return nil
++			}
++			start, end := ng.getTimeRangesForSelector(s, n, path, evalRange)
+ 			interval := ng.getLastSubqueryInterval(path)
+ 			if interval == 0 {
+ 				interval = s.Interval
+@@ -981,15 +1024,30 @@ func (ng *Engine) populateSeries(ctx context.Context, querier storage.Querier, s
+ 				Range: durationMilliseconds(evalRange),
+ 				Func:  extractFuncFromPath(path),
+ 			}
+-			evalRange = 0
+ 			hints.By, hints.Grouping = extractGroupsFromPath(path)
+ 			n.UnexpandedSeriesSet = querier.Select(ctx, false, hints, n.LabelMatchers...)
+ 
+ 		case *parser.MatrixSelector:
+-			evalRange = n.Range
++			l.Lock()
++			prefix := make([]posrange.PositionRange, len(path))
++			for i, p := range path {
++				prefix[i] = p.PositionRange()
++			}
++			ranges = append(ranges, evalRange{Prefix: prefix, Range: n.Range})
++			l.Unlock()
+ 		}
+ 		return nil
+-	})
++	}, ng.NodeReplacer)
++
++	if err != nil {
++		return err
++	}
++
++	if nTyped, ok := n.(parser.Expr); ok {
++		s.Expr = nTyped
++	}
++
++	return nil
+ }
+ 
+ // extractFuncFromPath walks up the path and searches for the first instance of
+@@ -3733,7 +3791,7 @@ func unwrapStepInvariantExpr(e parser.Expr) parser.Expr {
+ func PreprocessExpr(expr parser.Expr, start, end time.Time) (parser.Expr, error) {
+ 	detectHistogramStatsDecoding(expr)
+ 
+-	if err := parser.Walk(&durationVisitor{}, expr, nil); err != nil {
++	if _, err := parser.Walk(context.TODO(), &durationVisitor{}, &parser.EvalStmt{Expr: expr}, expr, nil, nil); err != nil {
+ 		return nil, err
+ 	}
+ 
+@@ -3855,7 +3913,7 @@ func setOffsetForAtModifier(evalTime int64, expr parser.Expr) {
+ 		return originalOffset + offsetDiff
+ 	}
+ 
+-	parser.Inspect(expr, func(node parser.Node, path []parser.Node) error {
++	parser.Inspect(context.TODO(), &parser.EvalStmt{Expr: expr}, func(node parser.Node, path []parser.Node) error {
+ 		switch n := node.(type) {
+ 		case *parser.VectorSelector:
+ 			n.Offset = getOffset(n.Timestamp, n.OriginalOffset, path)
+@@ -3868,7 +3926,7 @@ func setOffsetForAtModifier(evalTime int64, expr parser.Expr) {
+ 			n.Offset = getOffset(n.Timestamp, n.OriginalOffset, path)
+ 		}
+ 		return nil
+-	})
++	}, nil)
+ }
+ 
+ // detectHistogramStatsDecoding modifies the expression by setting the
+@@ -3877,7 +3935,7 @@ func setOffsetForAtModifier(evalTime int64, expr parser.Expr) {
+ // and buckets. The function can be treated as an optimization and is not
+ // required for correctness.
+ func detectHistogramStatsDecoding(expr parser.Expr) {
+-	parser.Inspect(expr, func(node parser.Node, path []parser.Node) error {
++	parser.Inspect(context.TODO(), &parser.EvalStmt{Expr: expr}, func(node parser.Node, path []parser.Node) error {
+ 		n, ok := (node).(*parser.VectorSelector)
+ 		if !ok {
+ 			return nil
+@@ -3899,7 +3957,7 @@ func detectHistogramStatsDecoding(expr parser.Expr) {
+ 			break
+ 		}
+ 		return errors.New("stop")
+-	})
++	}, nil)
+ }
+ 
+ func makeInt64Pointer(val int64) *int64 {
+diff --git a/promql/engine_extra.go b/promql/engine_extra.go
+new file mode 100644
+index 0000000..0a39b75
+--- /dev/null
++++ b/promql/engine_extra.go
+@@ -0,0 +1,42 @@
++package promql
++
++import (
++	"time"
++
++	"github.com/prometheus/prometheus/promql/parser"
++	"github.com/prometheus/prometheus/promql/parser/posrange"
++)
++
++func findPathRange(path []parser.Node, eRanges []evalRange) time.Duration {
++	var (
++		evalRange time.Duration
++		depth     = -1
++	)
++	for _, r := range eRanges {
++		// If the prefix is longer then it can't be the parent of `child`
++		if len(r.Prefix) > len(path) {
++			continue
++		}
++
++		// Check if we are a child
++		child := true
++		for i, p := range r.Prefix {
++			if p != path[i].PositionRange() {
++				child = false
++				break
++			}
++		}
++		if child && len(r.Prefix) > depth {
++			evalRange = r.Range
++			depth = len(r.Prefix)
++		}
++	}
++
++	return evalRange
++}
++
++// evalRange summarizes a defined evalRange (from a MatrixSelector) within the ast
++type evalRange struct {
++	Prefix []posrange.PositionRange
++	Range  time.Duration
++}
+diff --git a/promql/info.go b/promql/info.go
+index 0197330..db40861 100644
+--- a/promql/info.go
++++ b/promql/info.go
+@@ -83,7 +83,7 @@ loop:
+ func (ev *evaluator) infoSelectHints(expr parser.Expr) storage.SelectHints {
+ 	var nodeTimestamp *int64
+ 	var offset int64
+-	parser.Inspect(expr, func(node parser.Node, _ []parser.Node) error {
++	parser.Inspect(context.TODO(), &parser.EvalStmt{Expr: expr}, func(node parser.Node, _ []parser.Node) error {
+ 		switch n := node.(type) {
+ 		case *parser.VectorSelector:
+ 			if n.Timestamp != nil {
+@@ -94,7 +94,7 @@ func (ev *evaluator) infoSelectHints(expr parser.Expr) storage.SelectHints {
+ 		default:
+ 			return nil
+ 		}
+-	})
++	}, nil)
+ 
+ 	start := ev.startTimestamp
+ 	end := ev.endTimestamp
+diff --git a/promql/parser/ast.go b/promql/parser/ast.go
+index 9eebaed..f37ad46 100644
+--- a/promql/parser/ast.go
++++ b/promql/parser/ast.go
+@@ -16,6 +16,7 @@ package parser
+ import (
+ 	"context"
+ 	"fmt"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/prometheus/prometheus/model/labels"
+@@ -216,6 +217,7 @@ type VectorSelector struct {
+ 	SkipHistogramBuckets bool     // Set when decoding native histogram buckets is not needed for query evaluation.
+ 	StartOrEnd           ItemType // Set when @ is used with start() or end()
+ 	LabelMatchers        []*labels.Matcher
++	LookbackDelta        time.Duration
+ 
+ 	// The unexpanded seriesSet populated at query preparation time.
+ 	UnexpandedSeriesSet storage.SeriesSet
+@@ -228,6 +230,13 @@ type VectorSelector struct {
+ 	PosRange posrange.PositionRange
+ }
+ 
++func (m *VectorSelector) GetLookbackDelta(d time.Duration) time.Duration {
++	if m.LookbackDelta > 0 {
++		return m.LookbackDelta
++	}
++	return d
++}
++
+ // TestStmt is an internal helper statement that allows execution
+ // of an arbitrary function during handling. It is used to test the Engine.
+ type TestStmt func(context.Context) error
+@@ -328,32 +337,95 @@ type Visitor interface {
+ // invoked recursively with visitor w for each of the non-nil children of node,
+ // followed by a call of w.Visit(nil), returning an error
+ // As the tree is descended the path of previous nodes is provided.
+-func Walk(v Visitor, node Node, path []Node) error {
++func Walk(ctx context.Context, v Visitor, s *EvalStmt, node Node, path []Node, nr NodeReplacer) (Node, error) {
++	// Check if the context is closed already
++	select {
++	case <-ctx.Done():
++		return nil, ctx.Err()
++	default:
++	}
++
++	if nr != nil {
++		replacement, err := nr(ctx, s, node, path)
++		if replacement != nil {
++			node = replacement
++		}
++		if err != nil {
++			return node, err
++		}
++
++	}
++
+ 	var err error
+ 	if v, err = v.Visit(node, path); v == nil || err != nil {
+-		return err
++		return node, err
+ 	}
+ 	path = append(path, node)
+ 
+-	for _, e := range Children(node) {
+-		if err := Walk(v, e, path); err != nil {
+-			return err
++	// Walk children. When a NodeReplacer is installed we may rewrite the
++	// AST, so we have to wait for each child to return before installing
++	// the (possibly new) value via SetChild — and we have to do it
++	// sequentially to avoid concurrent SetChild writes racing against
++	// PositionRange / Children reads on shared parents.
++	//
++	// When there is no NodeReplacer the visit is read-only: we don't need
++	// SetChild at all and can fan out children to goroutines for the I/O
++	// parallelism that promxy depends on (e.g. populateSeries firing one
++	// downstream HTTP request per VectorSelector).
++	children := Children(node)
++	if nr != nil {
++		for i, e := range children {
++			childNode, err := Walk(ctx, v, s, e, path, nr)
++			if err != nil {
++				return node, err
++			}
++			SetChild(node, i, childNode)
++		}
++	} else if len(children) == 1 {
++		// Single-child fast path: avoid spawning a goroutine for the
++		// linear chains (UnaryExpr / ParenExpr / StepInvariantExpr /
++		// MatrixSelector) that dominate AST shapes.
++		if _, err := Walk(ctx, v, s, children[0], path, nr); err != nil {
++			return node, err
++		}
++	} else {
++		wg := &sync.WaitGroup{}
++		errs := make([]error, len(children))
++		for i, e := range children {
++			wg.Add(1)
++			go func(i int, e Node) {
++				defer wg.Done()
++				if _, childErr := Walk(ctx, v, s, e, append([]Node{}, path...), nr); childErr != nil {
++					errs[i] = childErr
++				}
++			}(i, e)
++		}
++		wg.Wait()
++		for _, err := range errs {
++			if err != nil {
++				return node, err
++			}
+ 		}
+ 	}
+ 
+ 	_, err = v.Visit(nil, nil)
+-	return err
++	return node, err
+ }
+ 
+ func ExtractSelectors(expr Expr) [][]*labels.Matcher {
+-	var selectors [][]*labels.Matcher
+-	Inspect(expr, func(node Node, _ []Node) error {
++	var (
++		selectors [][]*labels.Matcher
++		l         sync.Mutex
++	)
++	Inspect(context.TODO(), &EvalStmt{Expr: expr}, func(node Node, _ []Node) error {
+ 		vs, ok := node.(*VectorSelector)
+ 		if ok {
++			l.Lock()
+ 			selectors = append(selectors, vs.LabelMatchers)
++			l.Unlock()
+ 		}
+ 		return nil
+-	})
++	}, nil)
+ 	return selectors
+ }
+ 
+@@ -370,8 +442,54 @@ func (f inspector) Visit(node Node, path []Node) (Visitor, error) {
+ // Inspect traverses an AST in depth-first order: It starts by calling
+ // f(node, path); node must not be nil. If f returns a nil error, Inspect invokes f
+ // for all the non-nil children of node, recursively.
+-func Inspect(node Node, f inspector) {
+-	Walk(f, node, nil) //nolint:errcheck
++func Inspect(ctx context.Context, s *EvalStmt, f inspector, nr NodeReplacer) (Node, error) {
++	//nolint: errcheck
++	return Walk(ctx, inspector(f), s, s.Expr, nil, nr)
++}
++
++func SetChild(node Node, i int, child Node) {
++	// For some reasons these switches have significantly better performance than interfaces
++	switch n := node.(type) {
++	case *EvalStmt:
++		n.Expr = child.(Expr)
++	case Expressions:
++		n[i] = child.(Expr)
++	case *AggregateExpr:
++		// While this does not look nice, it should avoid unnecessary allocations
++		// caused by slice resizing
++		if n.Expr == nil && n.Param == nil {
++		} else if n.Expr == nil {
++			n.Param = child.(Expr)
++		} else if n.Param == nil {
++			n.Expr = child.(Expr)
++		} else {
++			switch i {
++			case 0:
++				n.Expr = child.(Expr)
++			case 1:
++				n.Param = child.(Expr)
++			}
++		}
++	case *BinaryExpr:
++		switch i {
++		case 0:
++			n.LHS = child.(Expr)
++		case 1:
++			n.RHS = child.(Expr)
++		}
++	case *Call:
++		n.Args[i] = child.(Expr)
++	case *SubqueryExpr:
++		n.Expr = child.(Expr)
++	case *ParenExpr:
++		n.Expr = child.(Expr)
++	case *UnaryExpr:
++		n.Expr = child.(Expr)
++	case *MatrixSelector:
++	case *StepInvariantExpr:
++		n.Expr = child.(Expr)
++	case *NumberLiteral, *StringLiteral, *VectorSelector:
++	}
+ }
+ 
+ // Children returns a list of all child nodes of a syntax tree node.
+@@ -519,3 +637,5 @@ func (e *UnaryExpr) PositionRange() posrange.PositionRange {
+ func (e *VectorSelector) PositionRange() posrange.PositionRange {
+ 	return e.PosRange
+ }
++
++type NodeReplacer func(context.Context, *EvalStmt, Node, []Node) (Node, error)
+diff --git a/promql/promqltest/test.go b/promql/promqltest/test.go
+index 1754f66..9c44027 100644
+--- a/promql/promqltest/test.go
++++ b/promql/promqltest/test.go
+@@ -1215,7 +1215,7 @@ func atModifierTestCases(exprStr string, evalTime time.Time) ([]atModifierTestCa
+ 	// Setting the @ timestamp for all selectors to be evalTime.
+ 	// If there is a subquery, then the selectors inside it don't get the @ timestamp.
+ 	// If any selector already has the @ timestamp set, then it is untouched.
+-	parser.Inspect(expr, func(node parser.Node, path []parser.Node) error {
++	parser.Inspect(context.TODO(), &parser.EvalStmt{Expr: expr}, func(node parser.Node, path []parser.Node) error {
+ 		if hasAtModifier(path) {
+ 			// There is a subquery with timestamp in the path,
+ 			// hence don't change any timestamps further.
+@@ -1242,7 +1242,7 @@ func atModifierTestCases(exprStr string, evalTime time.Time) ([]atModifierTestCa
+ 			containsNonStepInvariant = containsNonStepInvariant || ok
+ 		}
+ 		return nil
+-	})
++	}, nil)
+ 
+ 	if containsNonStepInvariant {
+ 		// Expression contains a function whose result can vary with evaluation
+diff --git a/rules/group.go b/rules/group.go
+index ed727ff..0af4ac0 100644
+--- a/rules/group.go
++++ b/rules/group.go
+@@ -1116,7 +1116,7 @@ func buildDependencyMap(rules []Rule) dependencyMap {
+ 			break
+ 		}
+ 
+-		parser.Inspect(rule.Query(), func(node parser.Node, _ []parser.Node) error {
++		parser.Inspect(context.TODO(), &parser.EvalStmt{Expr: rule.Query()}, func(node parser.Node, _ []parser.Node) error {
+ 			if n, ok := node.(*parser.VectorSelector); ok {
+ 				// Find the name matcher for the rule.
+ 				var nameMatcher *labels.Matcher
+@@ -1158,7 +1158,7 @@ func buildDependencyMap(rules []Rule) dependencyMap {
+ 				}
+ 			}
+ 			return nil
+-		})
++		}, nil)
+ 	}
+ 
+ 	if indeterminate {

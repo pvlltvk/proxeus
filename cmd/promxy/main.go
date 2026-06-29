@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
@@ -607,9 +608,22 @@ func main() {
 	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(webHandler))
 	webHandler.SetReady(web.Ready)
 
-	apiPrefix := path.Join(webOptions.RoutePrefix, "/api/v1")
-	// Register API endpoint with correct route prefix
-	webHandler.Getv1API().Register(webHandler.GetRouter().WithPrefix(apiPrefix))
+	// Start the internal web handler on a loopback listener so that
+	// web.Handler.Run() registers all standard Prometheus routes
+	// (/api/v1/*, /-/ready, /version, /federate, etc.) without us needing
+	// to reach into its unexported router or apiV1 fields.
+	// promxy reverse-proxies unhandled requests to this internal server.
+	internalLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		logrus.Fatalf("Error creating internal web listener: %v", err)
+	}
+	internalURL, _ := url.Parse("http://" + internalLn.Addr().String())
+	webProxy := httputil.NewSingleHostReverseProxy(internalURL)
+	go func() {
+		if runErr := webHandler.Run(ctx, []net.Listener{internalLn}, ""); runErr != nil {
+			logrus.Errorf("internal web handler: %v", runErr)
+		}
+	}()
 
 	// Create the promxy inventory UI handler.
 	promxyUIHandler, err := promxyui.NewHandler(ps, webOptions.RoutePrefix)
@@ -642,7 +656,7 @@ func main() {
 	// promxy's own /federate handler: a faster encoder for the common
 	// text/plain path (issue #784) that delegates other formats to the vendored
 	// handler. Kept in sync with the configured external_labels on reload.
-	federateHandler := federate.New(ps, opts.QueryLookbackDelta, webHandler.GetRouter())
+	federateHandler := federate.New(ps, opts.QueryLookbackDelta, webProxy)
 	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{F: func(cfg *config.Config) error {
 		federateHandler.SetExternalLabels(cfg.GlobalConfig.ExternalLabels)
 		return nil
@@ -664,7 +678,7 @@ func main() {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				fmt.Fprintf(w, "Promxy is Stopping.\n")
 			} else {
-				webHandler.GetRouter().ServeHTTP(w, r)
+				webProxy.ServeHTTP(w, r)
 			}
 		} else if r.URL.Path == configPath {
 			ps.ConfigHandler(w, r)
@@ -683,7 +697,7 @@ func main() {
 			promxyUIHandler.ServeHTTP(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
-			webHandler.GetRouter().ServeHTTP(w, r)
+			webProxy.ServeHTTP(w, r)
 		}
 	})
 

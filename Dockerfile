@@ -78,12 +78,12 @@ RUN rm vendor/github.com/prometheus/prometheus/web/ui/embed_stub.go
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     cd cmd/promxy && \
-    CGO_ENABLED=0 go build -mod=vendor -tags netgo,builtinassets \
+    CGO_ENABLED=0 go build -tags netgo,builtinassets \
       -ldflags="-s -w"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     cd cmd/remote_write_exporter && \
-    CGO_ENABLED=0 go build -mod=vendor \
+    CGO_ENABLED=0 go build \
       -ldflags="-s -w"
 
 # ── Final image ───────────────────────────────────────────────────────────────

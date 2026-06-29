@@ -1,6 +1,6 @@
 BUILD := build
 GO ?= go
-GOFILES := $(shell find . -name "*.go" -type f ! -path "./vendor/*")
+GOFILES := $(shell find . -name "*.go" -type f)
 GOFMT ?= gofmt
 GOIMPORTS ?= goimports -local=github.com/jacksontj/promxy
 STATICCHECK ?= staticcheck
@@ -43,7 +43,7 @@ imports:
 
 .PHONY: test
 test:
-	GO111MODULE=on $(GO) test -race -mod=vendor -tags netgo,builtinassets ./...
+	GO111MODULE=on $(GO) test -race ./...
 
 .PHONY: release
 release:
@@ -54,12 +54,6 @@ testlocal-build:
 	docker build -t 127.0.0.1:32000/promxy:latest .
 	docker push 127.0.0.1:32000/promxy:latest
 
-.PHONY: vendor
-vendor:
-	GO111MODULE=on $(GO) mod tidy -compat=1.20
-	GO111MODULE=on $(GO) mod vendor
-
-.PHONY: update-prom-fork
-update-prom-fork:
-	GO111MODULE=on $(GO) mod edit -replace github.com/prometheus/prometheus=github.com/jacksontj/prometheus@v0.2.37.5-fork
-	$(MAKE) vendor
+.PHONY: tidy
+tidy:
+	GO111MODULE=on $(GO) mod tidy

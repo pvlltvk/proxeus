@@ -8,6 +8,7 @@ import (
 
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/promqltest"
 )
 
@@ -17,15 +18,16 @@ func TestEngineAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	test, err := promqltest.NewTest(t, string(content))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := test.Run(); err != nil {
-		t.Fatal(err)
-	}
+	st := promqltest.LoadedStorage(t, string(content))
+	defer st.Close()
+	eng := promqltest.NewTestEngineWithOpts(t, promql.EngineOpts{
+		MaxSamples:           10000,
+		Timeout:              100 * time.Second,
+		EnableAtModifier:     true,
+		EnableNegativeOffset: true,
+	})
 
-	api, err := NewEngineAPI(test.QueryEngine(), test.Queryable())
+	api, err := NewEngineAPI(eng, st)
 	if err != nil {
 		t.Fatal(err)
 	}

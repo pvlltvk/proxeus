@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/promqltest"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
 	v1 "github.com/prometheus/prometheus/web/api/v1"
 	"github.com/sirupsen/logrus"
@@ -328,31 +329,7 @@ func TestUpstreamEvaluations(t *testing.T) {
 				continue
 			}
 			t.Run(strconv.Itoa(i)+fn, func(t *testing.T) {
-				test, err := newTestFromFile(t, fn)
-				if err != nil {
-					t.Skipf("error creating test for %s: %s (likely uses syntax not supported by promxy)", fn, err)
-				}
-
-				// Create API for the storage engine on an OS-assigned port.
-				srv, addr, stopChan := startAPIForTest(test.Storage())
-
-				ps := getProxyStorage(fmt.Sprintf(psConfig, addr))
-				lStorage := &LayeredStorage{ps, test.Storage()}
-				// Replace the test storage with the promxy one
-				test.SetStorage(lStorage)
-				test.QueryEngine().NodeReplacer = ps.NodeReplacer
-
-				err = test.Run()
-				if err != nil {
-					t.Errorf("error running test %s: %s", fn, err)
-				}
-				test.Close()
-
-				// stop server
-				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				defer cancel()
-				srv.Shutdown(ctx)
-				<-stopChan
+				runProxyTest(t, fn, psConfig, 1)
 			})
 		}
 	}
@@ -373,47 +350,55 @@ func TestEvaluations(t *testing.T) {
 				continue
 			}
 			t.Run(strconv.Itoa(i)+fn, func(t *testing.T) {
-				test, err := newTestFromFile(t, fn)
-				if err != nil {
-					t.Errorf("error creating test for %s: %s", fn, err)
-				}
-
-				// Create API for the storage engine on OS-assigned ports.
-				srv, addr, stopChan := startAPIForTest(test.Storage())
-				srv2, addr2, stopChan2 := startAPIForTest(test.Storage())
-
-				ps := getProxyStorage(fmt.Sprintf(psConfig, addr, addr2))
-				lStorage := &LayeredStorage{ps, test.Storage()}
-				// Replace the test storage with the promxy one
-				test.SetStorage(lStorage)
-				test.QueryEngine().NodeReplacer = ps.NodeReplacer
-
-				err = test.Run()
-				if err != nil {
-					t.Errorf("error running test %s: %s", fn, err)
-				}
-
-				test.Close()
-
-				// stop server
-				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				defer cancel()
-				srv.Shutdown(ctx)
-				srv2.Shutdown(ctx)
-
-				<-stopChan
-				<-stopChan2
+				runProxyTest(t, fn, psConfig, 2)
 			})
 		}
 	}
 }
 
-func newTestFromFile(t testutil.T, filename string) (*promqltest.Test, error) {
-	content, err := os.ReadFile(filename)
+// runProxyTest loads a .test file, stands up nServers backend API servers over
+// a shared test storage, wires a promxy ProxyStorage in front (psConfig takes
+// nServers address args), and runs the file's eval assertions through the proxy
+// engine with pushdown (NodeReplacer) enabled.
+//
+// v3.5.0 removed the old promqltest.Test struct (SetStorage/QueryEngine/Run), so
+// the storage interposition now happens via RunTestWithStorage's newStorage
+// hook: load commands append through LayeredStorage to the backend, eval queries
+// read back through the proxy.
+func runProxyTest(t *testing.T, fn, psConfig string, nServers int) {
+	content, err := os.ReadFile(fn)
 	if err != nil {
-		return nil, err
+		t.Skipf("error reading test %s: %s (likely uses syntax not supported by promxy)", fn, err)
 	}
-	return promqltest.NewTest(t, string(content))
+
+	eng := promqltest.NewTestEngine(t, false, 0, 50000000)
+
+	var servers []*http.Server
+	var stopChans []chan struct{}
+	newStorage := func(tt testutil.T) storage.Storage {
+		backend := teststorage.New(tt)
+		addrs := make([]interface{}, nServers)
+		for i := 0; i < nServers; i++ {
+			srv, addr, stopChan := startAPIForTest(backend)
+			servers = append(servers, srv)
+			stopChans = append(stopChans, stopChan)
+			addrs[i] = addr
+		}
+		ps := getProxyStorage(fmt.Sprintf(psConfig, addrs...))
+		eng.NodeReplacer = ps.NodeReplacer
+		return &LayeredStorage{ps, backend}
+	}
+
+	promqltest.RunTestWithStorage(t, string(content), eng, newStorage)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	for _, srv := range servers {
+		_ = srv.Shutdown(ctx)
+	}
+	for _, stopChan := range stopChans {
+		<-stopChan
+	}
 }
 
 // Create a wrapper for the storage that will proxy reads but not writes

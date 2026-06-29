@@ -5,13 +5,14 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/api"
 	clientv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/promqltest"
-	"github.com/prometheus/prometheus/storage"
 	webv1 "github.com/prometheus/prometheus/web/api/v1"
 )
 
@@ -19,25 +20,23 @@ import (
 // engine and returns an API client, a close function, and any error
 // encountered during setup.
 func CreateTestServer(t *testing.T, path string) (API, func(), error) {
-	var close func()
 	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, close, err
-	}
-
-	test, err := promqltest.NewTest(t, string(content))
 	if err != nil {
 		return nil, nil, err
 	}
-	close = test.Close
 
-	if err := test.Run(); err != nil {
-		return nil, close, err
-	}
+	st := promqltest.LoadedStorage(t, string(content))
+	eng := promqltest.NewTestEngineWithOpts(t, promql.EngineOpts{
+		MaxSamples:           10000,
+		Timeout:              100 * time.Second,
+		EnableAtModifier:     true,
+		EnableNegativeOffset: true,
+	})
 
 	ln, err := net.Listen("tcp", "")
 	if err != nil {
-		return nil, close, err
+		st.Close()
+		return nil, nil, err
 	}
 
 	cfgFunc := func() config.Config { return config.DefaultConfig }
@@ -46,8 +45,8 @@ func CreateTestServer(t *testing.T, path string) (API, func(), error) {
 
 	apiRouter := route.New()
 	webv1.NewAPI(
-		test.QueryEngine(),
-		test.Storage().(storage.SampleAndChunkQueryable),
+		eng,
+		st,
 		nil, // appendable
 		nil, // exemplarQueryable
 		nil, // scrapePoolsRetriever
@@ -88,15 +87,16 @@ func CreateTestServer(t *testing.T, path string) (API, func(), error) {
 
 	srv := &http.Server{Handler: apiRouter}
 	go srv.Serve(ln) // TODO: cancel/stop ability
-	close = func() {
-		test.Close()
+	closeFunc := func() {
+		st.Close()
 		srv.Close()
 	}
 
 	client, err := api.NewClient(api.Config{Address: "http://" + ln.Addr().String()})
 	if err != nil {
-		return nil, close, err
+		closeFunc()
+		return nil, nil, err
 	}
 
-	return &PromAPIV1{API: clientv1.NewAPI(client), Client: client}, close, nil
+	return &PromAPIV1{API: clientv1.NewAPI(client), Client: client}, closeFunc, nil
 }

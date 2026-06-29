@@ -3,11 +3,15 @@ package test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/prometheus/prometheus/promql/promqltest"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/teststorage"
+	"github.com/prometheus/prometheus/util/testutil"
 )
 
 func BenchmarkEvaluations(b *testing.B) {
@@ -18,98 +22,76 @@ func BenchmarkEvaluations(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	testLoad, err := newTestFromFile(b, "benchdata/load.test")
+	loadContent, err := os.ReadFile("benchdata/load.test")
 	if err != nil {
-		b.Errorf("error creating test for %s: %s", "benchdata/load.test", err)
+		b.Fatalf("error reading benchdata/load.test: %s", err)
 	}
-	testLoad.Run()
 
 	for _, fn := range files {
 		if fn == "benchdata/load.test" {
 			continue
 		}
-		// Create swappable storages
-		storageA := &SwappableStorage{}
-		storageB := &SwappableStorage{}
-
-		// Create API for the storage engine on OS-assigned ports.
-		srv, addr, stopChan := startAPIForTest(storageA)
-		srv2, addr2, stopChan2 := startAPIForTest(storageB)
-		ps := getProxyStorage(fmt.Sprintf(rawDoublePSConfig, addr, addr2))
-		psRemoteRead := getProxyStorage(fmt.Sprintf(rawDoublePSConfigRR, addr, addr2))
+		evalContent, err := os.ReadFile(fn)
+		if err != nil {
+			b.Errorf("error reading %s: %s", fn, err)
+			continue
+		}
+		// v3.5.0 dropped the reentrant promqltest.Test harness, so each
+		// iteration re-runs the load+eval input via RunTestWithStorage; the
+		// load block reseeds storage and the eval block exercises the engine.
+		input := string(loadContent) + "\n" + string(evalContent)
 
 		b.Run(fn, func(b *testing.B) {
-			test, err := newTestFromFile(b, fn)
-			if err != nil {
-				b.Errorf("error creating test for %s: %s", fn, err)
-			}
-			origStorage := test.Storage()
-
 			b.Run("direct", func(b *testing.B) {
-				test.SetStorage(testLoad.Storage())
-
+				eng := promqltest.NewTestEngine(b, false, 0, 50000000)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					test.Run()
-					// We specifically don't check the correctness here, since the values
-					// will be off since this isn't aggregating
+					promqltest.RunTestWithStorage(b, input, eng, func(tt testutil.T) storage.Storage {
+						return teststorage.New(tt)
+					})
 				}
-				b.StopTimer()
-
-				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-				defer cancel()
-				srv.Shutdown(ctx)
-				<-stopChan
 			})
 
 			b.Run("promxy", func(b *testing.B) {
-				// set the storage
-				storageA.s = testLoad.Storage()
-				storageB.s = testLoad.Storage()
-
-				lStorage := &LayeredStorage{ps, testLoad.Storage()}
-				// Replace the test storage with the promxy one
-				test.SetStorage(lStorage)
-				test.QueryEngine().NodeReplacer = ps.NodeReplacer
-				b.ResetTimer()
-
-				for i := 0; i < b.N; i++ {
-					test.Run()
-				}
-
-				b.StopTimer()
+				benchProxy(b, input, rawDoublePSConfig)
 			})
 
 			b.Run("promxy_remoteread", func(b *testing.B) {
-				// set the storage
-				storageA.s = testLoad.Storage()
-				storageB.s = testLoad.Storage()
-
-				lStorage := &LayeredStorage{psRemoteRead, testLoad.Storage()}
-				// Replace the test storage with the promxy one
-				test.SetStorage(lStorage)
-				test.QueryEngine().NodeReplacer = psRemoteRead.NodeReplacer
-				b.ResetTimer()
-
-				for i := 0; i < b.N; i++ {
-					test.Run()
-				}
-
-				b.StopTimer()
+				benchProxy(b, input, rawDoublePSConfigRR)
 			})
-
-			test.SetStorage(origStorage)
-			test.Close()
 		})
+	}
+}
 
-		// stop server
+// benchProxy stands up two backend API servers over a shared SwappableStorage,
+// fronts them with a promxy ProxyStorage, then benchmarks the load+eval input
+// through the proxy engine with pushdown enabled. Each iteration repoints the
+// SwappableStorage at a freshly-loaded teststorage via RunTestWithStorage's
+// newStorage hook.
+func benchProxy(b *testing.B, input, psConfig string) {
+	backend := &SwappableStorage{}
+	srv, addr, stopChan := startAPIForTest(backend)
+	srv2, addr2, stopChan2 := startAPIForTest(backend)
+	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		srv.Shutdown(ctx)
-		srv2.Shutdown(ctx)
-
+		_ = srv.Shutdown(ctx)
+		_ = srv2.Shutdown(ctx)
 		<-stopChan
 		<-stopChan2
+	}()
+
+	ps := getProxyStorage(fmt.Sprintf(psConfig, addr, addr2))
+	eng := promqltest.NewTestEngine(b, false, 0, 50000000)
+	eng.NodeReplacer = ps.NodeReplacer
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		promqltest.RunTestWithStorage(b, input, eng, func(tt testutil.T) storage.Storage {
+			ts := teststorage.New(tt)
+			backend.s = ts
+			return &LayeredStorage{ps, ts}
+		})
 	}
 }
 
