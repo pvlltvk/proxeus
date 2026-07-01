@@ -7,8 +7,8 @@ version: "2"
 
 run:
   timeout: 5m
-  # Lint the same build the binary ships with. builtinassets is intentionally
-  # omitted so linting uses the embed_stub.go path and needs no generated UI.
+  # Lint the same build the binary ships with. The Mantine UI is embedded
+  # unconditionally from pkg/mantineui (no build tag), so netgo alone matches.
   build-tags:
     - netgo
 

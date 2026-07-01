@@ -43,7 +43,6 @@ import (
 	promlogging "github.com/prometheus/prometheus/util/logging"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
-	ui "github.com/prometheus/prometheus/web/ui"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 	"k8s.io/klog"
@@ -52,6 +51,7 @@ import (
 	proxyconfig "github.com/jacksontj/promxy/pkg/config"
 	"github.com/jacksontj/promxy/pkg/federate"
 	"github.com/jacksontj/promxy/pkg/logging"
+	"github.com/jacksontj/promxy/pkg/mantineui"
 	"github.com/jacksontj/promxy/pkg/middleware"
 	"github.com/jacksontj/promxy/pkg/promxyui"
 	"github.com/jacksontj/promxy/pkg/proxystorage"
@@ -231,8 +231,8 @@ func checkedReplaceAll(src, marker, replacement []byte, what string) []byte {
 // process lifetime, so callers compute it once at startup and serve the same
 // bytes for every request via serveInjectedReactApp.
 func buildInjectedReactApp(opts *web.Options, headScript, navScript string) ([]byte, error) {
-	const indexPath = "/static/mantine-ui/index.html"
-	f, err := ui.Assets.Open(indexPath)
+	const indexPath = "/index.html"
+	f, err := mantineui.Assets.Open(indexPath)
 	if err != nil {
 		// Assets not built (stub FS). The caller falls back to an error
 		// response — the upstream handler would produce its own, more
@@ -652,6 +652,15 @@ func main() {
 	flagsPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/flags")
 	promxyPathPrefix := path.Join(webOptions.RoutePrefix, "/promxy")
 	debugStripPrefix := strings.Trim(webOptions.RoutePrefix, "/")
+	// The injected index.html references bundled assets at <prefix>/assets/*
+	// (see buildInjectedReactApp). Serve them from the promxy-owned Mantine
+	// embed, which is rooted at the mantine-ui dir so "/assets/<file>" resolves.
+	// Unlike debugStripPrefix, this keeps the leading slash: after stripping the
+	// route prefix the path must still start with "/" (e.g. "" at root, "/foo"
+	// under -web.route-prefix=/foo).
+	mantineAssetsPathPrefix := path.Join(webOptions.RoutePrefix, "/assets")
+	mantineAssetsStripPrefix := strings.TrimRight(webOptions.RoutePrefix, "/")
+	mantineAssetsServer := http.StripPrefix(mantineAssetsStripPrefix, http.FileServer(mantineui.Assets))
 
 	// promxy's own /federate handler: a faster encoder for the common
 	// text/plain path (issue #784) that delegates other formats to the vendored
@@ -695,6 +704,11 @@ func main() {
 			serveInjectedReactApp(w, injectedReactPage, injectedReactPageErr)
 		} else if strings.HasPrefix(r.URL.Path, promxyPathPrefix) {
 			promxyUIHandler.ServeHTTP(w, r)
+		} else if strings.HasPrefix(r.URL.Path, mantineAssetsPathPrefix) {
+			// Mantine JS/CSS chunks referenced by the injected index.html
+			// above. Served from the promxy-owned embed since the slim
+			// prometheus fork's web/ui has no built-in assets.
+			mantineAssetsServer.ServeHTTP(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
 			webProxy.ServeHTTP(w, r)

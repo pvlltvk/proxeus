@@ -32,7 +32,7 @@ do
     fi  
 
     env GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 GO111MODULE=on \
-        go build -mod=vendor -tags netgo,builtinassets -x \
+        go build -tags netgo -x \
                 -ldflags="${ldflags_array[*]}" \
                 -o $destination/$output_name $package
     if [ $? -ne 0 ]; then
