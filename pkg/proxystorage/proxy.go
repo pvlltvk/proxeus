@@ -748,6 +748,12 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 		logrus.Debugf("AggregateExpr %v %s", n, n.Op)
 
+		// Mark the fan-out as an aggregation pushdown: each server_group
+		// returns an aggregate partial that the engine re-combines, so the
+		// cross-group merge must union the partials instead of deduping them
+		// (the aggregation may have collapsed the labels dedup keys on).
+		ctx = promclient.WithAggregatePushdown(ctx)
+
 		var result storage.SeriesSet
 		var err error
 		var lossy bool
@@ -1196,6 +1202,10 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// (min, max, topk, bottomk) to be re-run against the expression.
 		aggregateBinaryExpr := func(agg *parser.AggregateExpr) (parser.Node, error) {
 			logrus.Debugf("BinaryExpr (AggregateExpr + Literal): %v", n)
+
+			// Same as the AggregateExpr case: per-group aggregate partials
+			// must be unioned by the cross-group merge, not deduped.
+			ctx := promclient.WithAggregatePushdown(ctx)
 
 			removeOffsetFn()
 

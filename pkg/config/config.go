@@ -120,6 +120,13 @@ type PromxyConfig struct {
 	// `labels` collapse to one. The lower-ordinal server_group wins; ordinal
 	// is the index in `server_groups[]` (YAML order). Default false preserves
 	// historical behavior — both backends' series are returned.
+	//
+	// Scope: dedup applies to raw selector results only. Pushed-down
+	// aggregations (sum(up), count(...) etc.) fan out per-group PARTIALS that
+	// the engine re-combines, so those are unioned, never deduped — a series
+	// present in multiple groups appears once in `up` but contributes to every
+	// group's partial in `count(up)`. If exact aggregates over overlapping
+	// groups matter, keep the overlap out of the groups.
 	CrossGroupDedup bool `yaml:"cross_group_dedup"`
 
 	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to

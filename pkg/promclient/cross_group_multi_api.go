@@ -1,6 +1,8 @@
 package promclient
 
 import (
+	"context"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/storage"
@@ -78,6 +80,17 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	}
 	m.partialResponse = opts.PartialResponse
 
+	// Keep the default (non-dedup) merge around: pushed-down aggregation
+	// queries fan out per-group aggregate PARTIALS that the engine re-combines
+	// upstream. Partials are never duplicates of each other, but the
+	// aggregation may collapse exactly the labels the reduced fingerprint
+	// needs (bare `sum(up)` leaves only the external labels, which dedup
+	// ignores) — deduping them silently drops whole backends. NOTE: this means
+	// aggregates over series that exist in MULTIPLE groups are combined, not
+	// deduped (same as promxy without cross_group_dedup); only raw selector
+	// results get cross-group dedup.
+	defaultMerge := m.seriesSetMergeFn
+
 	// N-way merge in a single pass: every series is bucketed under its true
 	// origin ordinal, so collisions are attributed to the exact winner/loser
 	// server_group (the chained binary form misattributed them to the running
@@ -93,7 +106,10 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	// (always via its ValMatrix branch: instant queries become single-sample
 	// streams, the same shape PromAPIV1.Query already produces via
 	// ModelValueToSeriesSet).
-	m.seriesSetMergeFn = func(sets []ordinalSeriesSet) storage.SeriesSet {
+	m.seriesSetMergeFn = func(ctx context.Context, sets []ordinalSeriesSet) storage.SeriesSet {
+		if IsAggregatePushdown(ctx) {
+			return defaultMerge(ctx, sets)
+		}
 		inputs := make([]promhttputil.OrdinalValue, len(sets))
 		for i, s := range sets {
 			matrix, err := drainToMatrix(s.ss)

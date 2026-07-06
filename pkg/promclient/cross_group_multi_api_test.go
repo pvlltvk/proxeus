@@ -94,6 +94,71 @@ func TestNewCrossGroupMultiAPI_Query(t *testing.T) {
 	}
 }
 
+// TestNewCrossGroupMultiAPI_AggregatePushdownBypassesDedup verifies that a
+// fan-out marked with WithAggregatePushdown skips the reduced-fingerprint
+// dedup: pushed-down aggregates (e.g. bare `sum(up)`) return one PARTIAL per
+// group whose labels collapse to just the external labels, so dedup would
+// silently drop every group but the lowest ordinal. The same query without
+// the marker must still dedup (proving the marker is the only switch).
+func TestNewCrossGroupMultiAPI_AggregatePushdownBypassesDedup(t *testing.T) {
+	// Shape of `sum(up)` partials: only the external label survives.
+	api0 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"backend": "sg0"}, Value: 7, Timestamp: 100},
+			}
+		},
+	}
+	api1 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{
+				{Metric: model.Metric{"backend": "sg1"}, Value: 12, Timestamp: 100},
+			}
+		},
+	}
+
+	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "test_aggregate_pushdown_bypass_total",
+	}, []string{"winner", "loser"})
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{Collisions: counter})
+
+	// Marked context: both partials must survive, no collision recorded.
+	ss := m.Query(WithAggregatePushdown(context.Background()), "sum(up)", time.Now())
+	if err := ss.Err(); err != nil {
+		t.Fatalf("Query (pushdown): %v", err)
+	}
+	mat, err := SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
+	}
+	if len(mat) != 2 {
+		t.Fatalf("pushdown fan-out: expected 2 partials, got %d: %v", len(mat), mat)
+	}
+	if got := testutil.ToFloat64(counter.WithLabelValues("sg0", "sg1")); got != 0 {
+		t.Fatalf("pushdown fan-out must not record collisions, got %v", got)
+	}
+
+	// Unmarked context: same inputs dedup down to the lowest ordinal.
+	ss = m.Query(context.Background(), "sum(up)", time.Now())
+	if err := ss.Err(); err != nil {
+		t.Fatalf("Query (plain): %v", err)
+	}
+	mat, err = SeriesSetToMatrix(ss)
+	if err != nil {
+		t.Fatalf("SeriesSetToMatrix: %v", err)
+	}
+	if len(mat) != 1 {
+		t.Fatalf("plain fan-out: expected 1 deduped series, got %d: %v", len(mat), mat)
+	}
+	if mat[0].Metric["backend"] != "sg0" {
+		t.Fatalf("plain fan-out: expected sg0 winner, got %q", mat[0].Metric["backend"])
+	}
+}
+
 // TestNewCrossGroupMultiAPI_CollisionCounterIncremented verifies that the
 // dedupCounter passed to NewCrossGroupMultiAPI is incremented exactly once for
 // each colliding series, with the correct winner/loser label values.

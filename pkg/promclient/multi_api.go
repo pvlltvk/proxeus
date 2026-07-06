@@ -75,8 +75,9 @@ type ordinalSeriesSet struct {
 // their source ordinal) into a single result. The default implementation
 // (NewMultiAPI) strips ordinals and does within-group HA anti-affinity merging
 // via MergeSeriesSets; the cross-group implementation does deterministic
-// n-way dedup keyed on ordinal.
-type seriesSetMergeFunc func(sets []ordinalSeriesSet) storage.SeriesSet
+// n-way dedup keyed on ordinal. ctx is the fan-out's request context so the
+// merge can honor per-query markers (e.g. IsAggregatePushdown).
+type seriesSetMergeFunc func(ctx context.Context, sets []ordinalSeriesSet) storage.SeriesSet
 
 // mergeSeriesFunc folds the successful per-backend Series() results into one
 // labelset slice, inputs sorted by ascending ordinal. The default set-unions
@@ -130,7 +131,7 @@ func NewMultiAPI(apis []API, antiAffinity model.Time, antiAffinityDynamic bool, 
 	}
 	// Default merge: within-group HA semantics; ordinals are ignored.
 	// MergeSeriesSets applies anti-affinity dedup across the fanned-out sets.
-	m.seriesSetMergeFn = func(sets []ordinalSeriesSet) storage.SeriesSet {
+	m.seriesSetMergeFn = func(_ context.Context, sets []ordinalSeriesSet) storage.SeriesSet {
 		stripped := make([]storage.SeriesSet, len(sets))
 		for i, s := range sets {
 			stripped[i] = s.ss
@@ -429,7 +430,7 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 				warnings.Add(fmt.Errorf("partial_response: %s returning %d/%d backends after cancellation: %w",
 					op, len(sets), len(m.apis), ctx.Err()))
 				sortOrdinalSeriesSets(sets)
-				return WithWarnings(m.seriesSetMergeFn(sets), warnings)
+				return WithWarnings(m.seriesSetMergeFn(ctx, sets), warnings)
 			}
 			return promapi.NewSeriesSet(nil, warnings, ctx.Err())
 
@@ -456,7 +457,7 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 	}
 
 	sortOrdinalSeriesSets(sets)
-	return WithWarnings(m.seriesSetMergeFn(sets), warnings)
+	return WithWarnings(m.seriesSetMergeFn(ctx, sets), warnings)
 }
 
 // sortOrdinalSeriesSets orders results by ascending source ordinal, so merge
