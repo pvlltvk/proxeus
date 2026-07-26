@@ -106,6 +106,24 @@ func (r *ApacheLogRecord) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
+// Flush implements http.Flusher so streaming responses survive the access-log
+// wrapper. Embedding the http.ResponseWriter *interface* only promotes
+// Header/Write/WriteHeader, so without this a streaming handler that
+// type-asserts for http.Flusher — such as Prometheus'
+// /api/v1/notifications/live SSE endpoint — sees no Flusher and fails.
+func (r *ApacheLogRecord) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer to http.ResponseController, which is how
+// net/http (and httputil.ReverseProxy, when streaming a text/event-stream
+// response) reaches capabilities this wrapper doesn't reimplement.
+func (r *ApacheLogRecord) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 type LogRecordHandler func(*ApacheLogRecord)
 
 func LogToWriter(out io.Writer) LogRecordHandler {
@@ -135,6 +153,15 @@ func NewApacheLoggingHandler(handler http.Handler, logHandlers ...LogRecordHandl
 func (h *ApacheLoggingHandler) runHandler(rw http.ResponseWriter, r *http.Request) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
+			// http.ErrAbortHandler is how a handler says "the client went
+			// away, stop quietly" — httputil.ReverseProxy raises it whenever a
+			// client disconnects mid-response, which is the normal way a
+			// long-lived SSE stream ends. Turning that into a 500 plus a stack
+			// trace spams the log and tries to rewrite already-sent headers, so
+			// let net/http handle it as it would without this wrapper.
+			if e, ok := rec.(error); ok && errors.Is(e, http.ErrAbortHandler) {
+				panic(rec)
+			}
 			// Just return a stack trace always
 			err = errors.Wrap(errors.New(string(debug.Stack())), "Error running handler")
 		}
