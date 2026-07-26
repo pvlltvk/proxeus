@@ -41,6 +41,7 @@ import (
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
 	promlogging "github.com/prometheus/prometheus/util/logging"
+	"github.com/prometheus/prometheus/util/notifications"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
 	"github.com/sirupsen/logrus"
@@ -101,6 +102,8 @@ type cliOpts struct {
 	RoutePrefix     string `long:"web.route-prefix" description:"Prefix for the internal routes of web endpoints. Defaults to path of --web.external-url."`
 	EnableLifecycle bool   `long:"web.enable-lifecycle" description:"Enable shutdown and reload via HTTP request."`
 
+	MaxNotificationsSubscribers int `long:"web.max-notifications-subscribers" description:"Limits the maximum number of subscribers that can concurrently receive live notifications via the web UI." default:"16"`
+
 	QueryTimeout        time.Duration `long:"query.timeout" description:"Maximum time a query may take before being aborted." default:"2m"`
 	QueryMaxSamples     int           `long:"query.max-samples" description:"Maximum number of samples a single query can load into memory. Note that queries will fail if they would load more samples than this into memory, so this also limits the number of samples a query can return." default:"50000000"`
 	QueryLookbackDelta  time.Duration `long:"query.lookback-delta" description:"The maximum lookback duration for retrieving metrics during expression evaluations." default:"5m"`
@@ -131,13 +134,15 @@ func (c *cliOpts) ToFlags() map[string]string {
 
 var opts cliOpts
 
-func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, rls ...proxyconfig.Reloadable) (err error) {
+func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, notifs *notifications.Notifications, rls ...proxyconfig.Reloadable) (err error) {
 	defer func() {
 		if err == nil {
 			configSuccess.Set(1)
 			configSuccessTime.SetToCurrentTime()
+			notifs.DeleteNotification(notifications.ConfigurationUnsuccessful)
 		} else {
 			configSuccess.Set(0)
+			notifs.AddNotification(notifications.ConfigurationUnsuccessful)
 		}
 	}()
 
@@ -555,6 +560,13 @@ func main() {
 		logrus.Fatalf("Error creating scrape manager: %v", err)
 	}
 
+	// Notifications backing /api/v1/notifications and its SSE stream. The
+	// Mantine UI polls both on every page load, and web.New() passes these
+	// straight through to the API handlers, so leaving them nil panics on
+	// each request. proxeus has no WAL to replay, so unlike Prometheus it
+	// starts with no "starting up" notification.
+	notifs := notifications.NewNotifications(opts.MaxNotificationsSubscribers, prometheus.DefaultRegisterer)
+
 	webOptions := &web.Options{
 		Registerer:      prometheus.DefaultRegisterer,
 		Gatherer:        prometheus.DefaultGatherer,
@@ -571,6 +583,9 @@ func main() {
 		RemoteReadConcurrencyLimit: opts.RemoteReadMaxConcurrency,
 
 		EnableLifecycle: opts.EnableLifecycle,
+
+		NotificationsGetter: notifs.Get,
+		NotificationsSub:    notifs.Sub,
 
 		// Prometheus' web.New() indexes ListenAddresses[0] unconditionally when
 		// constructing GlobalURLOptions; proxeus doesn't use the embedded
@@ -715,7 +730,7 @@ func main() {
 		}
 	})
 
-	if err := reloadConfig(noStepSubqueryInterval, reloadables...); err != nil {
+	if err := reloadConfig(noStepSubqueryInterval, notifs, reloadables...); err != nil {
 		logrus.Fatalf("Error loading config: %s", err)
 	}
 
@@ -746,7 +761,7 @@ func main() {
 		select {
 		case rc := <-webHandler.Reload():
 			logrus.Infof("Reloading config")
-			if err := reloadConfig(noStepSubqueryInterval, reloadables...); err != nil {
+			if err := reloadConfig(noStepSubqueryInterval, notifs, reloadables...); err != nil {
 				logrus.Errorf("Error reloading config: %s", err)
 				rc <- err
 			} else {
@@ -756,11 +771,12 @@ func main() {
 			switch sig {
 			case syscall.SIGHUP:
 				logrus.Infof("Reloading config")
-				if err := reloadConfig(noStepSubqueryInterval, reloadables...); err != nil {
+				if err := reloadConfig(noStepSubqueryInterval, notifs, reloadables...); err != nil {
 					logrus.Errorf("Error reloading config: %s", err)
 				}
 			case syscall.SIGTERM, syscall.SIGINT:
 				logrus.Info("proxeus received exit signal, starting graceful shutdown")
+				notifs.AddNotification(notifications.ShuttingDown)
 
 				// Stop all services we are running
 				stopping = true        // start failing healthchecks

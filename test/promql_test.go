@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/promqltest"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/notifications"
 	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
 	v1 "github.com/prometheus/prometheus/web/api/v1"
@@ -132,6 +133,9 @@ func startAPIForTest(s storage.Storage) (*http.Server, string, chan struct{}) {
 
 	cfgFunc := func() config.Config { return config.DefaultConfig }
 	readyFunc := func(f http.HandlerFunc) http.HandlerFunc { return f }
+	// nil registerer: this server is created many times per test run and the
+	// notification metrics would collide on a shared one.
+	notifs := notifications.NewNotifications(16, nil)
 
 	api := v1.NewAPI(
 		promql.NewEngine(promql.EngineOpts{
@@ -156,29 +160,29 @@ func startAPIForTest(s storage.Storage) (*http.Server, string, chan struct{}) {
 			Scheme:        "http",
 		},
 		readyFunc,
-		nil,      // db (TSDBAdminStats)
-		"",       // dbDir
-		false,    // enableAdmin
-		nil,      // logger
-		nil,      // rulesRetriever
-		50000000, // remoteReadSampleLimit
-		1000,     // remoteReadConcurrencyLimit
-		1048576,  // remoteReadMaxBytesInFrame
-		false,    // isAgent
-		nil,      // corsOrigin
-		nil,      // runtimeInfo
-		nil,      // buildInfo
-		nil,      // notificationsGetter
-		nil,      // notificationsSub
-		nil,      // gatherer
-		nil,      // registerer
-		nil,      // statsRenderer
-		false,    // rwEnabled
-		nil,      // acceptRemoteWriteProtoMsgs
-		false,    // otlpEnabled
-		false,    // otlpDeltaToCumulative
-		false,    // otlpNativeDeltaIngestion
-		false,    // ctZeroIngestionEnabled
+		nil,        // db (TSDBAdminStats)
+		"",         // dbDir
+		false,      // enableAdmin
+		nil,        // logger
+		nil,        // rulesRetriever
+		50000000,   // remoteReadSampleLimit
+		1000,       // remoteReadConcurrencyLimit
+		1048576,    // remoteReadMaxBytesInFrame
+		false,      // isAgent
+		nil,        // corsOrigin
+		nil,        // runtimeInfo
+		nil,        // buildInfo
+		notifs.Get, // notificationsGetter
+		notifs.Sub, // notificationsSub
+		nil,        // gatherer
+		nil,        // registerer
+		nil,        // statsRenderer
+		false,      // rwEnabled
+		nil,        // acceptRemoteWriteProtoMsgs
+		false,      // otlpEnabled
+		false,      // otlpDeltaToCumulative
+		false,      // otlpNativeDeltaIngestion
+		false,      // ctZeroIngestionEnabled
 	)
 
 	apiRouter := route.New()
