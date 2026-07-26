@@ -12,13 +12,26 @@ ENV GOARCH=${TARGETARCH} GOOS=${TARGETOS}
 
 WORKDIR /go/src/github.com/pvlltvk/proxeus
 
+# Version stamping, mirroring build.bash. Without these the binary reports an
+# empty version and proxeus_build_info carries no useful labels.
+ARG VERSION=unknown
+ARG REVISION=unknown
+ARG BRANCH=unknown
+ARG BUILD_USER=docker
+ARG BUILD_DATE=unknown
+
 COPY go.mod go.sum ./
 COPY . .
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     cd cmd/proxeus && \
     CGO_ENABLED=0 go build -tags netgo \
-      -ldflags="-s -w"
+      -ldflags="-s -w \
+        -X github.com/prometheus/common/version.Version=${VERSION} \
+        -X github.com/prometheus/common/version.Revision=${REVISION} \
+        -X github.com/prometheus/common/version.Branch=${BRANCH} \
+        -X github.com/prometheus/common/version.BuildUser=${BUILD_USER} \
+        -X github.com/prometheus/common/version.BuildDate=${BUILD_DATE}"
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     cd cmd/remote_write_exporter && \
