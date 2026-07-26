@@ -232,7 +232,10 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 			if ephemeral {
 				dir, err := os.MkdirTemp("", "proxeus-remote-wal-")
 				if err != nil {
-					return fmt.Errorf("creating remote_write WAL dir: %w", err)
+					// Minimal images (scratch/distroless) have no writable
+					// temp dir, so this fails with a bare "stat /tmp: no such
+					// file or directory" that says nothing about the fix.
+					return fmt.Errorf("creating a temporary remote_write WAL dir failed (%w); set --storage.path to a writable directory, which is required for remote_write in containers without a writable temp dir", err)
 				}
 				walDir = dir
 			}
