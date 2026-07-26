@@ -755,7 +755,6 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		ctx = promclient.WithAggregatePushdown(ctx)
 
 		var result storage.SeriesSet
-		var err error
 		var lossy bool
 
 		// Not all Aggregation functions are composable, so we'll do what we can
@@ -774,9 +773,6 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
-			if err != nil {
-				return nil, err
-			}
 			result, lossy = containsLossyHistogram(result)
 			if lossy {
 				return nil, nil
@@ -864,9 +860,6 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
-			if err != nil {
-				return nil, err
-			}
 			result, lossy = containsLossyHistogram(result)
 			if lossy {
 				return nil, nil
@@ -887,10 +880,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
-			if err != nil {
-				return nil, err
-			}
-			result, lossy := containsLossyHistogram(result)
+			result, lossy = containsLossyHistogram(result)
 			if lossy {
 				return nil, nil
 			}
@@ -976,16 +966,12 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		removeOffsetFn()
 
 		var result storage.SeriesSet
-		var err error
 		if s.Interval > 0 {
 			result = queryRangeAt(n.String())
 		} else {
 			result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 		}
 
-		if err != nil {
-			return nil, err
-		}
 		result, lossy := containsLossyHistogram(result)
 		if lossy {
 			return nil, nil
