@@ -1,55 +1,64 @@
-## Proxeus, a prometheus scaling story
+## Proxeus, or how you ended up with four metrics systems
 
-### The beginning
-Prometheus is an all-in-one metrics and alerting system. The fact that everything is built-in is quite convenient when doing initial setup and testing. Throw grafana in front of that and we are cooking with gas! At this scale -- there where no concerns, only snappy metrics and pretty graphs.
+### One Prometheus
 
-### Redundancy
-After installing the first prometheus host you realize that you need redundancy. To do this you stand up a second prometheus host with the same scrape config. At this point you have 2 nodes with the data, but grafana only pointing at one. Quickly you put a load balancer in front and grafana load balances between the 2 nodes -- problem solved! Then some time in the future you have to reboot a prometheus host. After the host reboots you notice that you have holes in the graphs 50% of the time. With prometheus itself there is no solution short or long term for this as there is no cross-host merging and prometheus' datastore doesn't support backfilling data.
+You start with a Prometheus. Scrape config, a few alerts, Grafana in front. Everything is in one place and every
+dashboard just works. This is the good part.
 
-### Sharding
-As you continue to scale (adding more machines and metrics) you quickly realize that
-all of your metrics cannot fit on a single host anymore. No problem, we'll shard the
-scrape config! The suggested way in the prometheus community is to split your metrics
-based on application -- so you dutifully do so. Now you have a cluster per-app for
-metrics separate. Soon after though you realize that there are lots of servers, so
-its not even feasible for all the app metrics to be in a single shard -- you need to 
-split them. You do this by region/az/etc. but now grafana is littered with so many
-prometheus datasources! No problem you say to yourself, as you switch from using
-a single source to using mixed sources -- and adding each region/az/etc. with the
-same promql statements.
+### Then it doesn't fit
 
-### Aggregation
-As you've settled into running prometheus in an N shard by M replica setup (with N
-selectors in grafana) and having to duplicate promql statements in grafana -- you
-realize that you have some metrics/alerts that need to be global (such as global QPS,
-latency, etc.). And here you realize that it cannot be done with the infrastructure you
-have setup! This is no problem though, as you read through the prometheus community
-forums etc. and realize that you are supposed to set up a global aggregation shard of
-prometheus to scrape all your other prometheus instances. You set this up, but then
-realize that the recommendations are to summarize data (which makes sense, since you
-cannot just shove N hosts worth of data onto 1). Since these are global metrics you
-rationalize that it is okay to drop some granularity for the sake of having them and
-then you look over the rest of the cluster only to realize that this federation is
-accounting for 90%+ of all queries to prometheus -- meaning you now have to uplift your
-other existing shards just to get your global metrics.
+Retention is the first wall. Prometheus keeps a few weeks on local disk, and someone asks for a year-over-year
+comparison. So you add long-term storage — say **Thanos**, with a sidecar shipping blocks to object storage and a
+Querier fanning out across them.
 
-### Despair
-At this point you consider your situation:
+Now you have two places data lives. Grafana gets a second datasource. Dashboards start to care *which* one they point
+at: recent data here, historical data there. Panels that span the boundary need editing, and the boundary moves as
+retention rolls.
 
-- You have metrics
-- You have redundancy (with the occasional hole on a restart or node failure)
-- You have **many** prometheus data sources in grafana (which is confusing to all your grafana users -- as well as yourself!)
-- You have aggregation set up -- which (1) accounts for the majority of load on the other promethes hosts (2) is at a lower granularity than you'd like, and (3) now means that you have to maintain separate alerting rules for the **aggregation** layers from the rest of the prometheus hosts.
+### Then a second system arrives
 
-And you tell yourself, this seems too complicated; there must be a better way!
+A team with high-cardinality metrics finds Prometheus too slow and stands up **VictoriaMetrics**, which handles their
+churn better and costs less. Nobody is wrong about this — the workloads genuinely differ, and both tools are good at
+what they do.
+
+You now have Thanos and VictoriaMetrics side by side. Grafana has datasources for each. And the questions that matter
+most to you are exactly the ones that span both:
+
+> What is the global error rate?
+
+You cannot ask it. Not in one query, not in one panel, not in one alert. `sum(rate(errors[5m]))` runs against *one*
+datasource. Grafana's mixed-datasource mode will draw two series next to each other, but it will not add them together,
+and it will not let you alert on the sum.
+
+### The usual workarounds, and why they hurt
+
+**A global aggregation layer** — scrape everything into one more Prometheus. This drops granularity by design, becomes
+the majority of load on everything it scrapes, and gives you a second set of alerting rules to maintain, subtly
+different from the first.
+
+**Federating in Grafana** — duplicate every panel per datasource and eyeball the sum. Works until someone needs an
+alert, which is precisely when arithmetic matters.
+
+**Pick one system and migrate** — reasonable, and you should, eventually. But migration is not a weekend. You need both
+systems serving queries for months, and during that window every dashboard is wrong.
 
 ### Proxeus
-You google around (or ask a friend) and you find out about this tool -- proxeus
-(what a silly name). You set it up and you immediately able to solve your pain points:
 
--  no more "holes" in metrics
--  single source in grafana
--  no need for aggregation layers of prometheus anymore!
+Proxeus puts one PromQL endpoint in front of all of them.
 
-In addition to solving the pain points you get access logs (which you didn't even
-put on the list, but admit it: you've been missing them).
+Grafana gets a single datasource. `sum(rate(errors[5m]))` scatters to Thanos and VictoriaMetrics in parallel, and the
+results come back as one series set — so global aggregation is just a query again, and alerts can be written against
+it. Backends stay exactly as they are; nothing is scraped twice and no sidecar is installed.
+
+Because backends can overlap — the same target scraped into two systems during a migration — proxeus deduplicates
+across them deterministically: a series present in both collapses to one, and the winner is decided by configuration
+order, not by whichever backend answered first. Aggregations are pushed down to each backend rather than dragging raw
+series across the network.
+
+And when the migration finally finishes, you delete a `server_group` from the config. No dashboard changes.
+
+### What it does not do
+
+Proxeus is a read path. It does not store anything, does not scrape anything, and cannot fix data a backend does not
+have. If a backend is down, you decide per configuration whether that fails the query or returns a partial answer with
+a warning — proxeus will not silently pretend the data was complete.

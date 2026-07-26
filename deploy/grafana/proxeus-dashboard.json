@@ -1,0 +1,384 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Datasource scraping proxeus' own /metrics endpoint",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Proxeus",
+  "description": "Health and federation behaviour of proxeus - a single PromQL endpoint over many Prometheus-compatible backends.",
+  "tags": ["proxeus", "prometheus", "federation"],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(proxeus_build_info, instance)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Overview",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Version",
+      "description": "Empty unless the binary was built with version ldflags (see Dockerfile build args).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "name" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "proxeus_build_info{instance=~\"$instance\"}",
+          "legendFormat": "{{version}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Server groups",
+      "description": "Number of configured server_groups (backends).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "refId": "A", "expr": "count(proxeus_server_group_targets{instance=~\"$instance\"})", "instant": true }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Targets per server group",
+      "description": "A group at 0 targets serves nothing - alert on this.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "refId": "A", "expr": "proxeus_server_group_targets{instance=~\"$instance\"}", "legendFormat": "{{name}}", "instant": true }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Query rate",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(proxeus_server_group_request_duration_seconds_count{instance=~\"$instance\"}[5m]))", "instant": true }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Backend error rate",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.001 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(proxeus_server_group_request_errors_total{instance=~\"$instance\"}[5m]))", "instant": true }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Federation (proxeus)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Backend request rate",
+      "description": "Requests proxeus makes to each server_group, by call type.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server_group, call) (rate(proxeus_server_group_request_duration_seconds_count{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{server_group}} / {{call}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Backend mean latency",
+      "description": "proxeus_server_group_request_duration_seconds is a Summary without quantiles, so this is rate(sum)/rate(count) - a mean, not a percentile.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server_group) (rate(proxeus_server_group_request_duration_seconds_sum{instance=~\"$instance\"}[5m]))\n/\nsum by (server_group) (rate(proxeus_server_group_request_duration_seconds_count{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{server_group}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Backend errors",
+      "description": "Failed requests per server_group and host. Sustained non-zero means a backend is degraded; whether that fails the whole query depends on cross_group_partial_response / ignore_error.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server_group, host, call) (rate(proxeus_server_group_request_errors_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{server_group}} / {{host}} / {{call}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Cross-group dedup collisions",
+      "description": "Series present in more than one server_group, collapsed by ordinal tie-break. Steady traffic here means your groups overlap - which also means pushed-down aggregates double-count those series.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (winner, loser) (rate(proxeus_cross_group_dedup_collisions_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "series: {{winner}} beats {{loser}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (winner, loser, endpoint) (rate(proxeus_cross_group_dedup_metadata_collisions_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "metadata {{endpoint}}: {{winner}} beats {{loser}}"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Incoming API",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "HTTP requests",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (handler, code) (rate(prometheus_http_requests_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{handler}} [{{code}}]"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "HTTP latency (p50 / p90 / p99)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(prometheus_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.90, sum by (le) (rate(prometheus_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p90" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(prometheus_http_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 103,
+      "title": "PromQL engine",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Queries in flight",
+      "description": "Against the concurrency limit - sustained saturation means queries are queueing.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "prometheus_engine_queries{instance=~\"$instance\"}", "legendFormat": "in flight" },
+        { "refId": "B", "expr": "prometheus_engine_queries_concurrent_max{instance=~\"$instance\"}", "legendFormat": "limit" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Query time by stage",
+      "description": "Where query wall-clock goes. exec_queue_time rising means concurrency saturation.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (slice) (rate(prometheus_engine_query_duration_seconds_sum{instance=~\"$instance\"}[5m]))\n/\nsum by (slice) (rate(prometheus_engine_query_duration_seconds_count{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{slice}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "Samples loaded",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(prometheus_engine_query_samples_total{instance=~\"$instance\"}[5m])", "legendFormat": "samples/s" }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 104,
+      "title": "Rules, alerting and remote_write",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "timeseries",
+          "id": 40,
+          "title": "Rule evaluations",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 41 },
+          "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "rate(prometheus_rule_evaluations_total{instance=~\"$instance\"}[5m])", "legendFormat": "evaluations" },
+            { "refId": "B", "expr": "rate(prometheus_rule_evaluation_failures_total{instance=~\"$instance\"}[5m])", "legendFormat": "failures" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 41,
+          "title": "Alertmanager notifications",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 41 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "prometheus_notifications_alertmanagers_discovered{instance=~\"$instance\"}", "legendFormat": "alertmanagers discovered" },
+            { "refId": "B", "expr": "prometheus_notifications_queue_length{instance=~\"$instance\"}", "legendFormat": "queue length" },
+            { "refId": "C", "expr": "rate(prometheus_notifications_dropped_total{instance=~\"$instance\"}[5m])", "legendFormat": "dropped/s" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 42,
+          "title": "remote_write throughput",
+          "description": "Only populated when a remote_write target is configured - proxeus has no local TSDB, so this is where recording-rule output goes.",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 41 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "rate(prometheus_remote_storage_samples_in_total{instance=~\"$instance\"}[5m])", "legendFormat": "samples in/s" },
+            { "refId": "B", "expr": "rate(prometheus_remote_storage_samples_total{instance=~\"$instance\"}[5m])", "legendFormat": "samples sent/s" },
+            { "refId": "C", "expr": "rate(prometheus_remote_storage_samples_failed_total{instance=~\"$instance\"}[5m])", "legendFormat": "failed/s" },
+            { "refId": "D", "expr": "rate(prometheus_remote_storage_samples_dropped_total{instance=~\"$instance\"}[5m])", "legendFormat": "dropped/s" }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 105,
+      "title": "Process",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "timeseries",
+          "id": 50,
+          "title": "CPU",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 6, "x": 0, "y": 42 },
+          "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 51,
+          "title": "Resident memory",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 6, "x": 6, "y": 42 },
+          "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "process_resident_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 52,
+          "title": "Goroutines",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 42 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "go_goroutines{instance=~\"$instance\"}", "legendFormat": "{{instance}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 53,
+          "title": "Open file descriptors",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 42 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "expr": "process_open_fds{instance=~\"$instance\"}", "legendFormat": "open" },
+            { "refId": "B", "expr": "process_max_fds{instance=~\"$instance\"}", "legendFormat": "limit" }
+          ]
+        }
+      ]
+    }
+  ]
+}

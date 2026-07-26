@@ -125,6 +125,10 @@ series across the network.
 
 **Layering** works — proxeus in front of proxeus is fine, since it is itself a Prometheus-compatible API endpoint.
 
+**Monitoring proxeus itself:** scrape its `/metrics` and import
+[`deploy/grafana/proxeus-dashboard.json`](deploy/grafana/proxeus-dashboard.json) — per-backend request rate, latency and
+errors, `proxeus_server_group_targets` (alert on `== 0`), and cross-group dedup collisions.
+
 ## Relationship to promxy
 
 Proxeus is a hard fork of [promxy](https://github.com/jacksontj/promxy) by Thomas Jackson, and owes it the core
