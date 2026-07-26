@@ -1,19 +1,19 @@
 version: '2.0'
 services:
-  promxy:
-    container_name: promxy
-    image: quay.io/jacksontj/promxy
-    hostname: promxy
+  proxeus:
+    container_name: proxeus
+    image: ghcr.io/pvlltvk/proxeus
+    hostname: proxeus
     build:
       context: .
-      dockerfile: Dockerfile.promxy
+      dockerfile: Dockerfile.proxeus
     ports:
     - "8082:8082"
     volumes:
     - ./../../cmd:/cmd
     - logvolume01:/var/log
     command:
-      - --config=/cmd/promxy/config.yaml
+      - --config=/cmd/proxeus/config.yaml
       - --log-level=info
       - --web.enable-lifecycle
     networks:
@@ -42,7 +42,7 @@ services:
       - ./../../cmd:/cmd
       - ./data/alertmanager:/data
     command:
-      - '--config.file=/cmd/promxy/alertmanager.yml'
+      - '--config.file=/cmd/proxeus/alertmanager.yml'
       - '--storage.path=/data'
     ports:
       - 9093:9093

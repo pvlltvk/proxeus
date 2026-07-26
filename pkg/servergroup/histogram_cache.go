@@ -9,12 +9,12 @@ import (
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/sirupsen/logrus"
 
-	"github.com/jacksontj/promxy/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
 // histogramMetadataCache holds the set of metric names whose upstream type
 // is HISTOGRAM, refreshed periodically from /api/v1/metadata. It exists so
-// that promxy can route any query referencing a histogram metric via
+// that proxeus can route any query referencing a histogram metric via
 // remote_read even when the query doesn't use one of the histogram-only
 // PromQL functions (which the AST walker can detect on its own).
 //

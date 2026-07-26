@@ -8,24 +8,24 @@ import (
 	"github.com/prometheus/prometheus/config"
 	yaml "gopkg.in/yaml.v2"
 
-	"github.com/jacksontj/promxy/pkg/servergroup"
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
-// DefaultPromxyConfig is the default promxy config that the config file
+// DefaultProxeusConfig is the default proxeus config that the config file
 // is loaded into
-var DefaultPromxyConfig = PromxyConfig{}
+var DefaultProxeusConfig = ProxeusConfig{}
 
-// DefaultMaxSamplesPerSend is promxy's default remote_write batch size when the
+// DefaultMaxSamplesPerSend is proxeus's default remote_write batch size when the
 // user does not set queue_config.max_samples_per_send explicitly.
 //
-// Upstream Prometheus defaults this to 2000. promxy historically (in its old
+// Upstream Prometheus defaults this to 2000. proxeus historically (in its old
 // vendored remote_write fork) used 100, and shipping recording-rule output with
 // large/high-cardinality series in 2000-sample batches can decompress to more
 // than the 32 MiB snappy limit that Prometheus 3.5.3+ enforces on the
 // remote-write receiver (GHSA-8rm2-7qqf-34qm). When that happens the receiver
 // rejects the request with "snappy: decoded length N exceeds limit 33554432"
 // and the queue manager drops the batch. Restoring the historical default keeps
-// promxy's requests comfortably under that limit. See issue #781.
+// proxeus's requests comfortably under that limit. See issue #781.
 const DefaultMaxSamplesPerSend = 100
 
 // ConfigFromFile loads a config file at path
@@ -40,8 +40,8 @@ func ConfigFromFile(path string) (*Config, error) {
 // ConfigFromBytes loads a config from raw YAML bytes.
 func ConfigFromBytes(configBytes []byte) (*Config, error) {
 	cfg := &Config{
-		PromConfig:   config.DefaultConfig,
-		PromxyConfig: DefaultPromxyConfig,
+		PromConfig:    config.DefaultConfig,
+		ProxeusConfig: DefaultProxeusConfig,
 	}
 	if err := yaml.Unmarshal(configBytes, cfg); err != nil {
 		return nil, fmt.Errorf("error unmarshaling config: %v", err)
@@ -55,7 +55,7 @@ func ConfigFromBytes(configBytes []byte) (*Config, error) {
 }
 
 // applyRemoteWriteDefaults lowers the remote_write max_samples_per_send default
-// from upstream's 2000 to promxy's DefaultMaxSamplesPerSend, but only for
+// from upstream's 2000 to proxeus's DefaultMaxSamplesPerSend, but only for
 // remote_write entries where the user did not set it explicitly. The base
 // unmarshal always populates QueueConfig from Prometheus' DefaultQueueConfig, so
 // an explicit value is indistinguishable from the upstream default after the
@@ -89,15 +89,15 @@ func applyRemoteWriteDefaults(cfg *Config, configBytes []byte) error {
 }
 
 // Config is the entire config file. This includes both the Prometheus Config
-// as well as the Promxy config. This is done by "inline-ing" the promxy
-// config into the prometheus config under the "promxy" key
+// as well as the Proxeus config. This is done by "inline-ing" the proxeus
+// config into the prometheus config under the "proxeus" key
 type Config struct {
 	// Prometheus configs -- this includes configurations for
 	// recording rules, alerting rules, etc.
 	PromConfig config.Config `yaml:",inline"`
 
-	// Promxy specific configuration -- under its own namespace
-	PromxyConfig `yaml:"promxy"`
+	// Proxeus specific configuration -- under its own namespace
+	ProxeusConfig `yaml:"proxeus"`
 
 	WebConfig web.TLSConfig `yaml:"tls_server_config"`
 }
@@ -110,9 +110,9 @@ func (c *Config) String() string {
 	return string(b)
 }
 
-// PromxyConfig is the configuration for Promxy itself
-type PromxyConfig struct {
-	// Config for each of the server groups promxy is configured to aggregate
+// ProxeusConfig is the configuration for Proxeus itself
+type ProxeusConfig struct {
+	// Config for each of the server groups proxeus is configured to aggregate
 	ServerGroups []*servergroup.Config `yaml:"server_groups"`
 
 	// CrossGroupDedup, when true, enables deterministic cross-server_group
@@ -132,7 +132,7 @@ type PromxyConfig struct {
 	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to
 	// /api/v1/series so Grafana label browsers and dashboards don't show one
 	// row per backend for what is logically a single target. Requires
-	// CrossGroupDedup to also be true; promxy will refuse to start otherwise.
+	// CrossGroupDedup to also be true; proxeus will refuse to start otherwise.
 	// Default false preserves historical behavior.
 	CrossGroupDedupMetadata bool `yaml:"cross_group_dedup_metadata"`
 
@@ -150,7 +150,7 @@ type PromxyConfig struct {
 // CrossGroupDedupMetadata and CrossGroupPartialResponse only affect the
 // cross-group fan-out/dedup machinery, so neither makes sense without
 // CrossGroupDedup also being enabled.
-func (c *PromxyConfig) Validate() error {
+func (c *ProxeusConfig) Validate() error {
 	if c.CrossGroupDedupMetadata && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
 	}

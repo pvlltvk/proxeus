@@ -7,7 +7,7 @@ type PromReloadable interface {
 	ApplyConfig(*config.Config) error
 }
 
-// Reloadable can apply a promxy config
+// Reloadable can apply a proxeus config
 type Reloadable interface {
 	ApplyConfig(*Config) error
 }

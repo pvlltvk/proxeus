@@ -44,7 +44,7 @@ tls_server_config:
 // https://github.com/jacksontj/promxy/issues/781. Upstream's default
 // max_samples_per_send (2000) can produce remote_write requests that decompress
 // past the 32 MiB snappy limit Prometheus 3.5.3+ enforces on the receiver, so
-// promxy lowers the default to DefaultMaxSamplesPerSend when the user does not
+// proxeus lowers the default to DefaultMaxSamplesPerSend when the user does not
 // set it explicitly -- while still honoring an explicit value.
 func TestRemoteWriteMaxSamplesPerSendDefault(t *testing.T) {
 	tests := []struct {
@@ -53,7 +53,7 @@ func TestRemoteWriteMaxSamplesPerSendDefault(t *testing.T) {
 		want []int
 	}{
 		{
-			name: "unset uses promxy default",
+			name: "unset uses proxeus default",
 			raw: `
 remote_write:
   - url: http://localhost:1/api/v1/write
@@ -71,7 +71,7 @@ remote_write:
 			want: []int{2000},
 		},
 		{
-			name: "explicit value matching promxy default honored",
+			name: "explicit value matching proxeus default honored",
 			raw: `
 remote_write:
   - url: http://localhost:1/api/v1/write

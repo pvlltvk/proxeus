@@ -20,7 +20,7 @@ import (
 // test confirms the wiring all the way through the Prom v1 HTTP API.
 //
 // Setup: two in-process backends share the same teststorage, so each returns
-// the same underlying series. Promxy stamps az=a / az=b via AddLabelClient,
+// the same underlying series. Proxeus stamps az=a / az=b via AddLabelClient,
 // producing duplicate series modulo az. Deterministic dedup should collapse
 // them to one row per logical series.
 
@@ -71,7 +71,7 @@ func TestSeriesDedup_HTTP(t *testing.T) {
 			}()
 
 			cfg := `
-promxy:
+proxeus:
   cross_group_dedup: true
   cross_group_dedup_metadata: ` + boolStr(tc.dedupMetadata) + `
   server_groups:
@@ -96,7 +96,7 @@ promxy:
 				<-stopP
 			}()
 
-			counterBefore := counterValue(t, "promxy_cross_group_dedup_metadata_collisions_total")
+			counterBefore := counterValue(t, "proxeus_cross_group_dedup_metadata_collisions_total")
 
 			q := url.Values{}
 			q.Set("match[]", "up")
@@ -137,7 +137,7 @@ promxy:
 				t.Errorf("az label values = %v, want %v", gotAz, tc.wantAzValues)
 			}
 
-			counterAfter := counterValue(t, "promxy_cross_group_dedup_metadata_collisions_total")
+			counterAfter := counterValue(t, "proxeus_cross_group_dedup_metadata_collisions_total")
 			if got := counterAfter - counterBefore; got != tc.wantCounterDelta {
 				t.Errorf("collision counter delta = %v, want %v", got, tc.wantCounterDelta)
 			}
@@ -163,7 +163,7 @@ load 1m
 `
 
 // dualBackendProxy spins up two in-process backends sharing `store`, plus a
-// promxy in front with az=a / az=b group labels. Returns the proxy URL and a
+// proxeus in front with az=a / az=b group labels. Returns the proxy URL and a
 // cleanup func. Each server binds an OS-assigned port, so concurrent tests
 // never contend for fixed ports.
 func dualBackendProxy(t *testing.T, store storage.Storage) (proxyURL string, cleanup func()) {
@@ -172,7 +172,7 @@ func dualBackendProxy(t *testing.T, store storage.Storage) (proxyURL string, cle
 	backendB, addrB, stopB := startAPIForTest(store)
 
 	cfg := `
-promxy:
+proxeus:
   server_groups:
     - static_configs:
         - targets:
@@ -324,7 +324,7 @@ func TestLabelsAPI_HTTP(t *testing.T) {
 }
 
 // TestLabelAPI_GroupLabelCollision_HTTP pins the current behavior when a
-// series in the backend already carries a label whose name matches a promxy
+// series in the backend already carries a label whose name matches a proxeus
 // group label. /series overwrites; /label/<name>/values unions. The two
 // endpoints disagree — this test documents that gap so any future change is
 // an intentional one.

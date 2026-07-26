@@ -1,4 +1,4 @@
-## Promxy, a prometheus scaling story
+## Proxeus, a prometheus scaling story
 
 ### The beginning
 Prometheus is an all-in-one metrics and alerting system. The fact that everything is built-in is quite convenient when doing initial setup and testing. Throw grafana in front of that and we are cooking with gas! At this scale -- there where no concerns, only snappy metrics and pretty graphs.
@@ -43,8 +43,8 @@ At this point you consider your situation:
 
 And you tell yourself, this seems too complicated; there must be a better way!
 
-### Promxy
-You google around (or ask a friend) and you find out about this tool -- promxy
+### Proxeus
+You google around (or ask a friend) and you find out about this tool -- proxeus
 (what a silly name). You set it up and you immediately able to solve your pain points:
 
 -  no more "holes" in metrics

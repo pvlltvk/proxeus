@@ -12,7 +12,7 @@ import (
 	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
 )
 
 const (
@@ -40,7 +40,7 @@ func hasNegativeFractionalSecond(t time.Time) bool {
 
 // errNegativeFractionalTimestamp is returned when the requested time would
 // trigger the upstream JSON decoding bug described on hasNegativeFractionalSecond.
-var errNegativeFractionalTimestamp = errors.New("promxy: pushdown not supported for pre-epoch timestamps with sub-second precision (https://github.com/prometheus/common model.Time.UnmarshalJSON bug)")
+var errNegativeFractionalTimestamp = errors.New("proxeus: pushdown not supported for pre-epoch timestamps with sub-second precision (https://github.com/prometheus/common model.Time.UnmarshalJSON bug)")
 
 // queryWithInfos issues the query/query_range request over the given transport
 // and decodes the response straight into a storage.SeriesSet. Warnings and

@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
 )
 
 func noStepSubqueryInterval(int64) int64 { return 0 }
@@ -25,7 +25,7 @@ func loadConfig(t *testing.T, raw string) *proxyconfig.Config {
 
 // TestRemoteWriteWAL is a regression test for
 // https://github.com/jacksontj/promxy/issues/771. With remote_write configured,
-// promxy must run a WAL-only agent DB so the remote.Storage queue managers have
+// proxeus must run a WAL-only agent DB so the remote.Storage queue managers have
 // a WAL to tail. Before the fix the WAL subdir never existed (the watcher failed
 // with "error tailing WAL ... no such file or directory") and samples appended by
 // the rule manager were silently discarded by the upstream timestampTracker.
@@ -57,7 +57,7 @@ remote_write:
 	// (not silently discarded). The agent appender is single-use, so this also
 	// exercises that ProxyStorage.Appender hands out a fresh appender per call.
 	app := ps.Appender(context.Background())
-	if _, err := app.Append(0, labels.FromStrings(labels.MetricName, "promxy_test_metric"), 1, 1); err != nil {
+	if _, err := app.Append(0, labels.FromStrings(labels.MetricName, "proxeus_test_metric"), 1, 1); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := app.Commit(); err != nil {

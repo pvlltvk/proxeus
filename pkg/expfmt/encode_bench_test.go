@@ -22,7 +22,7 @@ func benchSeries(n int) []benchSample {
 	for i := 0; i < n; i++ {
 		out[i] = benchSample{
 			lbls: labels.FromStrings(
-				labels.MetricName, "promxy_bench_metric",
+				labels.MetricName, "proxeus_bench_metric",
 				"instance", "inst-"+strconv.Itoa(i%500),
 				"job", "bench",
 				"region", "us-east-1",
@@ -43,7 +43,7 @@ func BenchmarkEncoderCommon(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		mf := &dto.MetricFamily{Name: sp("promxy_bench_metric"), Type: dto.MetricType_UNTYPED.Enum()}
+		mf := &dto.MetricFamily{Name: sp("proxeus_bench_metric"), Type: dto.MetricType_UNTYPED.Enum()}
 		mf.Metric = make([]*dto.Metric, 0, len(ss))
 		for _, s := range ss {
 			mf.Metric = append(mf.Metric, seriesToDTOMetric(s.lbls, nil, s.v, ip(s.t)))
@@ -55,7 +55,7 @@ func BenchmarkEncoderCommon(b *testing.B) {
 	}
 }
 
-// BenchmarkEncoderLean is the promxy path: stream straight from labels, no dto.
+// BenchmarkEncoderLean is the proxeus path: stream straight from labels, no dto.
 func BenchmarkEncoderLean(b *testing.B) {
 	ss := benchSeries(5000)
 	b.ReportAllocs()

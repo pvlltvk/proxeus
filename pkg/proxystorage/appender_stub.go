@@ -33,7 +33,7 @@ func (a *appenderStub) Append(_ storage.SeriesRef, _ labels.Labels, _ int64, _ f
 	appenderLock.Lock()
 	now := time.Now()
 	if now.Sub(appenderWarningTime) > time.Minute {
-		logrus.Warning("No remote_write endpoint defined in promxy")
+		logrus.Warning("No remote_write endpoint defined in proxeus")
 		appenderWarningTime = now
 	}
 	appenderLock.Unlock()
@@ -53,7 +53,7 @@ func (a *appenderStub) AppendHistogram(_ storage.SeriesRef, _ labels.Labels, _ i
 	appenderLock.Lock()
 	now := time.Now()
 	if now.Sub(appenderWarningTime) > time.Minute {
-		logrus.Warning("No remote_write endpoint defined in promxy")
+		logrus.Warning("No remote_write endpoint defined in proxeus")
 		appenderWarningTime = now
 	}
 	appenderLock.Unlock()
@@ -61,7 +61,7 @@ func (a *appenderStub) AppendHistogram(_ storage.SeriesRef, _ labels.Labels, _ i
 }
 
 // AppendHistogramCTZeroSample silently accepts created-timestamp markers
-// for histograms. promxy doesn't model CT tracking, but the appender must
+// for histograms. proxeus doesn't model CT tracking, but the appender must
 // not error or upstream evaluation aborts.
 func (a *appenderStub) AppendHistogramCTZeroSample(_ storage.SeriesRef, _ labels.Labels, _, _ int64, _ *histogram.Histogram, _ *histogram.FloatHistogram) (storage.SeriesRef, error) {
 	return 0, nil

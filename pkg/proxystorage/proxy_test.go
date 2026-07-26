@@ -18,8 +18,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
-	"github.com/jacksontj/promxy/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
 type stubAPI struct {

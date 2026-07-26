@@ -15,7 +15,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // Copied from prometheus' API (these should just be exported...)

@@ -112,7 +112,7 @@ func TestEncoderMatchesCommonAcrossSchemes(t *testing.T) {
 		v        float64
 		t        int64
 	}
-	external := []labels.Label{{Name: "region", Value: "us-east"}, {Name: "src", Value: "promxy"}}
+	external := []labels.Label{{Name: "region", Value: "us-east"}, {Name: "src", Value: "proxeus"}}
 
 	groups := map[string][]series{
 		"legacy": {

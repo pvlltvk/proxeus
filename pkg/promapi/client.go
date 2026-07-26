@@ -92,7 +92,7 @@ func (c *Client) QueryRange(ctx context.Context, query string, r Range) storage.
 
 // Select fetches the raw series matching the matchers over [start, end]. It is
 // implemented as an instant query over a range selector, returning every stored
-// sample in the window (the shape promxy's storage layer needs).
+// sample in the window (the shape proxeus's storage layer needs).
 func (c *Client) Select(ctx context.Context, start, end time.Time, matchers ...*labels.Matcher) storage.SeriesSet {
 	seconds := int64(end.Sub(start).Seconds()) + 1
 	query := matchersToSelector(matchers) + "[" + strconv.FormatInt(seconds, 10) + "s]"

@@ -13,9 +13,9 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
-	"github.com/jacksontj/promxy/pkg/promapi"
-	"github.com/jacksontj/promxy/pkg/promclient"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
 // stepAlignStub mimics a step-aligning backend (Mimir/Cortex): its QueryRange
@@ -120,7 +120,7 @@ func TestStepAlign_E2E_Pushdown(t *testing.T) {
 	}
 }
 
-// TestStepAlign_E2E_Offset confirms an `offset` modifier still lines up: promxy
+// TestStepAlign_E2E_Offset confirms an `offset` modifier still lines up: proxeus
 // pushes the range down at Start-offset, so the re-stamp reference frame is
 // Start-offset's phase, which is exactly where the engine looks the samples back
 // up (evalGrid - offset). Data must still be recovered.

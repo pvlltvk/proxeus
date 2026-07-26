@@ -11,7 +11,7 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // InjectMatchersClient wraps an API and injects a static set of label matchers into
@@ -20,7 +20,7 @@ import (
 // never reference the labels being injected (e.g. `count(up)` becomes
 // `count(up{cluster="A"})`).
 //
-// This differs from the other label mechanisms in promxy:
+// This differs from the other label mechanisms in proxeus:
 //   - `labels` only *adds* labels to the responses coming back from the downstream
 //   - `label_filter` only *drops* queries whose matchers can't match the downstream
 //   - `inject_matchers` always *adds* the configured matchers to the queries themselves

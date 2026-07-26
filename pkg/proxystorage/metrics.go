@@ -7,10 +7,10 @@ import (
 
 // crossGroupDedupCollisions counts series collisions resolved by ordinal
 // tie-break during cross-server_group dedup (B1). Label values are the winning
-// and losing server_group names as defined in the promxy configuration.
+// and losing server_group names as defined in the proxeus configuration.
 var crossGroupDedupCollisions = promauto.NewCounterVec(
 	prometheus.CounterOpts{
-		Name: "promxy_cross_group_dedup_collisions_total",
+		Name: "proxeus_cross_group_dedup_collisions_total",
 		Help: "Number of cross-server_group series collisions resolved by ordinal tie-break.",
 	},
 	[]string{"winner", "loser"},
@@ -22,7 +22,7 @@ var crossGroupDedupCollisions = promauto.NewCounterVec(
 // future expansion to other endpoints without breaking dashboards.
 var crossGroupDedupMetadataCollisions = promauto.NewCounterVec(
 	prometheus.CounterOpts{
-		Name: "promxy_cross_group_dedup_metadata_collisions_total",
+		Name: "proxeus_cross_group_dedup_metadata_collisions_total",
 		Help: "Number of cross-server_group metadata collisions resolved by ordinal tie-break, by endpoint.",
 	},
 	[]string{"winner", "loser", "endpoint"},

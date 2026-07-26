@@ -42,7 +42,7 @@ func TestAssetsRootedAtMantineUI(t *testing.T) {
 	// serving "<prefix>/assets/<file>". index.html is served separately via
 	// Assets.Open (buildInjectedReactApp), verified above — FileServer 301s
 	// "/index.html" to "./", so it is not exercised through this route.
-	const prefix = "/promxytest"
+	const prefix = "/proxeustest"
 	h := http.StripPrefix(prefix, http.FileServer(Assets))
 
 	for _, tc := range []struct {

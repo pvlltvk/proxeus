@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# api_smoke.sh — exercise promxy's Prometheus HTTP API surface and assert each
+# api_smoke.sh — exercise proxeus's Prometheus HTTP API surface and assert each
 # response carries the expected envelope shape. Intended for live verification
-# against a running promxy (typically the dev sandbox), not as part of `go test`.
+# against a running proxeus (typically the dev sandbox), not as part of `go test`.
 #
 # Usage:
 #   ./scripts/api_smoke.sh                    # defaults to http://localhost:18082
-#   PROMXY_URL=http://promxy:8082 ./scripts/api_smoke.sh
+#   PROXEUS_URL=http://proxeus:8082 ./scripts/api_smoke.sh
 #
 # Requires: curl, jq. Exits non-zero on the first failed assertion.
 
 set -euo pipefail
 
-PROMXY_URL="${PROMXY_URL:-http://localhost:18082}"
+PROXEUS_URL="${PROXEUS_URL:-http://localhost:18082}"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 green() { printf '\033[32m%s\033[0m\n'  "$*"; }
@@ -27,7 +27,7 @@ bad()     { red "  FAIL  $*"; fail=$((fail + 1)); }
 # fetch URL, store body in $RESP_BODY and status code in $RESP_CODE.
 fetch() {
     local path="$1"
-    RESP_BODY=$(curl -fsS --max-time 10 -w "\n%{http_code}" "${PROMXY_URL}${path}" 2>/dev/null || true)
+    RESP_BODY=$(curl -fsS --max-time 10 -w "\n%{http_code}" "${PROXEUS_URL}${path}" 2>/dev/null || true)
     RESP_CODE="${RESP_BODY##*$'\n'}"
     RESP_BODY="${RESP_BODY%$'\n'*}"
 }
@@ -145,19 +145,19 @@ assert_200 metadata && \
     ok "metadata: envelope present"
 
 # --- /metrics --------------------------------------------------------------
-section "/metrics (promxy's own scrape endpoint)"
+section "/metrics (proxeus's own scrape endpoint)"
 fetch "/metrics"
 assert_200 metrics && \
-    grep -q '^promxy_cross_group_dedup_collisions_total' <<<"${RESP_BODY}" && \
-    grep -q '^promxy_cross_group_dedup_metadata_collisions_total' <<<"${RESP_BODY}" && \
+    grep -q '^proxeus_cross_group_dedup_collisions_total' <<<"${RESP_BODY}" && \
+    grep -q '^proxeus_cross_group_dedup_metadata_collisions_total' <<<"${RESP_BODY}" && \
     ok "metrics: B1 + F2 collision counters exposed"
 
 # --- summary ---------------------------------------------------------------
 echo
 if (( fail == 0 )); then
-    green "All API smoke checks passed against ${PROMXY_URL}"
+    green "All API smoke checks passed against ${PROXEUS_URL}"
     exit 0
 else
-    red "${fail} check(s) failed against ${PROMXY_URL}"
+    red "${fail} check(s) failed against ${PROXEUS_URL}"
     exit 1
 fi

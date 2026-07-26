@@ -20,7 +20,7 @@ import (
 // point k*step + r. Forward-only (never backward) keeps it causal -- we never
 // surface a value as of a time later than the timestamp it is reported at.
 //
-// Why this is the right reference frame: promxy pushes each leaf selector down
+// Why this is the right reference frame: proxeus pushes each leaf selector down
 // as a QueryRange with Start = evalStart - offset, then the local engine looks
 // the returned samples back up at (evalGrid - offset) == this request's Start
 // grid. So aligning the output to r.Start's phase is exactly what the engine

@@ -36,37 +36,37 @@ func hasLabel(mf *dto.MetricFamily, labelName, labelValue string) bool {
 }
 
 // TestServerGroupSummaryHasServerGroupLabel verifies that the
-// server_group_request_duration_seconds metric carries a "server_group" label.
+// proxeus_server_group_request_duration_seconds metric carries a "server_group" label.
 func TestServerGroupSummaryHasServerGroupLabel(t *testing.T) {
 	const sgName = "sg-label-test"
 
 	// Emit a sample so the metric family appears in the gather output.
 	serverGroupSummary.WithLabelValues(sgName, "host:9090", "query", "success").Observe(0.001)
 
-	mf := gatherFamily(t, "server_group_request_duration_seconds")
+	mf := gatherFamily(t, "proxeus_server_group_request_duration_seconds")
 	if mf == nil {
-		t.Fatal("metric family server_group_request_duration_seconds not found in registry")
+		t.Fatal("metric family proxeus_server_group_request_duration_seconds not found in registry")
 	}
 
 	if !hasLabel(mf, "server_group", sgName) {
-		t.Errorf("label server_group=%q not found in server_group_request_duration_seconds", sgName)
+		t.Errorf("label server_group=%q not found in proxeus_server_group_request_duration_seconds", sgName)
 	}
 }
 
-// TestServerGroupErrorCounterRegistered verifies that promxy_server_group_request_errors_total
+// TestServerGroupErrorCounterRegistered verifies that proxeus_server_group_request_errors_total
 // is registered and carries the server_group label.
 func TestServerGroupErrorCounterRegistered(t *testing.T) {
 	const sgName = "sg-error-test"
 
 	serverGroupRequestErrors.WithLabelValues(sgName, "host:9090", "query").Inc()
 
-	mf := gatherFamily(t, "promxy_server_group_request_errors_total")
+	mf := gatherFamily(t, "proxeus_server_group_request_errors_total")
 	if mf == nil {
-		t.Fatal("metric family promxy_server_group_request_errors_total not found in registry")
+		t.Fatal("metric family proxeus_server_group_request_errors_total not found in registry")
 	}
 
 	if !hasLabel(mf, "server_group", sgName) {
-		t.Errorf("label server_group=%q not found in promxy_server_group_request_errors_total", sgName)
+		t.Errorf("label server_group=%q not found in proxeus_server_group_request_errors_total", sgName)
 	}
 }
 
@@ -85,18 +85,18 @@ func TestAPIClientMetricFuncServerGroupLabel(t *testing.T) {
 	fn(0, "query_range", "error", 0.200)
 
 	// Verify summary has sample with the right server_group label.
-	summaryMF := gatherFamily(t, "server_group_request_duration_seconds")
+	summaryMF := gatherFamily(t, "proxeus_server_group_request_duration_seconds")
 	if summaryMF == nil {
-		t.Fatal("server_group_request_duration_seconds not found")
+		t.Fatal("proxeus_server_group_request_duration_seconds not found")
 	}
 	if !hasLabel(summaryMF, "server_group", sgName) {
 		t.Errorf("summary missing server_group=%q label", sgName)
 	}
 
 	// Verify error counter has exactly 1 for the error observation.
-	errMF := gatherFamily(t, "promxy_server_group_request_errors_total")
+	errMF := gatherFamily(t, "proxeus_server_group_request_errors_total")
 	if errMF == nil {
-		t.Fatal("promxy_server_group_request_errors_total not found")
+		t.Fatal("proxeus_server_group_request_errors_total not found")
 	}
 	if !hasLabel(errMF, "server_group", sgName) {
 		t.Errorf("error counter missing server_group=%q label", sgName)

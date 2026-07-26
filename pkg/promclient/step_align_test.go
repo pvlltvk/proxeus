@@ -15,7 +15,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/util/annotations"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
 )
 
 const (
@@ -204,7 +204,7 @@ func TestStepAlignClient_NoOp(t *testing.T) {
 	}
 }
 
-// mergedQueryable mimics promxy fanning a leaf query_range out to two server
+// mergedQueryable mimics proxeus fanning a leaf query_range out to two server
 // groups and merging the result: source a ("Mimir", epoch grid) behind a
 // StepAlignClient, source b ("vanilla Prom", request grid) untouched.
 type mergedQueryable struct {

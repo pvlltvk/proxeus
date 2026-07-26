@@ -19,13 +19,13 @@ import (
 	"github.com/prometheus/prometheus/util/teststorage"
 	v1 "github.com/prometheus/prometheus/web/api/v1"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
-	"github.com/jacksontj/promxy/pkg/proxystorage"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/proxystorage"
 )
 
 // startAPIWithExemplars boots a real prometheus v1 API server backed by a
 // real test storage that supports exemplars. Returns the bound addr so the
-// caller can wire it into a promxy server-group config; the test storage
+// caller can wire it into a proxeus server-group config; the test storage
 // is also returned so the caller can ingest series + exemplars before
 // hitting the API.
 func startAPIWithExemplars(t *testing.T) (*teststorage.TestStorage, string, func()) {
@@ -104,8 +104,8 @@ func ingestExemplar(t *testing.T, stor *teststorage.TestStorage, lset labels.Lab
 }
 
 // TestExemplarsEndToEnd ingests series + exemplars into a real test storage
-// fronted by a real Prometheus v1 API server, configures promxy to point at
-// it, and verifies promxy.ProxyStorage.ExemplarQuerier (which the
+// fronted by a real Prometheus v1 API server, configures proxeus to point at
+// it, and verifies proxeus.ProxyStorage.ExemplarQuerier (which the
 // /api/v1/query_exemplars HTTP handler uses) round-trips the data.
 func TestExemplarsEndToEnd(t *testing.T) {
 	stor, addr, stop := startAPIWithExemplars(t)
@@ -127,7 +127,7 @@ func TestExemplarsEndToEnd(t *testing.T) {
 
 	psConfig := &proxyconfig.Config{}
 	if err := yaml.Unmarshal([]byte(fmt.Sprintf(`
-promxy:
+proxeus:
   http_client:
     tls_config:
       insecure_skip_verify: true
@@ -222,7 +222,7 @@ promxy:
 	})
 
 	// Sanity: the underlying storage really has both exemplars, so any
-	// failure above is in promxy's path, not the data.
+	// failure above is in proxeus's path, not the data.
 	if got := exemplarCount(t, stor); got != 2 {
 		t.Fatalf("test storage should hold 2 exemplars, got %d", got)
 	}

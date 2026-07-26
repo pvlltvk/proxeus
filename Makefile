@@ -2,11 +2,11 @@ BUILD := build
 GO ?= go
 GOFILES := $(shell find . -name "*.go" -type f)
 GOFMT ?= gofmt
-GOIMPORTS ?= goimports -local=github.com/jacksontj/promxy
+GOIMPORTS ?= goimports -local=github.com/pvlltvk/proxeus
 STATICCHECK ?= staticcheck
 GOLANGCI_LINT ?= golangci-lint
 # Revision new code is compared against in `make lint-new`.
-LINT_BASE_REV ?= origin/master
+LINT_BASE_REV ?= origin/main
 
 .PHONY: clean
 clean:
@@ -47,12 +47,12 @@ test:
 
 .PHONY: release
 release:
-	./build.bash github.com/jacksontj/promxy/cmd/promxy $(BUILD)
-	./build.bash github.com/jacksontj/promxy/cmd/remote_write_exporter $(BUILD)
+	./build.bash github.com/pvlltvk/proxeus/cmd/proxeus $(BUILD)
+	./build.bash github.com/pvlltvk/proxeus/cmd/remote_write_exporter $(BUILD)
 
 testlocal-build:
-	docker build -t 127.0.0.1:32000/promxy:latest .
-	docker push 127.0.0.1:32000/promxy:latest
+	docker build -t 127.0.0.1:32000/proxeus:latest .
+	docker push 127.0.0.1:32000/proxeus:latest
 
 .PHONY: tidy
 tidy:

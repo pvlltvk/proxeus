@@ -10,7 +10,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
 )
 
 // histogramFinder is a parser.Visitor that flags the AST subtree as

@@ -7,7 +7,7 @@ import (
 
 	"github.com/prometheus/prometheus/promql/parser"
 
-	"github.com/jacksontj/promxy/pkg/servergroup"
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
 func TestIsHistogramExpr(t *testing.T) {

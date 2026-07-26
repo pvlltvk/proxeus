@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/prometheus/model/histogram"
 )
 
-// Promxy carries native histograms through a model.SampleHistogram-shaped
+// Proxeus carries native histograms through a model.SampleHistogram-shaped
 // carrier (the JSON API representation) so that fan-out merging, dedup, and
 // JSON pass-through can reuse the existing model.Value-based plumbing. The
 // JSON shape is lossy (it drops empty buckets and the sparse-span schema),
@@ -52,7 +52,7 @@ func pinnedFloatHistogram(sh *model.SampleHistogram) *histogram.FloatHistogram {
 
 // floatHistogramToSampleHistogram renders a FloatHistogram into the
 // API-facing model.SampleHistogram (flat bucket list) so it can be carried
-// through promxy's existing model.Value-based merge and HTTP response paths.
+// through proxeus's existing model.Value-based merge and HTTP response paths.
 // Mirrors prometheus/util/jsonutil.MarshalHistogram (which streams the same
 // shape directly to JSON). The original FloatHistogram is pinned so the
 // iterator can read it back without losing schema fidelity.
@@ -155,7 +155,7 @@ func sampleHistogramToFloatHistogram(sh *model.SampleHistogram) *histogram.Float
 
 // rawHistogramsMu is reserved for future per-querier scoping if the global
 // cache becomes a bottleneck under heavy concurrent histogram traffic. The
-// finalizer-driven cleanup is sufficient for typical promxy workloads.
+// finalizer-driven cleanup is sufficient for typical proxeus workloads.
 var _ = rawHistogramsMu
 
 // TestPinFloatHistogramRoundTrip is exposed as a package-level helper for

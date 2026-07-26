@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/sigv4"
 
-	"github.com/jacksontj/promxy/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 
 	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/model/labels"
@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	// DefaultConfig is the Default base promxy configuration
+	// DefaultConfig is the Default base proxeus configuration
 	DefaultConfig = Config{
 		AntiAffinity:        time.Second * 10,
 		Scheme:              "http",
@@ -39,7 +39,7 @@ const (
 	PathPrefixLabel = "__path_prefix__"
 )
 
-// Config is the configuration for a ServerGroup that promxy will talk to.
+// Config is the configuration for a ServerGroup that proxeus will talk to.
 // This is where the vast majority of options exist.
 type Config struct {
 	Ordinal int `yaml:"-"`
@@ -48,7 +48,7 @@ type Config struct {
 	// "server_group" label on per-backend metrics and in error messages.
 	// When left empty, ApplyConfig in proxystorage populates it with "sg-<Ordinal>".
 	Name string `yaml:"name,omitempty"`
-	// RemoteRead directs promxy to load RAW data (meaning matrix selectors such as `foo[1h]`)
+	// RemoteRead directs proxeus to load RAW data (meaning matrix selectors such as `foo[1h]`)
 	// through the RemoteRead API on prom.
 	// Pros:
 	//  - StaleNaNs work
@@ -70,15 +70,15 @@ type Config struct {
 	// RemoteReadPath sets the remote read path for the hosts in this servergroup
 	RemoteReadPath string `yaml:"remote_read_path"`
 
-	// NativeHistogram tunes how promxy serves native-histogram queries
+	// NativeHistogram tunes how proxeus serves native-histogram queries
 	// against this server group. The zero value (no `native_histogram`
 	// block in YAML) is "AST-only detection, fail loud if remote_read
 	// can't preserve fidelity" — the safe default. See NativeHistogramConfig.
 	NativeHistogram NativeHistogramConfig `yaml:"native_histogram,omitempty"`
-	// HTTP client config for promxy to use when connecting to the various server_groups
+	// HTTP client config for proxeus to use when connecting to the various server_groups
 	// this is the same config as prometheus
 	HTTPConfig HTTPClientConfig `yaml:"http_client"`
-	// Scheme defines how promxy talks to this server group (http, https, etc.)
+	// Scheme defines how proxeus talks to this server group (http, https, etc.)
 	Scheme string `yaml:"scheme"`
 	// Labels is a set of labels that will be added to all metrics retrieved
 	// from this server group
@@ -103,12 +103,12 @@ type Config struct {
 	//   (1) the scrape would only target hosts with a prod consul label
 	//   (2) it would add a label to all returned series of datacenter with the value set to whatever the value of __meat_consul_dc was.
 	//
-	// If we saw this same config in promxy (pointing at prometheus hosts instead of some exporter), we'd expect a similar behavior:
+	// If we saw this same config in proxeus (pointing at prometheus hosts instead of some exporter), we'd expect a similar behavior:
 	//   (1) only targets with the prod consul label would be included in the servergroup
 	//   (2) it would add a label to all returned series of this servergroup of datacenter with the value set to whatever the value of __meat_consul_dc was.
 	//
 	// So in reality its "the same", the difference is in prometheus these apply to the labels/targets of a scrape job,
-	// in promxy they apply to the prometheus hosts in the servergroup - but the behavior is the same.
+	// in proxeus they apply to the prometheus hosts in the servergroup - but the behavior is the same.
 	RelabelConfigs []*relabel.Config `yaml:"relabel_configs,omitempty"`
 	// MetricsRelabelConfigs are similar in spirit to prometheus' relabel config but quite different.
 	// As this relabeling is being done within the query-path all relabel actions need to be reversible
@@ -120,7 +120,7 @@ type Config struct {
 	//
 	//    metrics_relabel_configs:
 	//      # this will drop the `replica` label; enabling replica deduplication
-	//      # similar to thanos -- https://github.com/thanos-io/thanos/blob/master/docs/components/query.md#deduplication
+	//      # similar to thanos -- https://github.com/thanos-io/thanos/blob/main/docs/components/query.md#deduplication
 	//      - action: labeldrop
 	//        source_label: replica
 	//      # this will replace the `job` label with `scrape_job`
@@ -139,7 +139,7 @@ type Config struct {
 	//        source_label: instance
 	//        target_label: instanceUpper
 	MetricsRelabelConfigs []*promclient.MetricRelabelConfig `yaml:"metrics_relabel_configs,omitempty"`
-	// ServiceDiscoveryConfigs is a set of ServiceDiscoveryConfig options that allow promxy to discover
+	// ServiceDiscoveryConfigs is a set of ServiceDiscoveryConfig options that allow proxeus to discover
 	// all hosts in the server_group
 	ServiceDiscoveryConfigs discovery.Configs `yaml:"-"`
 	// PathPrefix to prepend to all queries to hosts in this servergroup
@@ -155,9 +155,9 @@ type Config struct {
 	// (see https://github.com/jacksontj/promxy/issues/202)
 	QueryParams map[string]string `yaml:"query_params"`
 	// TODO cache this as a model.Time after unmarshal
-	// AntiAffinity defines how large of a gap in the timeseries will cause promxy
+	// AntiAffinity defines how large of a gap in the timeseries will cause proxeus
 	// to merge series from 2 hosts in a server_group. This required for a couple reasons
-	// (1) Promxy cannot make assumptions on downstream clock-drift and
+	// (1) Proxeus cannot make assumptions on downstream clock-drift and
 	// (2) two prometheus hosts scraping the same target may have different times
 	// #2 is caused by prometheus storing the time of the scrape as the time the scrape **starts**.
 	// in practice this is actually quite frequent as there are a variety of situations that
@@ -270,8 +270,8 @@ type Config struct {
 
 	// AlignQueryRangeWithStep declares that this backend snaps query_range results
 	// to the epoch step grid (k*step), as Mimir/Cortex do by default. When set,
-	// promxy re-stamps the returned samples back onto the grid implied by the
-	// request start (start + j*step) so they line up with promxy's local
+	// proxeus re-stamps the returned samples back onto the grid implied by the
+	// request start (start + j*step) so they line up with proxeus's local
 	// evaluation grid. Without it, an unaligned request (start % step != 0) whose
 	// off-grid distance exceeds the lookback-delta yields no data for this backend.
 	// Leave it OFF for backends that do not step-align (e.g. vanilla Prometheus);
@@ -423,9 +423,9 @@ func (tr *AbsoluteTimeRangeConfig) validate() error {
 }
 
 // NativeHistogramConfig groups the per-server-group knobs that control how
-// promxy handles native-histogram queries. Native histograms only round-trip
+// proxeus handles native-histogram queries. Native histograms only round-trip
 // with full fidelity over remote_read — the HTTP-API JSON path collapses
-// sparse spans and drops empty buckets. Promxy detects histogram-bearing
+// sparse spans and drops empty buckets. Proxeus detects histogram-bearing
 // queries from the PromQL AST (and optionally from a metric-name metadata
 // cache) and skips HTTP-API pushdown for them so the embedded engine
 // evaluates locally, fetching raw data via remote_read.
@@ -442,7 +442,7 @@ type NativeHistogramConfig struct {
 	// metrics without invoking those functions — e.g. `rate(my_hist[5m])`.
 	//
 	// Set MetadataRefresh to a positive duration to enable the cache:
-	// promxy periodically calls /api/v1/metadata on this server group,
+	// proxeus periodically calls /api/v1/metadata on this server group,
 	// extracts the histogram-typed metric names, and consults the union
 	// of all groups' caches when classifying queries. The cache is
 	// name-keyed (typically <2% of the total metric-name space) so

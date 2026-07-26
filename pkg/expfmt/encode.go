@@ -1,12 +1,12 @@
 // Package expfmt provides a fast, allocation-light encoder for the Prometheus
 // text exposition format.
 //
-// It exists for promxy's /federate endpoint (issue #784). The upstream
+// It exists for proxeus's /federate endpoint (issue #784). The upstream
 // federation handler builds a full dto.MetricFamily tree per request and hands
 // it to github.com/prometheus/common/expfmt, whose text encoder (since
 // common v0.65 / the Prometheus 3.x UTF-8 name support) re-validates every
 // metric and label name on encode. Together that dominates federation CPU and
-// allocations. promxy already has the data as labels.Labels (it just decoded a
+// allocations. proxeus already has the data as labels.Labels (it just decoded a
 // downstream response), so it can stream the exposition format directly,
 // skipping the dto tree.
 //

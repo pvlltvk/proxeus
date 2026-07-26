@@ -1,0 +1,119 @@
+{{- if .Values.deployment.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chart.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+    {{- if .Values.extraLabels}}
+    {{ toYaml .Values.extraLabels | nindent 4 }}
+    {{- end}}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if .Values.deployment.strategy }}
+  strategy:
+    {{- toYaml .Values.deployment.strategy | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "chart.selectorLabels" . | nindent 8 }}
+        {{- if .Values.extraLabels}}
+        {{ toYaml .Values.extraLabels | nindent 8 }}
+        {{- end}}
+      annotations:
+        {{- range $key, $value := .Values.podAnnotations }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    spec:
+    {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      serviceAccountName: {{ include "chart.serviceAccountName" . }}
+    {{- if .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+    {{- end }}
+    {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- if .Values.affinity }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}
+    {{- end }}
+      containers:
+      - args:
+        - "--config=/etc/proxeus/config.yaml"
+        - "--web.enable-lifecycle"
+        {{- range $key, $value := .Values.extraArgs }}
+        - "--{{ $key }}={{ $value }}"
+        {{- end }}
+          {{- if .Values.env }}
+        env:
+{{ toYaml .Values.env | indent 10}}
+        {{- end }}
+        command:
+        - "/bin/proxeus"
+        image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        name: proxeus
+        livenessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /-/healthy
+            port: http
+            scheme: HTTP
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 3
+        readinessProbe:
+          failureThreshold: 120
+          httpGet:
+            path: /-/ready
+            port: http
+            scheme: HTTP
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 3
+        ports:
+        - containerPort: 8082
+          name: http
+        volumeMounts:
+        - mountPath: "/etc/proxeus/"
+          name: config
+          readOnly: true
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+      # container to reload configs on configmap change
+      - name: proxeus-server-configmap-reload
+        args:
+        - "--volume-dir=/etc/proxeus"
+        - "--webhook-url=http://localhost:8082/-/reload"
+        image: "{{ .Values.configmapReloader.image.repository }}:{{ .Values.configmapReloader.image.tag }}"
+        imagePullPolicy: {{ .Values.configmapReloader.image.pullPolicy }}
+        volumeMounts:
+        - mountPath: "/etc/proxeus/"
+          name: config
+          readOnly: true
+        resources:
+          requests:
+            cpu: 0.02
+            memory: 20Mi
+          limits:
+            cpu: 0.02
+            memory: 20Mi
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "chart.configname" .}}
+{{- end }}

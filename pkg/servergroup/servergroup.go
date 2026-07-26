@@ -28,29 +28,29 @@ import (
 	"github.com/prometheus/sigv4"
 	"github.com/sirupsen/logrus"
 
-	"github.com/jacksontj/promxy/pkg/logging"
-	"github.com/jacksontj/promxy/pkg/middleware"
-	"github.com/jacksontj/promxy/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/logging"
+	"github.com/pvlltvk/proxeus/pkg/middleware"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 	//	sd_config "github.com/prometheus/prometheus/discovery/config"
 )
 
 var (
 	serverGroupSummary = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "server_group_request_duration_seconds",
+		Name: "proxeus_server_group_request_duration_seconds",
 		Help: "Summary of calls to servergroup instances",
 	}, []string{"server_group", "host", "call", "status"})
 
 	serverGroupRequestErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "promxy_server_group_request_errors_total",
+		Name: "proxeus_server_group_request_errors_total",
 		Help: "Total number of failed requests to servergroup instances",
 	}, []string{"server_group", "host", "call"})
 
 	// serverGroupTargets tracks the number of targets currently discovered for
 	// each server group, so a zero-target group can be alerted on (e.g.
-	// `server_group_targets == 0`). The ordinal is guaranteed unique; the name
+	// `proxeus_server_group_targets == 0`). The ordinal is guaranteed unique; the name
 	// label is the optional, human-readable group name (empty when unset).
 	serverGroupTargets = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "server_group_targets",
+		Name: "proxeus_server_group_targets",
 		Help: "Number of targets currently discovered for a server group.",
 	}, []string{"ordinal", "name"})
 )

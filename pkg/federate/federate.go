@@ -1,4 +1,4 @@
-// Package federate provides a fast /federate handler for promxy.
+// Package federate provides a fast /federate handler for proxeus.
 //
 // It is a drop-in replacement for the vendored Prometheus federation handler
 // for the common case (text/plain exposition of float samples), avoiding the
@@ -32,7 +32,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/sirupsen/logrus"
 
-	promexpfmt "github.com/jacksontj/promxy/pkg/expfmt"
+	promexpfmt "github.com/pvlltvk/proxeus/pkg/expfmt"
 )
 
 // Handler serves /federate. Construct with New and keep external labels current

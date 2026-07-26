@@ -115,7 +115,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "histogram_quantile(0.9, sum(rate(prometheus_http_request_duration_seconds_bucket{job=\"promxy\"}[1m])) by (le, handler))",
+          "expr": "histogram_quantile(0.9, sum(rate(prometheus_http_request_duration_seconds_bucket{job=\"proxeus\"}[1m])) by (le, handler))",
           "interval": "",
           "legendFormat": "",
           "refId": "A"
@@ -209,7 +209,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "histogram_quantile(0.9, sum(rate(prometheus_http_response_size_bytes_bucket{job=\"promxy\"}[1m])) by (le, handler))",
+          "expr": "histogram_quantile(0.9, sum(rate(prometheus_http_response_size_bytes_bucket{job=\"proxeus\"}[1m])) by (le, handler))",
           "interval": "",
           "legendFormat": "",
           "refId": "A"
@@ -320,7 +320,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "prometheus_engine_queries{job=\"promxy\"}",
+          "expr": "prometheus_engine_queries{job=\"proxeus\"}",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -417,7 +417,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "sum(rate(prometheus_engine_query_duration_seconds_sum{job=\"promxy\"}[1m])) by (slice)\r\n/\r\nsum(rate(prometheus_engine_query_duration_seconds_count{job=\"promxy\"}[1m])) by (slice)",
+          "expr": "sum(rate(prometheus_engine_query_duration_seconds_sum{job=\"proxeus\"}[1m])) by (slice)\r\n/\r\nsum(rate(prometheus_engine_query_duration_seconds_count{job=\"proxeus\"}[1m])) by (slice)",
           "interval": "",
           "legendFormat": "",
           "refId": "A"
@@ -522,7 +522,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "sum(rate(server_group_request_duration_seconds_count{job=\"promxy\"}[1m])) by (call, status)",
+              "expr": "sum(rate(proxeus_server_group_request_duration_seconds_count{job=\"proxeus\"}[1m])) by (call, status)",
               "interval": "",
               "legendFormat": "{{call}}.{{status}}",
               "refId": "A"
@@ -616,7 +616,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "sum(rate(server_group_request_duration_seconds_sum{job=\"promxy\"}[1m])) by (call, status)\r\n/\r\nsum(rate(server_group_request_duration_seconds_count{job=\"promxy\"}[1m])) by (call, status)",
+              "expr": "sum(rate(proxeus_server_group_request_duration_seconds_sum{job=\"proxeus\"}[1m])) by (call, status)\r\n/\r\nsum(rate(proxeus_server_group_request_duration_seconds_count{job=\"proxeus\"}[1m])) by (call, status)",
               "interval": "",
               "legendFormat": "{{call}}.{{status}}",
               "refId": "A"
@@ -725,7 +725,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "rate(process_cpu_seconds_total{job=\"promxy\"}[1m])",
+              "expr": "rate(process_cpu_seconds_total{job=\"proxeus\"}[1m])",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -819,7 +819,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "process_open_fds{job=\"promxy\"} / process_max_fds{job=\"promxy\"}",
+              "expr": "process_open_fds{job=\"proxeus\"} / process_max_fds{job=\"proxeus\"}",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -932,14 +932,14 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "sum(rate(promxy_remote_storage_dropped_samples_total{job=\"promxy\"}[1m])) by (queue)",
+          "expr": "sum(rate(proxeus_remote_storage_dropped_samples_total{job=\"proxeus\"}[1m])) by (queue)",
           "interval": "",
           "legendFormat": "queue-full",
           "refId": "A"
         },
         {
           "exemplar": true,
-          "expr": "sum(rate(promxy_remote_storage_failed_samples_total{job=\"promxy\"}[1m])) by (queue)",
+          "expr": "sum(rate(proxeus_remote_storage_failed_samples_total{job=\"proxeus\"}[1m])) by (queue)",
           "hide": false,
           "interval": "",
           "legendFormat": "fail",
@@ -947,7 +947,7 @@
         },
         {
           "exemplar": true,
-          "expr": "sum(rate(promxy_remote_storage_succeeded_samples_total{job=\"promxy\"}[1m])) by (queue)",
+          "expr": "sum(rate(proxeus_remote_storage_succeeded_samples_total{job=\"proxeus\"}[1m])) by (queue)",
           "hide": false,
           "interval": "",
           "legendFormat": "Total",
@@ -958,7 +958,7 @@
       "timeFrom": null,
       "timeRegions": [],
       "timeShift": null,
-      "title": "Promxy remote storage queue-full / sec",
+      "title": "Proxeus remote storage queue-full / sec",
       "tooltip": {
         "shared": true,
         "sort": 0,
@@ -1042,7 +1042,7 @@
       "targets": [
         {
           "exemplar": true,
-          "expr": "histogram_quantile(0.90, sum(rate(promxy_remote_storage_sent_batch_duration_seconds_bucket{job=\"promxy\"}[1m])) by (queue, le))",
+          "expr": "histogram_quantile(0.90, sum(rate(proxeus_remote_storage_sent_batch_duration_seconds_bucket{job=\"proxeus\"}[1m])) by (queue, le))",
           "interval": "",
           "legendFormat": "",
           "refId": "A"
@@ -1147,7 +1147,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "(\r\n    sum(prometheus_notifications_queue_capacity{job=\"promxy\"}) by (pod, node)\r\n    -\r\n    sum(prometheus_notifications_queue_length{job=\"promxy\"}) by (pod, node)\r\n)\r\n/\r\nsum(prometheus_notifications_queue_capacity{job=\"promxy\"}) by (pod, node)",
+              "expr": "(\r\n    sum(prometheus_notifications_queue_capacity{job=\"proxeus\"}) by (pod, node)\r\n    -\r\n    sum(prometheus_notifications_queue_length{job=\"proxeus\"}) by (pod, node)\r\n)\r\n/\r\nsum(prometheus_notifications_queue_capacity{job=\"proxeus\"}) by (pod, node)",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -1241,7 +1241,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "sum(rate(prometheus_notifications_sent_total{job=\"promxy\"}[1m])) by (alertmanager)",
+              "expr": "sum(rate(prometheus_notifications_sent_total{job=\"proxeus\"}[1m])) by (alertmanager)",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -1335,7 +1335,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "sum(rate(prometheus_notifications_latency_seconds_sum{job=\"promxy\"}[1m])) by (alertmanager)\r\n/\r\nsum(rate(prometheus_notifications_latency_seconds_count{job=\"promxy\"}[1m])) by (alertmanager)",
+              "expr": "sum(rate(prometheus_notifications_latency_seconds_sum{job=\"proxeus\"}[1m])) by (alertmanager)\r\n/\r\nsum(rate(prometheus_notifications_latency_seconds_count{job=\"proxeus\"}[1m])) by (alertmanager)",
               "interval": "",
               "legendFormat": "{{alertmanager}}",
               "refId": "A"
@@ -1432,7 +1432,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "prometheus_notifications_alertmanagers_discovered{job=\"promxy\"}",
+              "expr": "prometheus_notifications_alertmanagers_discovered{job=\"proxeus\"}",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -1526,7 +1526,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "sum(rate(prometheus_notifications_errors_total{job=\"promxy\"}[1m])) by (alertmanager)",
+              "expr": "sum(rate(prometheus_notifications_errors_total{job=\"proxeus\"}[1m])) by (alertmanager)",
               "interval": "",
               "legendFormat": "{{alertmanager}}",
               "refId": "A"
@@ -1636,7 +1636,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "(\r\n    sum(rate(prometheus_rule_evaluations_total{job=\"promxy\"}[1m])) by (pod)\r\n    -\r\n    sum(rate(prometheus_rule_evaluation_failures_total{job=\"promxy\"}[1m])) by (pod)\r\n)\r\n/\r\nsum(rate(prometheus_rule_evaluations_total{job=\"promxy\"}[1m])) by (pod)",
+              "expr": "(\r\n    sum(rate(prometheus_rule_evaluations_total{job=\"proxeus\"}[1m])) by (pod)\r\n    -\r\n    sum(rate(prometheus_rule_evaluation_failures_total{job=\"proxeus\"}[1m])) by (pod)\r\n)\r\n/\r\nsum(rate(prometheus_rule_evaluations_total{job=\"proxeus\"}[1m])) by (pod)",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -1694,7 +1694,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "rate(prometheus_rule_evaluations_total{job=\"promxy\"}[1m])",
+              "expr": "rate(prometheus_rule_evaluations_total{job=\"proxeus\"}[1m])",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -1786,7 +1786,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "rate(prometheus_rule_evaluation_failures_total{job=\"promxy\"}[1m])",
+              "expr": "rate(prometheus_rule_evaluation_failures_total{job=\"proxeus\"}[1m])",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -1883,7 +1883,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "max(prometheus_rule_group_rules{job=\"promxy\"}) by (rule_group)",
+              "expr": "max(prometheus_rule_group_rules{job=\"proxeus\"}) by (rule_group)",
               "instant": false,
               "interval": "",
               "legendFormat": "",
@@ -1978,7 +1978,7 @@
           "targets": [
             {
               "exemplar": true,
-              "expr": "prometheus_rule_group_duration_seconds{job=\"promxy\", quantile=\"0.9\"}",
+              "expr": "prometheus_rule_group_duration_seconds{job=\"proxeus\", quantile=\"0.9\"}",
               "interval": "",
               "legendFormat": "",
               "refId": "A"
@@ -2042,7 +2042,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Promxy (WIP)",
+  "title": "Proxeus (WIP)",
   "uid": "G5TN2gdnz",
   "version": 7
 }

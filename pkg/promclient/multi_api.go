@@ -16,8 +16,8 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // Since these error types magically add in their own prefixes, we need to get

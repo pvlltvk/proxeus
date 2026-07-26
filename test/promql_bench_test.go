@@ -52,11 +52,11 @@ func BenchmarkEvaluations(b *testing.B) {
 				}
 			})
 
-			b.Run("promxy", func(b *testing.B) {
+			b.Run("proxeus", func(b *testing.B) {
 				benchProxy(b, input, rawDoublePSConfig)
 			})
 
-			b.Run("promxy_remoteread", func(b *testing.B) {
+			b.Run("proxeus_remoteread", func(b *testing.B) {
 				benchProxy(b, input, rawDoublePSConfigRR)
 			})
 		})
@@ -64,7 +64,7 @@ func BenchmarkEvaluations(b *testing.B) {
 }
 
 // benchProxy stands up two backend API servers over a shared SwappableStorage,
-// fronts them with a promxy ProxyStorage, then benchmarks the load+eval input
+// fronts them with a proxeus ProxyStorage, then benchmarks the load+eval input
 // through the proxy engine with pushdown enabled. Each iteration repoints the
 // SwappableStorage at a freshly-loaded teststorage via RunTestWithStorage's
 // newStorage hook.

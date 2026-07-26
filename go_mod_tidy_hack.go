@@ -1,4 +1,4 @@
-package promxy
+package proxeus
 
 import (
 	// import autorest directly to avoid ambiguous import

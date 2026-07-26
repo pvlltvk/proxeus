@@ -15,13 +15,13 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 
-	"github.com/jacksontj/promxy/pkg/logging"
+	"github.com/pvlltvk/proxeus/pkg/logging"
 )
 
 func CreateAndStart(bindAddr string, logFormat string, webReadTimeout time.Duration, accessLogOut io.Writer, router http.Handler, webConfigFile string) (*http.Server, error) {
 	handler := createHandler(accessLogOut, router, logFormat)
 
-	// Prior to delegating the web server to exporter-toolkit, promxy parsed
+	// Prior to delegating the web server to exporter-toolkit, proxeus parsed
 	// --web.config.file directly into web.TLSConfig, so TLS keys (cert_file,
 	// key_file, ...) lived at the top level of the file. exporter-toolkit
 	// instead expects them nested under tls_server_config. To avoid breaking
@@ -51,7 +51,7 @@ func CreateAndStart(bindAddr string, logFormat string, webReadTimeout time.Durat
 		srv.TLSConfig = legacyTLS
 		go func() {
 			logrus.Warnf("--web.config.file %q uses the deprecated flat TLS schema; nest these keys under 'tls_server_config:'. Support for the flat schema will be removed in a future release.", webConfigFile)
-			logrus.Infof("promxy starting with TLS (legacy web config %s)...", webConfigFile)
+			logrus.Infof("proxeus starting with TLS (legacy web config %s)...", webConfigFile)
 			if err := srv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
 				logrus.Errorf("Error listening: %v", err)
 			}
@@ -64,9 +64,9 @@ func CreateAndStart(bindAddr string, logFormat string, webReadTimeout time.Durat
 
 	go func() {
 		if webConfigFile == "" {
-			logrus.Infof("promxy starting with HTTP...")
+			logrus.Infof("proxeus starting with HTTP...")
 		} else {
-			logrus.Infof("promxy starting with web config %s...", webConfigFile)
+			logrus.Infof("proxeus starting with web config %s...", webConfigFile)
 		}
 		if err := web.Serve(ln, srv, flags, logger); err != nil && err != http.ErrServerClosed {
 			logrus.Errorf("Error listening: %v", err)
@@ -139,7 +139,7 @@ func createHandler(accessLogOut io.Writer, router http.Handler, logFormat string
 	return handler
 }
 
-// logrusSlogHandler forwards exporter-toolkit's slog output to logrus so promxy
+// logrusSlogHandler forwards exporter-toolkit's slog output to logrus so proxeus
 // has a single log stream.
 type logrusSlogHandler struct {
 	attrs []slog.Attr

@@ -14,8 +14,8 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
 
-	"github.com/jacksontj/promxy/pkg/promclient"
-	"github.com/jacksontj/promxy/pkg/proxyquerier"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/proxyquerier"
 )
 
 // RuleGroupFetcher defines a method to fetch []*rules.Group
@@ -94,8 +94,8 @@ type AlertBackfillQuerier struct {
 // Select will fetch and return the ALERTS_FOR_STATE series for the given matchers
 func (q *AlertBackfillQuerier) Select(ctx context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
 	// first, we call the actual downstream to see if we have the correct data
-	// this will return something if the remote_write from promxy has been saved
-	// somewhere where promxy is also configured to read from
+	// this will return something if the remote_write from proxeus has been saved
+	// somewhere where proxeus is also configured to read from
 	querier, err := q.q.Querier(q.mint, q.maxt)
 	if err != nil {
 		return proxyquerier.NewSeriesSet(nil, nil, err)

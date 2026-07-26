@@ -29,8 +29,8 @@ import (
 
 	"github.com/prometheus/prometheus/promql/parser"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
-	"github.com/jacksontj/promxy/pkg/proxystorage"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/proxystorage"
 )
 
 func init() {
@@ -44,7 +44,7 @@ func init() {
 // dynamically per subtest so concurrent / back-to-back tests don't collide on
 // the same TCP port (TIME_WAIT, OS bind races).
 const rawPSConfig = `
-promxy:
+proxeus:
   http_client:
     tls_config:
       insecure_skip_verify: true
@@ -55,7 +55,7 @@ promxy:
 `
 
 const rawPSRemoteReadConfig = `
-promxy:
+proxeus:
   server_groups:
     - static_configs:
         - targets:
@@ -67,7 +67,7 @@ promxy:
 `
 
 const rawDoublePSConfig = `
-promxy:
+proxeus:
   server_groups:
     - static_configs:
         - targets:
@@ -82,7 +82,7 @@ promxy:
 `
 
 const rawDoublePSConfigRR = `
-promxy:
+proxeus:
   server_groups:
     - static_configs:
         - targets:
@@ -99,7 +99,7 @@ promxy:
 `
 
 func getProxyStorage(cfg string) *proxystorage.ProxyStorage {
-	// Create promxy in front of it
+	// Create proxeus in front of it
 	pstorageConfig := &proxyconfig.Config{}
 	if err := yaml.Unmarshal([]byte(cfg), &pstorageConfig); err != nil {
 		panic(err)
@@ -212,7 +212,7 @@ func TestUpstreamEvaluations(t *testing.T) {
 			// from the same memory-balooning problems that the HTTP+JSON API originally had.
 			// It has **less** of a problem (its 2x memory instead of 14x) so it is a viable option.
 			// Even on remote_read mode, the range-eval fan-out emits an extra
-			// {__name__="metric"} sample at the boundary that promxy's merge
+			// {__name__="metric"} sample at the boundary that proxeus's merge
 			// can't dedupe; revisit when working through staleness handling.
 			if strings.Contains(fn, "staleness.test") {
 				continue
@@ -228,19 +228,19 @@ func TestUpstreamEvaluations(t *testing.T) {
 				continue
 			}
 
-			// Skip test files that exercise upstream prom features promxy
+			// Skip test files that exercise upstream prom features proxeus
 			// doesn't yet support proxying. Re-enable these once the
-			// corresponding promxy gaps are filled.
+			// corresponding proxeus gaps are filled.
 			switch base {
 			case
 				// __name__-label propagation through aggregations: 3.x's
-				// EnableDelayedNameRemoval behavior interacts with promxy's
+				// EnableDelayedNameRemoval behavior interacts with proxeus's
 				// metricNameWorkaroundLabel rewrite in ways the rewrite
 				// doesn't currently model.
 				"name_label_dropping.test",
 				// New 3.x experimental duration-expression syntax.
 				"duration_expression.test",
-				// 3.x __type__ / __unit__ labels from OTLP — promxy's
+				// 3.x __type__ / __unit__ labels from OTLP — proxeus's
 				// rewrite paths don't preserve them yet.
 				"type_and_unit.test",
 				// aggregators.test: count_values with parenthesised string
@@ -251,7 +251,7 @@ func TestUpstreamEvaluations(t *testing.T) {
 				// comparison ordering after delayed name removal) that the
 				// proxy rewrite doesn't yet handle.
 				"operators.test",
-				// subquery.test: promxy disables the rewrite for
+				// subquery.test: proxeus disables the rewrite for
 				// subquery descendants, so the proxy path falls back on raw
 				// Querier-based eval; some cases miss data.
 				"subquery.test",
@@ -260,7 +260,7 @@ func TestUpstreamEvaluations(t *testing.T) {
 				// [iq.evalTime - 1m, iq.evalTime + 1m] starting at -59.2s,
 				// which trips the upstream prometheus/common
 				// model.Time.UnmarshalJSON bug: "-59.200" decodes to
-				// Time(-58800) instead of Time(-59200). Promxy now
+				// Time(-58800) instead of Time(-59200). Proxeus now
 				// returns an explicit error for pre-epoch sub-second
 				// timestamps in pushdown rather than silently producing
 				// shifted data; the test framework propagates that error
@@ -273,7 +273,7 @@ func TestUpstreamEvaluations(t *testing.T) {
 				// limit_ratio) that we enable via
 				// parser.EnableExperimentalFunctions in init(). Enabling
 				// the flag also lets the rest of these files parse, which
-				// reveals ~80 pre-existing promxy bugs in proxying
+				// reveals ~80 pre-existing proxeus bugs in proxying
 				// non-histogram functions (resets, changes, irate,
 				// label_join, delta, clamp, sum_over_time, etc.) that are
 				// unrelated to native histogram support. Tracked
@@ -357,7 +357,7 @@ func TestEvaluations(t *testing.T) {
 }
 
 // runProxyTest loads a .test file, stands up nServers backend API servers over
-// a shared test storage, wires a promxy ProxyStorage in front (psConfig takes
+// a shared test storage, wires a proxeus ProxyStorage in front (psConfig takes
 // nServers address args), and runs the file's eval assertions through the proxy
 // engine with pushdown (NodeReplacer) enabled.
 //
@@ -368,7 +368,7 @@ func TestEvaluations(t *testing.T) {
 func runProxyTest(t *testing.T, fn, psConfig string, nServers int) {
 	content, err := os.ReadFile(fn)
 	if err != nil {
-		t.Skipf("error reading test %s: %s (likely uses syntax not supported by promxy)", fn, err)
+		t.Skipf("error reading test %s: %s (likely uses syntax not supported by proxeus)", fn, err)
 	}
 
 	eng := promqltest.NewTestEngine(t, false, 0, 50000000)

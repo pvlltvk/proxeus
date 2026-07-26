@@ -1,4 +1,4 @@
-module github.com/jacksontj/promxy
+module github.com/pvlltvk/proxeus
 
 go 1.25.0
 
@@ -233,7 +233,7 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 
-replace github.com/prometheus/prometheus => /home/pvlltvk/Work/various/prometheus-slim
+replace github.com/prometheus/prometheus => github.com/pvlltvk/proxeus-prometheus v0.305.0-proxeus.1
 
 replace github.com/golang/glog => github.com/kubermatic/glog-gokit v0.0.0-20181129151237-8ab7e4c2d352
 

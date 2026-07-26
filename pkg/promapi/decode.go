@@ -22,7 +22,7 @@ import (
 
 // annotationPosSuffix matches the " (line:col)" suffix that upstream's
 // annotations.AsStrings appends to formatted annotation messages. The position
-// refers to the upstream query's text, which is meaningless to promxy's callers
+// refers to the upstream query's text, which is meaningless to proxeus's callers
 // (we never round-trip the original query string). Stripping it also lets the
 // upstream promql test framework match expected warning text exactly.
 var annotationPosSuffix = regexp.MustCompile(` \(\d+:\d+\)$`)
@@ -33,7 +33,7 @@ var annotationPosSuffix = regexp.MustCompile(` \(\d+:\d+\)$`)
 // "PromQL info: "; we detect the prefix and re-wrap with the matching sentinel
 // so consumers can classify info-vs-warning via errors.Is. The trailing
 // " (line:col)" position suffix is stripped — it points into the downstream's
-// query text, which promxy never round-trips.
+// query text, which proxeus never round-trips.
 func toAnnotationError(s string) error {
 	s = annotationPosSuffix.ReplaceAllString(s, "")
 	if rest, ok := strings.CutPrefix(s, "PromQL warning: "); ok {
@@ -119,7 +119,7 @@ func NewSeries(lbls labels.Labels, samples []chunks.Sample) storage.Series {
 }
 
 // SeriesSet is a minimal in-memory storage.SeriesSet carrying series, warnings
-// and an error. It is the one reusable list-SeriesSet for promxy.
+// and an error. It is the one reusable list-SeriesSet for proxeus.
 //
 // TODO(seriesset-refactor): pkg/proxyquerier has an identical type; once the
 // query path returns this directly, delete proxyquerier's copy and use this.
@@ -332,7 +332,7 @@ func decodeHistogramPair(iter *jsoniter.Iterator) (int64, *histogram.FloatHistog
 // (flat bucket list) to a histogram.FloatHistogram. JSON-sourced histograms
 // carry no original FloatHistogram, so this is a best-effort reconstruction as
 // a custom-buckets histogram (Schema=-53); empty buckets are not preserved by
-// the JSON form. (promxy's remote_read path keeps full fidelity separately.)
+// the JSON form. (proxeus's remote_read path keeps full fidelity separately.)
 func sampleHistogramToFloatHistogram(sh *model.SampleHistogram) *histogram.FloatHistogram {
 	if sh == nil {
 		return nil
@@ -361,7 +361,7 @@ func sampleHistogramToFloatHistogram(sh *model.SampleHistogram) *histogram.Float
 }
 
 // FloatSample and HistogramSample expose the package's chunks.Sample
-// implementations so other packages (e.g. promxy's HA merge) can build
+// implementations so other packages (e.g. proxeus's HA merge) can build
 // storage.Series without re-deriving sample types.
 func FloatSample(t int64, v float64) chunks.Sample { return floatSample{t, v} }
 

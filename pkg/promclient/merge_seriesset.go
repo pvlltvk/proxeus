@@ -10,11 +10,11 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/util/annotations"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
-// This adapts promxy's HA anti-affinity merge to storage.SeriesSet. Rather than
+// This adapts proxeus's HA anti-affinity merge to storage.SeriesSet. Rather than
 // re-derive the (subtle, heavily-tested) anti-affinity logic, it reuses
 // promhttputil.MergeSampleStream verbatim by converting each same-labeled
 // series to a model.SampleStream, folding, and converting back. Histograms
@@ -167,7 +167,7 @@ func sortedSeriesSet(ss storage.SeriesSet) storage.SeriesSet {
 }
 
 // MergeSeriesSets merges HA-member SeriesSets with anti-affinity dedup,
-// preserving promxy's existing merge semantics. When dynamic is true the
+// preserving proxeus's existing merge semantics. When dynamic is true the
 // anti-affinity buffer is inferred per series from inter-sample spacing (with
 // antiAffinity as the fallback); see promhttputil.MergeSampleStream and #734.
 func MergeSeriesSets(antiAffinity model.Time, dynamic bool, preferMax bool, sets ...storage.SeriesSet) storage.SeriesSet {

@@ -8,7 +8,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/annotations"
 
-	"github.com/jacksontj/promxy/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
 )
 
 func TestMapErrSeriesSet(t *testing.T) {

@@ -218,8 +218,8 @@ load 1m
 
 	extCases := map[string]labels.Labels{
 		"none":              labels.EmptyLabels(),
-		"source_only":       labels.FromStrings("source", "promxy"),
-		"with_instance":     labels.FromStrings("source", "promxy", "instance", "fed-1"),
+		"source_only":       labels.FromStrings("source", "proxeus"),
+		"with_instance":     labels.FromStrings("source", "proxeus", "instance", "fed-1"),
 		"collide_with_code": labels.FromStrings("code", "EXT", "region", "us"),
 	}
 	matchCases := []string{

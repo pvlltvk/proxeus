@@ -1,6 +1,10 @@
 MIT License
 
 Copyright (c) 2017 Thomas Jackson
+Copyright (c) 2026 Pavel Litvyak
+
+This project (proxeus) is a fork of promxy (https://github.com/jacksontj/promxy),
+originally authored by Thomas Jackson and licensed under the MIT License below.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

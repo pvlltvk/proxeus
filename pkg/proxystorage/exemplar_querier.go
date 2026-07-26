@@ -9,12 +9,12 @@ import (
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/jacksontj/promxy/pkg/promclient"
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // proxyExemplarQuerier implements storage.ExemplarQuerier on top of
-// promxy's promclient.API. The upstream queryExemplars HTTP handler parses
+// proxeus's promclient.API. The upstream queryExemplars HTTP handler parses
 // the `query` form param, extracts every vector selector via
 // parser.ExtractSelectors, and hands the resulting matcher sets to us as
 // the variadic argument to Select. We turn each matcher set back into a

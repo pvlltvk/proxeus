@@ -33,22 +33,22 @@ import (
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/sirupsen/logrus"
 
-	"github.com/jacksontj/promxy/pkg/logging"
+	"github.com/pvlltvk/proxeus/pkg/logging"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
-	"github.com/jacksontj/promxy/pkg/promapi"
-	"github.com/jacksontj/promxy/pkg/promclient"
-	"github.com/jacksontj/promxy/pkg/proxyquerier"
-	"github.com/jacksontj/promxy/pkg/servergroup"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/proxyquerier"
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
-// noopScrapeManager satisfies remote.ReadyScrapeManager for promxy, which has
+// noopScrapeManager satisfies remote.ReadyScrapeManager for proxeus, which has
 // no local scrape manager. Returning an error here causes upstream's
 // remote_write to skip metadata sending, which is the behavior we want.
 type noopScrapeManager struct{}
 
 func (noopScrapeManager) Get() (*scrape.Manager, error) {
-	return nil, errors.New("promxy has no scrape manager")
+	return nil, errors.New("proxeus has no scrape manager")
 }
 
 // metricNameWorkaroundLabel is a workaround from https://github.com/jacksontj/promxy/issues/274
@@ -147,7 +147,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	// This is mandatory when cross_group_dedup is on (dedup uses these labels for
 	// series identity — a collision would silently merge unrelated series). With
 	// dedup off it's only a hygiene concern (ambiguous provenance), so we warn
-	// rather than refuse to start, preserving historical promxy behavior.
+	// rather than refuse to start, preserving historical proxeus behavior.
 	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
 		if c.CrossGroupDedup {
 			return err
@@ -230,7 +230,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 			walDir := p.localStoragePath
 			ephemeral := walDir == ""
 			if ephemeral {
-				dir, err := os.MkdirTemp("", "promxy-remote-wal-")
+				dir, err := os.MkdirTemp("", "proxeus-remote-wal-")
 				if err != nil {
 					return fmt.Errorf("creating remote_write WAL dir: %w", err)
 				}
@@ -245,7 +245,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 				1*time.Second,
 				noopScrapeManager{},
 			)
-			// promxy has no local TSDB writing a WAL, so remote.Storage's queue
+			// proxeus has no local TSDB writing a WAL, so remote.Storage's queue
 			// managers have nothing to tail. Run an agent-mode WAL-only DB whose
 			// appender writes the WAL that those queue managers consume. Without
 			// this the WAL watcher fails with "error tailing WAL ... no such file
@@ -377,7 +377,7 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// WalReplayHandler implements /api/v1/status/walreplay. Promxy has no WAL,
+// WalReplayHandler implements /api/v1/status/walreplay. Proxeus has no WAL,
 // so it reports a steady "fully replayed" state to keep Grafana's health
 // checks quiet. Without this override, upstream's handler returns HTTP 500
 // with a malformed double-JSON body.
@@ -390,10 +390,10 @@ func (p *ProxyStorage) WalReplayHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // FlagsHandler implements /api/v1/status/flags. Upstream's handler returns
-// promxy's Go struct field names (e.g. `BindAddr`, `RoutePrefix`) instead of
+// proxeus's Go struct field names (e.g. `BindAddr`, `RoutePrefix`) instead of
 // Prometheus' dotted CLI names (`web.listen-address`, `web.route-prefix`),
 // which breaks any client that probes flags to detect server capabilities.
-// Promxy is not a Prometheus server, so we return an empty data object —
+// Proxeus is not a Prometheus server, so we return an empty data object —
 // honest about the absence rather than misleading about its shape.
 func (p *ProxyStorage) FlagsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -411,7 +411,7 @@ func (p *ProxyStorage) Querier(mint, maxt int64) (storage.Querier, error) {
 		End:    timestamp.Time(maxt).UTC(),
 		Client: state.client,
 
-		Cfg: &state.cfg.PromxyConfig,
+		Cfg: &state.cfg.ProxeusConfig,
 	}, nil
 }
 
@@ -1319,7 +1319,7 @@ func validateUniqueServerGroupLabels(groups []*servergroup.Config) error {
 
 // fillStaleNaNGaps inserts StaleNaN markers at the step timestamps where the
 // downstream's range response did not include a sample. We need this because
-// promxy substitutes a *parser.Call (e.g. present_over_time, last_over_time)
+// proxeus substitutes a *parser.Call (e.g. present_over_time, last_over_time)
 // with a synthetic VectorSelector whose UnexpandedSeriesSet exposes the
 // downstream-computed samples. When the engine re-evaluates that VectorSelector
 // it uses the engine-wide lookback (default 5m) to find samples — even though

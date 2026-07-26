@@ -1,0 +1,136 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxeus
+  namespace: proxeus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxeus-role
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxeus-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxeus-role
+subjects:
+- kind: ServiceAccount
+  name: proxeus
+  namespace: proxeus
+---
+apiVersion: v1
+data:
+  config.yaml: |
+    ##
+    ## Regular prometheus configuration
+    ##
+    global:
+      evaluation_interval: 5s
+      external_labels:
+        source: proxeus
+
+    # remote_write configuration is used by proxeus as its local Appender, meaning all
+    # metrics proxeus would "write" (not export) would be sent to this. Examples
+    # of this include: recording rules, metrics on alerting rules, etc.
+    remote_write:
+      - url: http://localhost:8083/receive
+
+    ##
+    ### Proxeus configuration
+    ##
+    proxeus:
+      server_groups:
+      - kubernetes_sd_configs:
+        - role: pod
+
+kind: ConfigMap
+metadata:
+  name: proxeus-config
+  namespace: proxeus
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: proxeus
+  name: proxeus
+  namespace: proxeus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxeus
+  template:
+    metadata:
+      labels:
+        app: proxeus
+    spec:
+      terminationGracePeriodSeconds: 5
+      serviceAccountName: proxeus
+      containers:
+      - args:
+        - "--config=/etc/proxeus/config.yaml"
+        - "--web.enable-lifecycle"
+        - "--log-level=trace"
+        env:
+          - name: ROLE
+            value: "1"
+        command:
+        - "/bin/proxeus"
+        image: ghcr.io/pvlltvk/proxeus:v0.0.77
+        imagePullPolicy: Always
+        name: proxeus
+        livenessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /-/healthy
+            port: web
+            scheme: HTTP
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 3
+        readinessProbe:
+          failureThreshold: 120
+          httpGet:
+            path: /-/ready
+            port: web
+            scheme: HTTP
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 3
+        ports:
+        - containerPort: 8082
+          name: web
+        volumeMounts:
+        - mountPath: "/etc/proxeus/"
+          name: proxeus-config
+          readOnly: true
+      # container to reload configs on configmap change
+      - args:
+        - "--volume-dir=/etc/proxeus"
+        - "--webhook-url=http://localhost:8082/-/reload"
+        image: jimmidyson/configmap-reload:v0.1
+        name: proxeus-server-configmap-reload
+        volumeMounts:
+        - mountPath: "/etc/proxeus/"
+          name: proxeus-config
+          readOnly: true
+      volumes:
+      - configMap:
+          name: proxeus-config
+        name: proxeus-config

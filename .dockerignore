@@ -1,7 +1,7 @@
 .git
 deploy
 build
-cmd/promxy/promxy
+cmd/proxeus/proxeus
 cmd/remote_write_exporter/remote_write_exporter
 .playwright-mcp
 *.png

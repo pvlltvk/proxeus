@@ -14,13 +14,13 @@ import (
 	"github.com/prometheus/prometheus/storage/remote"
 	yaml "gopkg.in/yaml.v2"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
-	"github.com/jacksontj/promxy/pkg/proxystorage"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/proxystorage"
 )
 
 // rwReceiver is a minimal remote_write endpoint that decodes incoming
 // (snappy-compressed protobuf) write requests and records the samples it sees,
-// keyed by series. It is used to assert that promxy actually ships samples
+// keyed by series. It is used to assert that proxeus actually ships samples
 // end-to-end over the remote_write path (regression for issue #771).
 type rwReceiver struct {
 	mu      sync.Mutex
@@ -67,7 +67,7 @@ func (r *rwReceiver) valuesFor(lbls labels.Labels) []float64 {
 	return out
 }
 
-// rawRemoteWriteConfig points promxy's remote_write at the receiver and tunes
+// rawRemoteWriteConfig points proxeus's remote_write at the receiver and tunes
 // the queue so samples flush quickly (the default batch_send_deadline is 5s).
 // It intentionally has no server_groups -- this exercises the remote_write
 // (appender/WAL) path in isolation.
@@ -82,9 +82,9 @@ remote_write:
 `
 
 // TestRemoteWriteEndToEnd is an end-to-end regression test for issue #771: with
-// remote_write configured, samples appended through promxy's storage (as the
+// remote_write configured, samples appended through proxeus's storage (as the
 // rule manager does) must actually be shipped to the remote endpoint. Before the
-// fix promxy never wrote a WAL for the queue managers to tail, so the watcher
+// fix proxeus never wrote a WAL for the queue managers to tail, so the watcher
 // errored every tick and zero samples were ever delivered.
 func TestRemoteWriteEndToEnd(t *testing.T) {
 	recv := newRWReceiver()
@@ -105,7 +105,7 @@ func TestRemoteWriteEndToEnd(t *testing.T) {
 	}
 	defer ps.GetState().Cancel(nil)
 
-	series := labels.FromStrings(labels.MetricName, "promxy_e2e_metric", "src", "issue771")
+	series := labels.FromStrings(labels.MetricName, "proxeus_e2e_metric", "src", "issue771")
 
 	// The WAL watcher only ships samples with a timestamp newer than when it
 	// started, and a single write notification can race and be dropped (falling

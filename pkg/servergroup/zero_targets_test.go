@@ -45,7 +45,7 @@ func TestGroupIdentifier(t *testing.T) {
 }
 
 // TestServerGroupTargetsMetric verifies that loadTargetGroupMap publishes the
-// discovered target count to the server_group_targets gauge, so a zero-target
+// discovered target count to the proxeus_server_group_targets gauge, so a zero-target
 // group (issue #742) can be alerted on.
 func TestServerGroupTargetsMetric(t *testing.T) {
 	tests := []struct {
@@ -88,7 +88,7 @@ func TestServerGroupTargetsMetric(t *testing.T) {
 
 			gauge := serverGroupTargets.WithLabelValues(strconv.Itoa(tt.ordinal), tt.groupName)
 			if got := testutil.ToFloat64(gauge); got != tt.want {
-				t.Fatalf("server_group_targets{ordinal=%d,name=%q} = %v, want %v", tt.ordinal, tt.groupName, got, tt.want)
+				t.Fatalf("proxeus_server_group_targets{ordinal=%d,name=%q} = %v, want %v", tt.ordinal, tt.groupName, got, tt.want)
 			}
 		})
 	}

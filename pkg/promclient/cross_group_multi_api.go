@@ -7,7 +7,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/storage"
 
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // drainToMatrix materializes ss into a model.Matrix, one *model.SampleStream
@@ -87,7 +87,7 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	// needs (bare `sum(up)` leaves only the external labels, which dedup
 	// ignores) — deduping them silently drops whole backends. NOTE: this means
 	// aggregates over series that exist in MULTIPLE groups are combined, not
-	// deduped (same as promxy without cross_group_dedup); only raw selector
+	// deduped (same as proxeus without cross_group_dedup); only raw selector
 	// results get cross-group dedup.
 	defaultMerge := m.seriesSetMergeFn
 

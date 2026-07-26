@@ -10,9 +10,9 @@ import (
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/sirupsen/logrus"
 
-	proxyconfig "github.com/jacksontj/promxy/pkg/config"
-	"github.com/jacksontj/promxy/pkg/promclient"
-	"github.com/jacksontj/promxy/pkg/promhttputil"
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // ProxyQuerier Implements prometheus' Querier interface
@@ -21,7 +21,7 @@ type ProxyQuerier struct {
 	End    time.Time
 	Client promclient.API
 
-	Cfg *proxyconfig.PromxyConfig
+	Cfg *proxyconfig.ProxeusConfig
 }
 
 // Select returns a set of series that matches the given label matchers.

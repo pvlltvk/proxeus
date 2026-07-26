@@ -6,7 +6,7 @@ import (
 
 	"github.com/prometheus/common/model"
 
-	"github.com/jacksontj/promxy/pkg/servergroup"
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
 func TestValidateUniqueServerGroupLabels(t *testing.T) {

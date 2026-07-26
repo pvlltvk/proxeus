@@ -31,7 +31,7 @@ var warningPrefixes = []struct {
 // annotationPosSuffix matches the " (line:col)" suffix that upstream's
 // annotations.AsStrings appends to formatted annotation messages. The
 // position refers to the upstream query's text, which is meaningless to
-// promxy's callers (we never round-trip the original query string).
+// proxeus's callers (we never round-trip the original query string).
 // Stripping it also lets the upstream promql test framework match
 // expected warning text exactly.
 var annotationPosSuffix = regexp.MustCompile(` \(\d+:\d+\)$`)

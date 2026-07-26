@@ -19,15 +19,15 @@ import (
 // Metrics
 var (
 	syncCount = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "promxy_label_filter_sync_count_total",
-		Help: "How many syncs completed from a promxy label_filter, partitioned by success",
+		Name: "proxeus_label_filter_sync_count_total",
+		Help: "How many syncs completed from a proxeus label_filter, partitioned by success",
 	}, []string{"status"})
 	syncSummary = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "promxy_label_filter_sync_duration_seconds",
-		Help: "Latency of sync process from a promxy label_fitler",
+		Name: "proxeus_label_filter_sync_duration_seconds",
+		Help: "Latency of sync process from a proxeus label_fitler",
 	}, []string{"status"})
 	filteredCount = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "promxy_label_filter_filtered_count_total",
+		Name: "proxeus_label_filter_filtered_count_total",
 		Help: "How many requests have been filtered from the downstream,, partitioned by query type",
 	}, []string{"type"})
 )
