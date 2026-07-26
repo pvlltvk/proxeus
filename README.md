@@ -111,6 +111,15 @@ Grafana Mimir takes with `grafana/mimir-prometheus`.
 single backend could evaluate. Proxeus has no local TSDB, so rule output needs a `remote_write` target defined in the
 config; that is where the resulting series are written.
 
+> **In containers:** `remote_write` needs a writable directory for its WAL. The published image is built `FROM scratch`
+> and runs as `nobody`, so there is nothing writable by default — pass `--storage.path` pointed at a mounted volume:
+> ```sh
+> docker run -p 8082:8082 --tmpfs /data:rw,mode=1777 \
+>   -v $PWD/config.yaml:/etc/proxeus/config.yaml:ro \
+>   ghcr.io/pvlltvk/proxeus:latest --config=/etc/proxeus/config.yaml --storage.path=/data
+> ```
+> Without `remote_write` configured, no storage path is needed.
+
 **Query performance** targets the slowest backend in the fan-out. Pushdown keeps aggregate queries from dragging raw
 series across the network.
 
