@@ -95,7 +95,7 @@ Aggregation pushdown needs a hook inside the PromQL engine that upstream Prometh
 depends on a patched fork, pinned in `go.mod`:
 
 ```
-replace github.com/prometheus/prometheus => github.com/pvlltvk/proxeus-prometheus v0.305.0-proxeus.1
+replace github.com/prometheus/prometheus => github.com/pvlltvk/proxeus-prometheus v0.305.0-proxeus.2
 ```
 
 The patch and its rebase procedure are documented in

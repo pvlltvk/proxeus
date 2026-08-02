@@ -9,10 +9,12 @@ on:
 
 jobs:
   build:
+    name: Build & Push Image
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      security-events: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -29,6 +31,7 @@ jobs:
         run: 'echo ${{ steps.buildx.outputs.platforms }}'
       - name: Run Buildx
         run: |
+          echo "IMAGE_TAG=ghcr.io/pvlltvk/proxeus:${GITHUB_REF_NAME//main/latest}" >> "$GITHUB_ENV"
           docker buildx build \
             --platform linux/amd64,linux/386,linux/arm/v7,linux/arm64 \
             --build-arg VERSION="${GITHUB_REF_NAME}" \
@@ -37,3 +40,17 @@ jobs:
             --build-arg BUILD_USER="github-actions" \
             --build-arg BUILD_DATE="$(date -u +%Y%m%d-%T)" \
             --push -t ghcr.io/pvlltvk/proxeus:${GITHUB_REF_NAME//main/latest} .
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: '${{ env.IMAGE_TAG }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Upload scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
