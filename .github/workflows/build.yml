@@ -42,7 +42,7 @@ jobs:
             --push -t ghcr.io/pvlltvk/proxeus:${GITHUB_REF_NAME//main/latest} .
 
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: '${{ env.IMAGE_TAG }}'
           format: 'sarif'
