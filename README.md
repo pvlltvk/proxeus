@@ -129,6 +129,20 @@ series across the network.
 [`deploy/grafana/proxeus-dashboard.json`](deploy/grafana/proxeus-dashboard.json) — per-backend request rate, latency and
 errors, `proxeus_server_group_targets` (alert on `== 0`), and cross-group dedup collisions.
 
+**Pushdown metrics** show how much of a query the backends answer, and how much proxeus drags across the network:
+
+- `proxeus_pushdown_nodes_total{node,result,reason}` — one PromQL AST node decision per increment. `result` is
+  `pushed` or `fallback`; `reason` names the branch that gave up (`multi_vector_selector`, `nested_aggregate`,
+  `histogram`, `lossy_histogram`, `non_reentrant_agg`, ...) and is empty for `pushed`.
+- `proxeus_raw_series_fetches_total` — fetches of raw series for local evaluation, i.e. the queries pushdown could not
+  help with. Rising while the `pushed` rate stays flat means a dashboard query has left the fast path.
+- `proxeus_backend_series_total{path}` and `proxeus_backend_samples_total{path}` — volume read from the backends,
+  split into `pushdown` and `raw`.
+
+> A `fallback` is not a failure — plenty of queries (`stddev`, vector-to-vector binaries, native histograms) can only
+> be evaluated centrally. The number to watch is the *sample volume* on the `raw` path, since that is what a long
+> range query actually costs.
+
 ## Relationship to promxy
 
 Proxeus is a hard fork of [promxy](https://github.com/jacksontj/promxy) by Thomas Jackson, and owes it the core
