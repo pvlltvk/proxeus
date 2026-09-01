@@ -139,13 +139,13 @@ JSON straight to the client, so it costs almost nothing per sample and never mat
 
 ```sh
 make fakeprom
-./build/fakeprom --listen=:9090 --series=100000 --instance=0 --overlap=0.5
-./build/fakeprom --listen=:9091 --series=100000 --instance=1 --overlap=0.5
+./build/fakeprom --bind-addr=:9090 --series=100000 --instance=0 --overlap=0.5
+./build/fakeprom --bind-addr=:9091 --series=100000 --instance=1 --overlap=0.5
 ```
 
 | flag | meaning | default |
 | --- | --- | --- |
-| `--listen` | address to listen on | `:9090` |
+| `--bind-addr` | address to listen on | `:9090` |
 | `--series` | cardinality: how many series every query returns | `1000` |
 | `--instance` | id of this backend, see overlap below | `0` |
 | `--overlap` | fraction of the series shared with the other instances | `0` |

@@ -16,7 +16,7 @@ import (
 )
 
 var opts struct {
-	Listen              string        `long:"listen" description:"address to listen on" default:":9090"`
+	BindAddr            string        `long:"bind-addr" description:"address to listen on" default:":9090"`
 	Series              int           `long:"series" description:"number of series to serve" default:"1000"`
 	Instance            int           `long:"instance" description:"id of this backend; only the non-shared series differ between instances" default:"0"`
 	Overlap             float64       `long:"overlap" description:"fraction of series that is identical across instances" default:"0"`
@@ -46,8 +46,8 @@ func main() {
 		MaxSamplesPerSeries: opts.MaxSamplesPerSeries,
 	})
 
-	logrus.Infof("fakeprom listening on %s: %d series, instance %d, overlap %v", opts.Listen, opts.Series, opts.Instance, opts.Overlap)
-	if err := http.ListenAndServe(opts.Listen, handler); err != nil {
+	logrus.Infof("fakeprom listening on %s: %d series, instance %d, overlap %v", opts.BindAddr, opts.Series, opts.Instance, opts.Overlap)
+	if err := http.ListenAndServe(opts.BindAddr, handler); err != nil {
 		logrus.Fatalf("Error serving: %v", err)
 	}
 }
