@@ -72,8 +72,10 @@ var rawSeriesFetches = promauto.NewCounter(
 // split by how it was requested: "pushdown" for the NodeReplacer query path,
 // "raw" for the local-evaluation fetch path. They are counted as the response
 // is drained, so a set the engine abandons half-way is only counted up to
-// where it was read. Metadata endpoints (/api/v1/series and friends) are not
-// counted — they carry no samples.
+// where it was read. Samples are banked per series rather than per sample (see
+// countingIterator), so an abandoned *last* series may not be counted at all.
+// Metadata endpoints (/api/v1/series and friends) are not counted — they carry
+// no samples.
 var (
 	backendSeries = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -178,14 +180,22 @@ func countSeriesSet(ss storage.SeriesSet, path string) storage.SeriesSet {
 }
 
 // countingSeriesSet counts series and samples as the set is drained. It
-// buffers nothing: every method forwards and bumps a counter on the way.
+// buffers no data: every method forwards and bumps a counter on the way. The
+// sample counter is only touched at series boundaries — see countingIterator.
 type countingSeriesSet struct {
 	storage.SeriesSet
 	series  prometheus.Counter
 	samples prometheus.Counter
+	// last is the most recent iterator handed out, so a consumer that moves
+	// on to the next series without exhausting the current one still gets its
+	// samples banked.
+	last *countingIterator
 }
 
 func (s *countingSeriesSet) Next() bool {
+	if s.last != nil {
+		s.last.flush()
+	}
 	ok := s.SeriesSet.Next()
 	if ok {
 		s.series.Inc()
@@ -194,29 +204,39 @@ func (s *countingSeriesSet) Next() bool {
 }
 
 func (s *countingSeriesSet) At() storage.Series {
-	return &countingSeries{Series: s.SeriesSet.At(), samples: s.samples}
+	return &countingSeries{Series: s.SeriesSet.At(), set: s}
 }
 
 type countingSeries struct {
 	storage.Series
-	samples prometheus.Counter
+	set *countingSeriesSet
 }
 
 func (s *countingSeries) Iterator(it chunkenc.Iterator) chunkenc.Iterator {
 	c, ok := it.(*countingIterator)
-	if !ok {
+	if ok {
+		// Handed back for reuse, so the caller is done with it: bank
+		// whatever it still holds before it's pointed at another series.
+		c.flush()
+	} else {
 		// Keep the caller's reuse hint, just re-wrapped.
 		c = &countingIterator{Iterator: it}
 	}
 	c.Iterator = s.Series.Iterator(c.Iterator)
-	c.samples = s.samples
+	c.samples = s.set.samples
 	c.lastT = math.MinInt64
+	s.set.last = c
 	return c
 }
 
 type countingIterator struct {
 	chunkenc.Iterator
 	samples prometheus.Counter
+	// n accumulates the samples seen since the last flush. Counting into a
+	// plain int and adding once per series keeps the shared counter's cache
+	// line off the per-sample read path, where a long range query over raw
+	// series would otherwise contend it across every concurrent query.
+	n int64
 	// lastT is the timestamp of the last counted sample. The engine seeks
 	// forward once per step, which can land on the same sample repeatedly;
 	// counting by timestamp keeps those from counting twice.
@@ -232,11 +252,20 @@ func (i *countingIterator) Seek(t int64) chunkenc.ValueType {
 }
 
 func (i *countingIterator) count(vt chunkenc.ValueType) chunkenc.ValueType {
-	if vt != chunkenc.ValNone {
-		if t := i.AtT(); t != i.lastT {
-			i.lastT = t
-			i.samples.Inc()
-		}
+	if vt == chunkenc.ValNone {
+		i.flush()
+		return vt
+	}
+	if t := i.AtT(); t != i.lastT {
+		i.lastT = t
+		i.n++
 	}
 	return vt
+}
+
+func (i *countingIterator) flush() {
+	if i.n > 0 {
+		i.samples.Add(float64(i.n))
+		i.n = 0
+	}
 }

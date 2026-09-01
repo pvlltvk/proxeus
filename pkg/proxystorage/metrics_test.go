@@ -2,6 +2,7 @@ package proxystorage
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -226,5 +227,77 @@ func TestCountingIteratorSeek(t *testing.T) {
 	// Seeks land on 1000, 1000, 1000, 2000, 3000, none -> 3 distinct samples.
 	if got := deltas()[0]; got != 3 {
 		t.Fatalf("samples counted: got %v, want 3", got)
+	}
+}
+
+// seriesSetOf builds a set whose i-th series carries lengths[i] samples, one
+// per second.
+func seriesSetOf(lengths ...int) storage.SeriesSet {
+	var out []storage.Series
+	for i, n := range lengths {
+		samples := make([]chunks.Sample, n)
+		for j := range samples {
+			samples[j] = promapi.FloatSample(int64(j+1)*1000, float64(j))
+		}
+		out = append(out, promapi.NewSeries(
+			labels.FromStrings(model.MetricNameLabel, "foo", "instance", strconv.Itoa(i)), samples))
+	}
+	return promapi.NewSeriesSet(out, nil, nil)
+}
+
+// TestCountingBatching checks the batched sample counter (one Add per series,
+// not per sample) still totals exactly what a full drain reads.
+func TestCountingBatching(t *testing.T) {
+	deltas := counterDeltas(t,
+		backendSeries.WithLabelValues(pathRaw),
+		backendSamples.WithLabelValues(pathRaw),
+	)
+
+	ss := countSeriesSet(seriesSetOf(1, 2, 5, 3), pathRaw)
+	read := 0
+	for ss.Next() {
+		it := ss.At().Iterator(nil)
+		for it.Next() != chunkenc.ValNone {
+			read++
+		}
+	}
+	if read != 11 {
+		t.Fatalf("read %d samples, want 11", read)
+	}
+	if got := deltas(); got[0] != 4 || got[1] != float64(read) {
+		t.Fatalf("series/samples: got %v/%v, want 4/%d", got[0], got[1], read)
+	}
+}
+
+// TestCountingBatchingPartialSeries checks that abandoning a series mid-read
+// and advancing the set banks what was read so far.
+func TestCountingBatchingPartialSeries(t *testing.T) {
+	deltas := counterDeltas(t, backendSamples.WithLabelValues(pathRaw))
+
+	ss := countSeriesSet(seriesSetOf(5, 2), pathRaw)
+	if !ss.Next() {
+		t.Fatal("expected a first series")
+	}
+	it := ss.At().Iterator(nil)
+	it.Next()
+	it.Next()
+	if got := deltas()[0]; got != 0 {
+		t.Fatalf("samples banked before the series boundary: got %v, want 0", got)
+	}
+
+	// Moving on flushes the 2 samples read from the first series.
+	if !ss.Next() {
+		t.Fatal("expected a second series")
+	}
+	if got := deltas()[0]; got != 2 {
+		t.Fatalf("samples after advancing: got %v, want 2", got)
+	}
+
+	// Reading the second one to exhaustion banks its 2 samples as well.
+	it = ss.At().Iterator(nil)
+	for it.Next() != chunkenc.ValNone { //nolint: revive
+	}
+	if got := deltas()[0]; got != 4 {
+		t.Fatalf("samples after reading the second series: got %v, want 4", got)
 	}
 }
