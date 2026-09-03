@@ -410,9 +410,11 @@ func (p *ProxyStorage) FlagsHandler(w http.ResponseWriter, r *http.Request) {
 func (p *ProxyStorage) Querier(mint, maxt int64) (storage.Querier, error) {
 	state := p.GetState()
 	return &proxyquerier.ProxyQuerier{
-		Start:  timestamp.Time(mint).UTC(),
-		End:    timestamp.Time(maxt).UTC(),
-		Client: state.client,
+		Start: timestamp.Time(mint).UTC(),
+		End:   timestamp.Time(maxt).UTC(),
+		// rawAPI counts what local evaluation pulls from the backends; this
+		// querier is only used for subtrees NodeReplacer did not push down.
+		Client: rawAPI{state.client},
 
 		Cfg: &state.cfg.ProxeusConfig,
 	}, nil
@@ -542,7 +544,26 @@ func vectorToStepMatrix(vec storage.SeriesSet, start, end time.Time, step time.D
 //   - Children cannot be AggregateExpr: aggregates have their own combining logic, so its not safe to send a subquery with additional aggregations
 //   - offsets within the subtree must match: if they don't then we'll get mismatched data, so we wait until we are far enough down the tree that they converge
 //   - Don't reduce accuracy/granularity: the intention of this is to get the correct data faster, meaning correctness overrules speed.
-func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, node parser.Node, path []parser.Node) (parser.Node, error) {
+func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, node parser.Node, path []parser.Node) (retNode parser.Node, retErr error) {
+	// Record the pushdown decision for this node (see pushdownNodes). Each
+	// bail-out below sets reason; the initial value covers the branches with
+	// nothing better to ask the backends for. revisit is set where we're
+	// handed a node we already replaced -- parser.Walk descends into the
+	// replacement, and those visits aren't decisions.
+	reason := reasonUnsupported
+	revisit := false
+	if kind := pushdownNodeKind(node); kind != "" {
+		defer func() {
+			switch {
+			case retErr != nil || revisit:
+			case retNode != nil:
+				pushdownNodes.WithLabelValues(kind, resultPushed, "").Inc()
+			default:
+				pushdownNodes.WithLabelValues(kind, resultFallback, reason).Inc()
+			}
+		}()
+	}
+
 	isAgg := func(node parser.Node) bool {
 		_, ok := node.(*parser.AggregateExpr)
 		return ok
@@ -587,6 +608,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	// If we are a child of a subquery; we just skip replacement (since it already did a nodereplacer for those)
 	for _, n := range path {
 		if isSubQuery(n) {
+			reason = reasonSubqueryChild
 			return nil, nil
 		}
 	}
@@ -635,6 +657,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		if missing := p.strictMissingRemoteRead(); len(missing) > 0 {
 			return nil, histogramFidelityError(missing)
 		}
+		reason = reasonHistogram
 		return nil, nil
 	}
 
@@ -648,6 +671,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		case isSubQuery(node):
 			break
 		default:
+			reason = reasonNestedAggregate
 			return nil, nil
 		}
 	}
@@ -656,6 +680,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	// we can't combine as we don't know if those 2 selectors will for-sure
 	// land on the same node
 	if vecFinder.Found > 1 && !isSubQuery(node) {
+		reason = reasonMultiVectorSelector
 		return nil, nil
 	}
 
@@ -673,6 +698,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	// If we couldn't find an offset, then something is wrong-- lets skip
 	// Also if there was an error, skip
 	if !offsetFinder.Found || offsetFinder.Error != nil {
+		reason = reasonOffsetMismatch
 		return nil, nil
 	}
 	offset = offsetFinder.Offset
@@ -705,6 +731,10 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	}
 
 	state := p.GetState()
+	// pushdownAPI counts the series/samples the pushdown fetches below pull
+	// from the backends; every downstream request in this function goes
+	// through it.
+	client := pushdownAPI{state.client}
 
 	// queryRangeAt issues a step-aware downstream request for queryStr. When
 	// the subtree below us pins evaluation to a single timestamp via @, the
@@ -721,7 +751,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	queryRangeAt := func(queryStr string) storage.SeriesSet {
 		if subtreeHasAt && atTimestampFinder.Found && atUnsafeFinder.Found == 0 && s.Interval > 0 {
 			at := timestamp.Time(atTimestampFinder.Timestamp)
-			result := state.client.Query(ctx, queryStr, at)
+			result := client.Query(ctx, queryStr, at)
 			if err := result.Err(); err != nil {
 				return result
 			}
@@ -731,7 +761,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// String ambiguity left at this layer.)
 			return vectorToStepMatrix(result, s.Start.Add(-reqOffset), s.End.Add(-reqOffset), s.Interval)
 		}
-		return state.client.QueryRange(ctx, queryStr, v1.Range{
+		return client.QueryRange(ctx, queryStr, v1.Range{
 			Start: s.Start.Add(-reqOffset),
 			End:   s.End.Add(-reqOffset),
 			Step:  s.Interval,
@@ -745,6 +775,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// If the vector selector already has the data we can skip
 		if vs, ok := n.Expr.(*parser.VectorSelector); ok {
 			if vs.UnexpandedSeriesSet != nil {
+				revisit = true
 				return nil, nil
 			}
 		}
@@ -767,17 +798,18 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			removeOffsetFn()
 
 			if s.Interval > 0 {
-				result = state.client.QueryRange(ctx, n.String(), v1.Range{
+				result = client.QueryRange(ctx, n.String(), v1.Range{
 					Start: s.Start.Add(-reqOffset),
 					End:   s.End.Add(-reqOffset),
 					Step:  s.Interval,
 				})
 			} else {
-				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
 			result, lossy = containsLossyHistogram(result)
 			if lossy {
+				reason = reasonLossyHistogram
 				return nil, nil
 			}
 
@@ -854,17 +886,18 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			removeOffsetFn()
 
 			if s.Interval > 0 {
-				result = state.client.QueryRange(ctx, n.String(), v1.Range{
+				result = client.QueryRange(ctx, n.String(), v1.Range{
 					Start: s.Start.Add(-reqOffset),
 					End:   s.End.Add(-reqOffset),
 					Step:  s.Interval,
 				})
 			} else {
-				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
 			result, lossy = containsLossyHistogram(result)
 			if lossy {
+				reason = reasonLossyHistogram
 				return nil, nil
 			}
 			n.Op = parser.SUM
@@ -874,17 +907,18 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 			// First we must fetch the data into a vectorselector
 			if s.Interval > 0 {
-				result = state.client.QueryRange(ctx, n.String(), v1.Range{
+				result = client.QueryRange(ctx, n.String(), v1.Range{
 					Start: s.Start.Add(-reqOffset),
 					End:   s.End.Add(-reqOffset),
 					Step:  s.Interval,
 				})
 			} else {
-				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
 			result, lossy = containsLossyHistogram(result)
 			if lossy {
+				reason = reasonLossyHistogram
 				return nil, nil
 			}
 
@@ -908,13 +942,16 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// as such there is no way to reduce the load necessary here. If
 			// the query is something like quantile(sum(foo)) then the inner aggregation
 			// will reduce the required data
+			reason = reasonNonReentrantAgg
 
 		// Both of these cases require some mechanism of knowing what labels to do the aggregation on.
 		// WIthout that knowledge we require pulling all of the data in, so we do nothing
 		case parser.STDDEV:
 			// DO NOTHING
+			reason = reasonNonReentrantAgg
 		case parser.STDVAR:
 			// DO NOTHING
+			reason = reasonNonReentrantAgg
 
 		// limitk(k, expr) and limit_ratio(r, expr) are NOT reentrant: the
 		// engine picks k (or floor(r*N)) series by hash from the *full*
@@ -928,6 +965,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// visible alongside the reentrant case list above.)
 		case parser.LIMITK, parser.LIMIT_RATIO:
 			// DO NOTHING
+			reason = reasonNonReentrantAgg
 
 		}
 
@@ -962,6 +1000,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		switch n.Func.Name {
 		case "absent", "absent_over_time",
 			"label_join", "label_replace", "info":
+			reason = reasonUnsupportedFunc
 			return nil, nil
 		}
 
@@ -972,11 +1011,12 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		if s.Interval > 0 {
 			result = queryRangeAt(n.String())
 		} else {
-			result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+			result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 		}
 
 		result, lossy := containsLossyHistogram(result)
 		if lossy {
+			reason = reasonLossyHistogram
 			return nil, nil
 		}
 
@@ -1022,6 +1062,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	case *parser.VectorSelector:
 		// If the vector selector already has the data we can skip
 		if n.UnexpandedSeriesSet != nil {
+			revisit = true
 			return nil, nil
 		}
 
@@ -1030,6 +1071,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// have anyway to ask for less-- since this is exactly what they are asking for
 		if len(path) > 0 {
 			if _, ok := path[len(path)-1].(*parser.MatrixSelector); ok {
+				reason = reasonMatrixParent
 				return nil, nil
 			}
 		}
@@ -1041,13 +1083,13 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		origLookback := n.LookbackDelta
 		if s.Interval > 0 {
 			n.LookbackDelta = s.Interval - time.Duration(1)
-			result = state.client.QueryRange(ctx, n.String(), v1.Range{
+			result = client.QueryRange(ctx, n.String(), v1.Range{
 				Start: s.Start.Add(-reqOffset),
 				End:   s.End.Add(-reqOffset),
 				Step:  s.Interval,
 			})
 		} else {
-			result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+			result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 		}
 
 		if err := result.Err(); err != nil {
@@ -1061,6 +1103,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// window we set above (which would otherwise drop boundary
 			// samples like a load at t=0 with a range query starting at 0).
 			n.LookbackDelta = origLookback
+			reason = reasonLossyHistogram
 			return nil, nil
 		}
 
@@ -1143,6 +1186,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			n.Expr = newN.(parser.Expr)
 			return n, nil
 		}
+		reason = reasonNoInnerPushdown
 
 	// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS
 	// these are relatively rare -- as things like `sum(foo) > 2` would *not* be viable as `sum(foo)` could
@@ -1161,13 +1205,13 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			var result storage.SeriesSet
 			if s.Interval > 0 {
 				vs.LookbackDelta = s.Interval - time.Duration(1)
-				result = state.client.QueryRange(ctx, n.String(), v1.Range{
+				result = client.QueryRange(ctx, n.String(), v1.Range{
 					Start: s.Start.Add(-reqOffset),
 					End:   s.End.Add(-reqOffset),
 					Step:  s.Interval,
 				})
 			} else {
-				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 
 			if err := result.Err(); err != nil {
@@ -1175,6 +1219,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			}
 			result, lossy := containsLossyHistogram(result)
 			if lossy {
+				reason = reasonLossyHistogram
 				return nil, nil
 			}
 
@@ -1201,19 +1246,20 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			var result storage.SeriesSet
 
 			if s.Interval > 0 {
-				result = state.client.QueryRange(ctx, n.String(), v1.Range{
+				result = client.QueryRange(ctx, n.String(), v1.Range{
 					Start: s.Start.Add(-reqOffset),
 					End:   s.End.Add(-reqOffset),
 					Step:  s.Interval,
 				})
 			} else {
-				result = state.client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
 			if err := result.Err(); err != nil {
 				return nil, err
 			}
 			result, lossy := containsLossyHistogram(result)
 			if lossy {
+				reason = reasonLossyHistogram
 				return nil, nil
 			}
 
@@ -1237,7 +1283,9 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			literal = promclient.ExprIsLiteral(promclient.UnwrapExpr(this))
 		}
 		// If one side is a literal lets check
+		reason = reasonNoLiteralOperand
 		if literal {
+			reason = reasonUnsupportedOperand
 			switch otherTyped := other.(type) {
 			case *parser.VectorSelector:
 				return vectorBinaryExpr(otherTyped)
