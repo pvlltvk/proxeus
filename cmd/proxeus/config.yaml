@@ -30,6 +30,53 @@ remote_write:
 ### Proxeus configuration
 ##
 proxeus:
+  # Authentication of incoming requests. With no `auth` block every request is
+  # anonymous. Providers are tried in a fixed order -- trusted_header, basic,
+  # oidc -- and the first one that recognizes the request's credentials decides
+  # it: valid credentials authenticate, invalid ones are a 401, and there is no
+  # fall-through between providers. Read at startup only; editing this block
+  # needs a restart, not a SIGHUP.
+  # NOTE: exporter-toolkit's basic_auth_users (in --web.config.file) runs in
+  #       front of all of this and rejects anything that is not `Basic`, bearer
+  #       tokens included -- use one or the other.
+  #auth:
+  #  # request path prefixes that skip authentication, resolved relative to
+  #  # --web.route-prefix. These are the defaults.
+  #  exempt_paths: [/-/healthy, /-/ready, /metrics]
+  #
+  #  # username -> bcrypt hash, the same shape as exporter-toolkit's
+  #  # basic_auth_users. Generate with: htpasswd -nBC 10 "" | tr -d ':\n'
+  #  basic:
+  #    users:
+  #      alice: $2a$10$nRYmVvmznzCXqV9O7Bq/beEBbTBlv7GVEt9gyhqiGt.lZdBYcojHK
+  #
+  #  # bearer tokens verified against an OIDC issuer. The discovery document is
+  #  # fetched at startup, so an unreachable issuer fails the boot.
+  #  oidc:
+  #    issuer_url: https://issuer.example/realms/main
+  #    # expected `aud`; a token whose `azp` names the client is also accepted,
+  #    # which is how Keycloak tags tokens while leaving aud as "account".
+  #    client_id: proxeus
+  #    # claim to take the identity name from, default "sub"
+  #    username_claim: preferred_username
+  #    # optional claim holding the identity's groups
+  #    groups_claim: groups
+  #    # UNSAFE escape hatch: stop checking that a token's `iss` matches
+  #    # issuer_url. Only for issuers reachable under a different URL than the
+  #    # one they announce.
+  #    skip_issuer_verification: false
+  #
+  #  # identity set by an authenticating proxy in front of proxeus
+  #  # (oauth2-proxy, an ingress, ...).
+  #  trusted_header:
+  #    user_header: X-Forwarded-User
+  #    # optional, comma-separated
+  #    groups_header: X-Forwarded-Groups
+  #    # required: the header is only honored when the connection comes from one
+  #    # of these CIDRs (the remote address, never X-Forwarded-For). From
+  #    # anywhere else it is ignored and the remaining providers still run.
+  #    trusted_proxies: [127.0.0.1/32, 10.0.0.0/8]
+
   server_groups:
     # All upstream prometheus service discovery mechanisms are supported with the same
     # markup, all defined in https://github.com/prometheus/prometheus/tree/main/discovery

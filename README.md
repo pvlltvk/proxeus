@@ -98,6 +98,100 @@ proxeus:
 
 Proxeus then serves the Prometheus API at `:8082`, plus a backend inventory UI at `/proxeus/backends`.
 
+## Authentication
+
+Without an `auth` block every request is anonymous, as before. Adding one turns on a chain of providers, tried in a
+fixed order — **trusted_header, basic, oidc** — each of which either finds no credentials it recognises (the next one
+gets a turn), authenticates the caller, or rejects the request outright. Credentials one provider claims are never
+retried by another: a wrong password is a 401, not a fall-through to the bearer token in the same request.
+
+```yaml
+proxeus:
+  auth:
+    # Paths that skip authentication, matched as prefixes below --web.route-prefix.
+    exempt_paths: [/-/healthy, /-/ready, /metrics]
+
+    # Username -> bcrypt hash, the same shape as exporter-toolkit's basic_auth_users.
+    # Generate with: htpasswd -nBC 10 "" | tr -d ':\n'
+    basic:
+      users:
+        alice: $2a$10$nRYmVvmznzCXqV9O7Bq/beEBbTBlv7GVEt9gyhqiGt.lZdBYcojHK
+
+    # Bearer tokens verified against an OIDC issuer. Discovery runs at startup.
+    oidc:
+      issuer_url: https://issuer.example/realms/main
+      client_id: proxeus              # expected `aud`, or `azp` for Keycloak-style tokens
+      username_claim: preferred_username   # default: sub
+      groups_claim: groups            # optional
+
+    # Identity from an authenticating proxy in front of proxeus.
+    trusted_header:
+      user_header: X-Forwarded-User
+      groups_header: X-Forwarded-Groups   # optional, comma-separated
+      trusted_proxies: [127.0.0.1/32]     # required: CIDRs the header is honoured from
+```
+
+A request that reaches the end of the chain without an identity gets a 401 with `WWW-Authenticate` listing the enabled
+schemes. The authenticated name appears in the access log's user field.
+
+`trusted_proxies` is matched against the connection's remote address, never `X-Forwarded-For`, so the header cannot be
+spoofed by whoever is talking to proxeus — from an address outside the list the header is ignored entirely and the
+remaining providers still run.
+
+> The `auth` block is read at **startup only**: OIDC discovery and the provider chain are built once. A SIGHUP reload
+> picks up every other change but not this one — restart proxeus after editing it.
+
+### Interaction with `--web.config.file`
+
+exporter-toolkit's `basic_auth_users` (in the `--web.config.file`) runs *outside* proxeus and rejects anything without
+a `Basic` header, bearer tokens included. Use one or the other: `--web.config.file` for TLS only, `proxeus.auth` for
+identity.
+
+### Browser SSO with oauth2-proxy
+
+proxeus has no login flow, so put oauth2-proxy in front of the UI and let it pass the identity through:
+
+```
+oauth2-proxy --upstream=http://proxeus:8082 \
+  --set-xauthrequest --pass-user-headers \
+  --provider=oidc --oidc-issuer-url=https://issuer.example/realms/main
+```
+
+```yaml
+proxeus:
+  auth:
+    trusted_header:
+      user_header: X-Forwarded-User
+      groups_header: X-Forwarded-Groups
+      trusted_proxies: [10.0.0.0/8]   # the oauth2-proxy pods
+```
+
+### Grafana
+
+Basic auth:
+
+```yaml
+datasources:
+  - name: Proxeus
+    type: prometheus
+    url: http://proxeus:8082
+    basicAuth: true
+    basicAuthUser: grafana
+    secureJsonData:
+      basicAuthPassword: ...
+```
+
+Forwarding the logged-in user's OIDC token instead (Grafana must be configured with the same issuer):
+
+```yaml
+datasources:
+  - name: Proxeus
+    type: prometheus
+    url: http://proxeus:8082
+    jsonData:
+      oauthPassThru: true
+```
+
 ## Prometheus fork
 
 Aggregation pushdown needs a hook inside the PromQL engine that upstream Prometheus does not expose. Proxeus therefore
