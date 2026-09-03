@@ -262,6 +262,73 @@ errors, `proxeus_server_group_targets` (alert on `== 0`), and cross-group dedup 
 > be evaluated centrally. The number to watch is the *sample volume* on the `raw` path, since that is what a long
 > range query actually costs.
 
+## MCP endpoint
+
+Proxeus can serve a [Model Context Protocol](https://modelcontextprotocol.io) endpoint, so an agent can query the
+federated view over the same path Grafana uses. It is off by default:
+
+```sh
+./proxeus --config=config.yaml --mcp.enable
+```
+
+The endpoint is streamable HTTP at `<route-prefix>/mcp`, stateless (no session state, so replicas behind a load
+balancer are interchangeable). Tools call proxeus's own `/api/v1`, so dedup, pushdown and the backend metrics apply
+exactly as they do for any other client.
+
+| flag | meaning | default |
+| --- | --- | --- |
+| `--mcp.enable` | serve the MCP endpoint | off |
+| `--mcp.max-series` | max series (or label names/values) a tool call returns; `0` disables the cap | `100` |
+| `--mcp.max-samples` | max samples a tool call returns; `0` disables the cap | `5000` |
+| `--mcp.query-timeout` | max time for a single API call made by a tool | `60s` |
+
+Tool names, argument names and descriptions mirror
+[prometheus/prometheus-mcp](https://github.com/prometheus/prometheus-mcp), so skills written for that server work here
+unchanged. All tools are read-only; there are no admin or TSDB tools.
+
+| tool | arguments | returns |
+| --- | --- | --- |
+| `query` | `query`, `timestamp`, `truncation_limit` | instant query: one value per series |
+| `range_query` | `query`, `start_time`, `end_time`, `step`, `truncation_limit` | range query; `step` defaults to ~250 points |
+| `series` | `matches` (required), `start_time`, `end_time`, `truncation_limit` | the label sets that match |
+| `label_names` | `matches`, `start_time`, `end_time`, `truncation_limit` | label names |
+| `label_values` | `label` (required), `matches`, `start_time`, `end_time`, `truncation_limit` | values of one label |
+| `metric_metadata` | `metric`, `limit` | type/help/unit per metric name |
+| `build_info` | — | proxeus build information |
+| `list_server_groups` | — | the `server_groups` behind the fan-out: backend type, per-target health, labels, configured time range, `remote_read` |
+
+`list_server_groups` is the proxeus-specific one, and the reason a model can explain its own results: a metric may be
+missing or a range partial because the backend holding it is unhealthy or configured for a different time range.
+
+Results are capped by the flags above; `truncation_limit` may lower a cap for one call but never raise it. A truncated
+result says so (`truncated`, `returned`, `total_before_truncation`), so the model can narrow the query instead of
+guessing that the data does not exist. Tool calls are counted in `proxeus_mcp_tool_calls_total{tool,result}` and timed
+in `proxeus_mcp_tool_call_duration_seconds{tool}`.
+
+> **Do not expose this endpoint unauthenticated.** It carries no auth of its own: anything that can POST to `/mcp` can
+> read every metric in every backend. Put basic auth or TLS client certs in front of it with `--web.config.file` (see
+> the [Prometheus HTTPS/auth schema](https://prometheus.io/docs/prometheus/latest/configuration/https/)), or terminate
+> auth in your ingress. MCP clients pass credentials in the `Authorization` header:
+
+```json
+{
+  "mcpServers": {
+    "proxeus": {
+      "type": "http",
+      "url": "https://proxeus.example.com/mcp",
+      "headers": {
+        "Authorization": "Basic <base64 user:password>"
+      }
+    }
+  }
+}
+```
+
+Pointing [prometheus-mcp](https://github.com/prometheus/prometheus-mcp) at proxeus works too, and is the better choice
+if you want its documentation and runbook tools — proxeus is a Prometheus-compatible API endpoint like any other. The
+embedded endpoint exists so that a proxeus deployment needs no second process, and so the agent can ask about the
+fan-out itself.
+
 ## Load testing with fakeprom
 
 Proxeus's own throughput is hard to measure against a real backend: a laptop-sized Thanos or VictoriaMetrics saturates
