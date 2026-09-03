@@ -131,6 +131,39 @@ func startAPIForTest(s storage.Storage) (*http.Server, string, chan struct{}) {
 	}
 	addr := ln.Addr().String()
 
+	apiRouter := newAPIHandler(s, testAPIEngine(), addr)
+
+	stopChan := make(chan struct{})
+	srv := &http.Server{Handler: apiRouter}
+
+	go func() {
+		defer close(stopChan)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Println("Error serving on", addr, err)
+		}
+	}()
+
+	return srv, addr, stopChan
+}
+
+// testAPIEngine is the query engine the test API servers evaluate with. It has
+// no NodeReplacer: those servers stand in for plain prometheus backends.
+func testAPIEngine() *promql.Engine {
+	return promql.NewEngine(promql.EngineOpts{
+		Timeout:                  10 * time.Minute,
+		MaxSamples:               50000000,
+		NoStepSubqueryIntervalFn: func(int64) int64 { return (1 * time.Minute).Milliseconds() },
+		EnableAtModifier:         true,
+		EnableNegativeOffset:     true,
+		EnableDelayedNameRemoval: true,
+	})
+}
+
+// newAPIHandler builds a prometheus v1 API router over s, evaluating queries
+// with eng. addr is only used for the API's global-URL rewriting. Split out of
+// startAPIForTest so benchmarks can front a ProxyStorage with an engine that
+// has its NodeReplacer wired in -- i.e. a real proxeus API server.
+func newAPIHandler(s storage.Storage, eng *promql.Engine, addr string) http.Handler {
 	cfgFunc := func() config.Config { return config.DefaultConfig }
 	readyFunc := func(f http.HandlerFunc) http.HandlerFunc { return f }
 	// nil registerer: this server is created many times per test run and the
@@ -138,14 +171,7 @@ func startAPIForTest(s storage.Storage) (*http.Server, string, chan struct{}) {
 	notifs := notifications.NewNotifications(16, nil)
 
 	api := v1.NewAPI(
-		promql.NewEngine(promql.EngineOpts{
-			Timeout:                  10 * time.Minute,
-			MaxSamples:               50000000,
-			NoStepSubqueryIntervalFn: func(int64) int64 { return (1 * time.Minute).Milliseconds() },
-			EnableAtModifier:         true,
-			EnableNegativeOffset:     true,
-			EnableDelayedNameRemoval: true,
-		}),
+		eng,
 		s.(storage.SampleAndChunkQueryable),
 		nil, // appendable
 		nil, // exemplarQueryable
@@ -187,18 +213,7 @@ func startAPIForTest(s storage.Storage) (*http.Server, string, chan struct{}) {
 
 	apiRouter := route.New()
 	api.Register(apiRouter.WithPrefix("/api/v1"))
-
-	stopChan := make(chan struct{})
-	srv := &http.Server{Handler: apiRouter}
-
-	go func() {
-		defer close(stopChan)
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			fmt.Println("Error serving on", addr, err)
-		}
-	}()
-
-	return srv, addr, stopChan
+	return apiRouter
 }
 
 func TestUpstreamEvaluations(t *testing.T) {

@@ -45,6 +45,24 @@ imports:
 test:
 	GO111MODULE=on $(GO) test -race ./...
 
+# Synthetic Prometheus backend used to load-test proxeus without a real
+# Thanos/VictoriaMetrics behind it. Deliberately not part of `release`: it is a
+# test tool, not a published artifact.
+.PHONY: fakeprom
+fakeprom:
+	$(GO) build -tags netgo -o $(BUILD)/fakeprom github.com/pvlltvk/proxeus/cmd/fakeprom
+
+# End-to-end query benchmarks: proxeus in front of fakeprom backends. Tune the
+# sweep with the PROXEUS_BENCH_* env vars documented in
+# test/fakeprom_bench_test.go; set BENCH_PROFILE_DIR to collect profiles.
+BENCHTIME ?= 3x
+BENCH_PROFILE_DIR ?=
+.PHONY: bench-e2e
+bench-e2e:
+	@if [ -n "$(BENCH_PROFILE_DIR)" ]; then mkdir -p $(BENCH_PROFILE_DIR); fi
+	GO111MODULE=on $(GO) test ./test/ -run='^$$' -bench=BenchmarkFakepromQueryRange -benchmem -benchtime=$(BENCHTIME) -timeout=60m \
+		$(if $(BENCH_PROFILE_DIR),-cpuprofile=$(BENCH_PROFILE_DIR)/cpu.pprof -memprofile=$(BENCH_PROFILE_DIR)/mem.pprof)
+
 .PHONY: release
 release:
 	./build.bash github.com/pvlltvk/proxeus/cmd/proxeus $(BUILD)
