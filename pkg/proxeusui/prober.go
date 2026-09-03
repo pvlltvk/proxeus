@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/common/model"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 
@@ -52,11 +53,20 @@ type TargetInfo struct {
 }
 
 // GroupInfo carries the full inventory snapshot for a single server_group.
+//
+// Like BackendType, RemoteRead and TimeRange are joined in from the
+// server_group config at read time rather than probed.
 type GroupInfo struct {
 	Name    string            `json:"name"`
 	Ordinal int               `json:"ordinal"`
 	Labels  map[string]string `json:"labels"`
-	Targets []TargetInfo      `json:"targets"`
+	// RemoteRead reports whether raw data is read from this group over the
+	// remote read API instead of the query API.
+	RemoteRead bool `json:"remoteRead"`
+	// TimeRange is the window the group is configured to answer for, e.g.
+	// "now-90d to now-3d". Empty when the group has no time range configured.
+	TimeRange string       `json:"timeRange,omitempty"`
+	Targets   []TargetInfo `json:"targets"`
 }
 
 // Inventory is the snapshot returned to the HTTP handler.
@@ -290,9 +300,11 @@ func (p *Prober) Inventory() Inventory {
 
 	for i, sgCfg := range cfg.ServerGroups {
 		gi := GroupInfo{
-			Name:    sgCfg.Name,
-			Ordinal: i,
-			Labels:  labelSetToMap(sgCfg),
+			Name:       sgCfg.Name,
+			Ordinal:    i,
+			Labels:     labelSetToMap(sgCfg),
+			RemoteRead: sgCfg.RemoteRead,
+			TimeRange:  timeRangeDescription(sgCfg),
 		}
 
 		backendType := sgCfg.BackendType
@@ -319,6 +331,39 @@ func (p *Prober) Inventory() Inventory {
 	}
 
 	return inv
+}
+
+// timeRangeDescription renders the time range a server_group is configured to
+// answer for, e.g. "now-90d to now-3d" or "2024-01-01T00:00:00Z to +inf".
+// Unconfigured bounds are reported as -inf/+inf; the empty string means the
+// group has no time range at all and is queried for everything.
+func timeRangeDescription(sgCfg *servergroup.Config) string {
+	if tr := sgCfg.AbsoluteTimeRangeConfig; tr != nil {
+		return absoluteBound(tr.Start, "-inf") + " to " + absoluteBound(tr.End, "+inf")
+	}
+	if tr := sgCfg.RelativeTimeRangeConfig; tr != nil {
+		return relativeBound(tr.Start, "-inf") + " to " + relativeBound(tr.End, "+inf")
+	}
+	return ""
+}
+
+func absoluteBound(t time.Time, unset string) string {
+	if t.IsZero() {
+		return unset
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// relativeBound renders a bound configured as an offset from now, e.g. -90d
+// becomes "now-90d".
+func relativeBound(d *time.Duration, unset string) string {
+	if d == nil {
+		return unset
+	}
+	if *d >= 0 {
+		return "now+" + model.Duration(*d).String()
+	}
+	return "now" + model.Duration(*d).String()
 }
 
 func labelSetToMap(sgCfg *servergroup.Config) map[string]string {

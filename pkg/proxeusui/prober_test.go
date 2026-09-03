@@ -199,3 +199,42 @@ func TestProber_Inventory_BackendTypeFromConfig(t *testing.T) {
 		t.Errorf("groups out of order: %+v", inv.Groups)
 	}
 }
+
+func TestProber_Inventory_TimeRangeAndRemoteRead(t *testing.T) {
+	relStart, relEnd := -90*24*time.Hour, -3*24*time.Hour
+	absStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	cfg := &proxyconfig.Config{
+		ProxeusConfig: proxyconfig.ProxeusConfig{
+			ServerGroups: []*servergroup.Config{
+				{Name: "plain"},
+				{Name: "remote-read", RemoteRead: true},
+				{Name: "relative", RelativeTimeRangeConfig: &servergroup.RelativeTimeRangeConfig{Start: &relStart, End: &relEnd}},
+				{Name: "relative-open", RelativeTimeRangeConfig: &servergroup.RelativeTimeRangeConfig{Start: &relStart}},
+				{Name: "absolute", AbsoluteTimeRangeConfig: &servergroup.AbsoluteTimeRangeConfig{Start: absStart}},
+			},
+		},
+	}
+	inv := newProber(&stubStorage{cfg: cfg}).Inventory()
+
+	want := []struct {
+		remoteRead bool
+		timeRange  string
+	}{
+		{},
+		{remoteRead: true},
+		{timeRange: "now-90d to now-3d"},
+		{timeRange: "now-90d to +inf"},
+		{timeRange: "2024-01-01T00:00:00Z to +inf"},
+	}
+	if len(inv.Groups) != len(want) {
+		t.Fatalf("expected %d groups, got %d", len(want), len(inv.Groups))
+	}
+	for i, w := range want {
+		got := inv.Groups[i]
+		if got.RemoteRead != w.remoteRead || got.TimeRange != w.timeRange {
+			t.Errorf("group %s: got remoteRead=%v timeRange=%q, want remoteRead=%v timeRange=%q",
+				got.Name, got.RemoteRead, got.TimeRange, w.remoteRead, w.timeRange)
+		}
+	}
+}
