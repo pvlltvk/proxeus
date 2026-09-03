@@ -109,7 +109,7 @@ proxeus:
         # cap the downsampling resolution thanos may serve from:
         # "auto", "0s" (raw only), or a duration such as 5m
         max_source_resolution: auto
-        # override the labels thanos dedups on
+        # override the labels thanos dedups on (sent as replicaLabels[])
         replica_labels:
           - replica
 

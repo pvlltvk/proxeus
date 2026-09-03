@@ -74,7 +74,7 @@ thanos:
 				"dedup":                 []string{"false"},
 				"partial_response":      []string{"true"},
 				"max_source_resolution": []string{"5m"},
-				"replica_labels":        []string{"replica", "prometheus_replica"},
+				"replicaLabels[]":       []string{"replica", "prometheus_replica"},
 			},
 			wantHeaders: map[string]string{},
 		},
@@ -318,8 +318,8 @@ query_params:
 	u := promclient.NewClientArgsWrap(client, cfg.queryParams()).URL("/api/v1/query", nil)
 
 	expected := url.Values{
-		"dedup":          []string{"false"},
-		"replica_labels": []string{"replica", "prometheus_replica"},
+		"dedup":           []string{"false"},
+		"replicaLabels[]": []string{"replica", "prometheus_replica"},
 	}
 	if !reflect.DeepEqual(u.Query(), expected) {
 		t.Fatalf("query mismatch\nexpected=%v\nactual=%v (%s)", expected, u.Query(), u.RawQuery)

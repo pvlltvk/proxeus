@@ -57,8 +57,8 @@ type ThanosConfig struct {
 	// MaxSourceResolution caps the downsampling resolution Thanos may serve
 	// from (`max_source_resolution`); "auto", "0s" or a duration (e.g. "5m").
 	MaxSourceResolution string `yaml:"max_source_resolution,omitempty"`
-	// ReplicaLabels overrides the labels Thanos dedups on (`replica_labels`),
-	// sent as one param per label.
+	// ReplicaLabels overrides the labels Thanos dedups on, sent as one
+	// `replicaLabels[]` param per label.
 	ReplicaLabels []string `yaml:"replica_labels,omitempty"`
 }
 
@@ -72,7 +72,7 @@ func (c *ThanosConfig) queryParams() url.Values {
 		v.Set("max_source_resolution", c.MaxSourceResolution)
 	}
 	if len(c.ReplicaLabels) > 0 {
-		v["replica_labels"] = c.ReplicaLabels
+		v["replicaLabels[]"] = c.ReplicaLabels
 	}
 	return v
 }
