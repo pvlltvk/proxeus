@@ -7,7 +7,7 @@ import (
 )
 
 // NewClientArgsWrap returns a client that will add the given args
-func NewClientArgsWrap(api api.Client, args map[string]string) *ClientArgsWrap {
+func NewClientArgsWrap(api api.Client, args url.Values) *ClientArgsWrap {
 	return &ClientArgsWrap{api, args}
 }
 
@@ -15,7 +15,7 @@ func NewClientArgsWrap(api api.Client, args map[string]string) *ClientArgsWrap {
 type ClientArgsWrap struct {
 	api.Client
 
-	args map[string]string
+	args url.Values
 }
 
 // URL returns a URL for the given endpoint + args
@@ -24,7 +24,7 @@ func (c *ClientArgsWrap) URL(ep string, args map[string]string) *url.URL {
 
 	q := u.Query()
 	for k, v := range c.args {
-		q.Set(k, v)
+		q[k] = v
 	}
 	u.RawQuery = q.Encode()
 
