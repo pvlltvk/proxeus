@@ -120,3 +120,33 @@ remote_write:
 		})
 	}
 }
+
+// The `auth` block is optional: absent means every request is anonymous, which
+// is what proxeus has always done.
+func TestAuthConfig(t *testing.T) {
+	cfg, err := ConfigFromBytes([]byte("proxeus:\n  server_groups: []\n"))
+	if err != nil {
+		t.Fatalf("ConfigFromBytes: %v", err)
+	}
+	if cfg.Auth != nil {
+		t.Fatalf("Auth = %+v, want nil when there is no auth block", cfg.Auth)
+	}
+
+	cfg, err = ConfigFromBytes([]byte(`
+proxeus:
+  auth:
+    trusted_header:
+      user_header: X-Forwarded-User
+      trusted_proxies: [127.0.0.1/32]
+`))
+	if err != nil {
+		t.Fatalf("ConfigFromBytes: %v", err)
+	}
+	if cfg.Auth == nil || cfg.Auth.TrustedHeader.UserHeader != "X-Forwarded-User" {
+		t.Fatalf("Auth = %+v, want the trusted_header provider", cfg.Auth)
+	}
+
+	if _, err := ConfigFromBytes([]byte("proxeus:\n  auth: {}\n")); err == nil {
+		t.Fatal("an auth block with no provider was accepted")
+	}
+}
