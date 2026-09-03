@@ -91,9 +91,52 @@ proxeus:
       # This can be relabeled using __path_prefix__
       path_prefix: /example/prefix
 
+      # backend_type declares what kind of backend this server group talks to.
+      # One of prometheus, thanos, victoriametrics, cortex, mimir (or left out).
+      # It is what the inventory UI at /proxeus/backends displays, and it gates
+      # which of the typed dialect blocks below may be set.
+      backend_type: thanos
+
+      # Typed per-backend options. Proxeus translates these into the query params
+      # and headers that flavor of backend expects, so you don't have to know the
+      # raw parameter names. Only the block matching backend_type may be set --
+      # the other two are shown commented out below.
+      thanos:
+        # thanos' own replica deduplication; defaults to true when the block is set
+        dedup: true
+        # let thanos answer with partial results when some of its stores are down
+        partial_response: false
+        # cap the downsampling resolution thanos may serve from:
+        # "auto", "0s" (raw only), or a duration such as 5m
+        max_source_resolution: auto
+        # override the labels thanos dedups on
+        replica_labels:
+          - replica
+
+      # with `backend_type: victoriametrics`
+      # victoriametrics:
+      #   # disable VictoriaMetrics' response cache (nocache=1)
+      #   nocache: true
+      #   # label-matcher sets VictoriaMetrics adds to every selector of every query
+      #   extra_filters:
+      #     - '{env="prod"}'
+      #   # override the downstream lookback-delta
+      #   max_lookback: 5m
+      #   # error out instead of returning partial results when storage nodes are down
+      #   denyPartialResponse: true
+
+      # with `backend_type: mimir` or `backend_type: cortex`
+      # mimir:
+      #   # sent as the X-Scope-OrgID header multi-tenant mimir/cortex requires.
+      #   # NOTE: a server_group holds the *same* data, so this is a single tenant --
+      #   # model each (backend, tenant) pair as its own server_group.
+      #   tenant: tenant-A
+
       # query_params adds the following map of query parameters to downstream requests.
       # The initial use-case for this is to add `nocache=1` to VictoriaMetrics downstreams
       # (see https://github.com/jacksontj/promxy/issues/202)
+      # Applied after the params derived from the dialect blocks above, so an entry
+      # here wins on key conflict.
       query_params:
         nocache: 1
 
@@ -227,7 +270,9 @@ proxeus:
 
       # Map of HTTP headers to add to remote read HTTP calls made to this downstream
       # the main use-case for this is to support the X-Scope-OrgID header required by Mimir and Cortex
-      # in multi-tenancy mode.
+      # in multi-tenancy mode -- `mimir: {tenant: ...}` above is the typed way to set it.
+      # Applied after the headers derived from the dialect blocks, so an entry here
+      # wins on key conflict.
       # NOTE: a server_group represents a set of endpoints holding the *same* data.
       # When fanning out to several Mimir/Cortex tenants, model each (backend, tenant)
       # pair as its own server_group rather than listing multiple tenants in a single

@@ -45,6 +45,14 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > contributes to both partials in `count(up)`. If exact aggregates over overlapping groups matter, keep the overlap out
 > of the groups.
 
+**Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
+`cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,
+`partial_response`, `max_source_resolution`, `replica_labels`), `victoriametrics:` (`nocache`, `extra_filters`,
+`max_lookback`, `denyPartialResponse`) and `mimir:` (`tenant`, sent as `X-Scope-OrgID`). Proxeus translates them into
+the params and headers that backend expects, and rejects a mistyped duration or matcher at config load rather than on
+the wire. The generic `query_params` / `http_headers` maps still work and override the dialect on key conflict.
+`backend_type` is also what the inventory UI displays per target.
+
 **Partial response.** `cross_group_partial_response: true` lets a query succeed when only some groups answer, attaching
 a warning per failed backend. Correct for federating disjoint data, where a Thanos outage should not blank out
 VictoriaMetrics-sourced series. Off by default, since for HA replicas a silent partial answer is worse than an error.
