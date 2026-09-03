@@ -143,6 +143,58 @@ errors, `proxeus_server_group_targets` (alert on `== 0`), and cross-group dedup 
 > be evaluated centrally. The number to watch is the *sample volume* on the `raw` path, since that is what a long
 > range query actually costs.
 
+## Load testing with fakeprom
+
+Proxeus's own throughput is hard to measure against a real backend: a laptop-sized Thanos or VictoriaMetrics saturates
+first, and the numbers end up describing the backend. `pkg/fakeprom` is a synthetic Prometheus HTTP API
+(`/api/v1/query`, `/query_range`, `/series`, `/labels`, `/label/<name>/values`, `/status/buildinfo`, `/-/healthy`,
+`/-/ready`) that generates every answer from a deterministic function of the series index and timestamp and streams the
+JSON straight to the client, so it costs almost nothing per sample and never materializes a response in memory.
+
+```sh
+make fakeprom
+./build/fakeprom --bind-addr=:9090 --series=100000 --instance=0 --overlap=0.5
+./build/fakeprom --bind-addr=:9091 --series=100000 --instance=1 --overlap=0.5
+```
+
+| flag | meaning | default |
+| --- | --- | --- |
+| `--bind-addr` | address to listen on | `:9090` |
+| `--series` | cardinality: how many series every query returns | `1000` |
+| `--instance` | id of this backend, see overlap below | `0` |
+| `--overlap` | fraction of the series shared with the other instances | `0` |
+| `--latency` | delay added to every response | none |
+| `--metric-name` | `__name__` of the generated series | `fake_metric` |
+| `--max-samples-per-series` | cap on samples per series in a range response | uncapped |
+
+**Overlap semantics.** Two fakeproms with the same `--series` and `--overlap` but different `--instance` serve exactly
+`round(overlap * series)` series that are byte-identical in both labels *and* values; the remaining ones carry the
+instance id in their `instance` label and are therefore disjoint. That is precisely what proxeus's cross-group dedup
+keys on, so `--overlap=0.5` across two server_groups must collapse to `1.5 * series` with `cross_group_dedup: true`.
+
+**Query handling** is a heuristic, not a PromQL implementation: if the query starts with an aggregation operator
+(`sum`, `count`, `avg`, `min`, `max`, `topk`, ...) the backend answers with a single series, modelling what a real
+backend returns for a pushed-down aggregation; anything else returns the full series set. Matchers are ignored.
+
+### Benchmarks
+
+`test/fakeprom_bench_test.go` drives HTTP `query_range` requests through a real `ProxyStorage` and Prometheus v1 API in
+front of fakeprom backends, sweeping cardinality × server_groups × `cross_group_dedup` × query shape:
+
+```sh
+make bench-e2e                                   # default sweep, -benchmem
+make bench-e2e BENCHTIME=10x BENCH_PROFILE_DIR=/tmp/prof   # plus cpu/mem profiles
+```
+
+The default query is a 1 hour range at a 15s step. Override with `PROXEUS_BENCH_RANGE`, `PROXEUS_BENCH_STEP`,
+`PROXEUS_BENCH_OVERLAP` and `PROXEUS_BENCH_MAX_SAMPLES`. The last one is a ceiling on the worst-case response size
+(default 8M samples): raw-selector cases above it are skipped rather than risking an OOM, which is why 100k series over
+an hour at 15s (24M samples across two groups) does not run by default. To measure that tier, shorten the range:
+
+```sh
+PROXEUS_BENCH_RANGE=5m PROXEUS_BENCH_STEP=60s make bench-e2e
+```
+
 ## Relationship to promxy
 
 Proxeus is a hard fork of [promxy](https://github.com/jacksontj/promxy) by Thomas Jackson, and owes it the core
