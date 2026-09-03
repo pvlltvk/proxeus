@@ -49,6 +49,7 @@ import (
 	"k8s.io/klog"
 
 	"github.com/pvlltvk/proxeus/pkg/alertbackfill"
+	"github.com/pvlltvk/proxeus/pkg/auth"
 	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
 	"github.com/pvlltvk/proxeus/pkg/federate"
 	"github.com/pvlltvk/proxeus/pkg/logging"
@@ -751,7 +752,23 @@ func main() {
 		logrus.Fatalf("Invalid AccessLogDestination: %s", opts.AccessLogDestination)
 	}
 
-	srv, err := server.CreateAndStart(opts.BindAddr, opts.LogFormat, opts.WebReadTimeout, accessLogOut, middleware.NewProxyHeaders(r, opts.ProxyHeaders), opts.WebConfigFile)
+	// Authentication is configured at startup only: auth.New does OIDC
+	// discovery and compiles the provider chain, so a change to the `auth`
+	// block needs a restart. Without the block the router is left unwrapped.
+	authCfg, err := proxyconfig.ConfigFromFile(opts.ConfigFile)
+	if err != nil {
+		logrus.Fatalf("Error loading cfg: %v", err)
+	}
+	authenticator, err := auth.New(ctx, authCfg.Auth, webOptions.RoutePrefix)
+	if err != nil {
+		logrus.Fatalf("Error configuring authentication: %v", err)
+	}
+	var handler http.Handler = middleware.NewProxyHeaders(r, opts.ProxyHeaders)
+	if authenticator != nil {
+		handler = authenticator.Middleware(handler)
+	}
+
+	srv, err := server.CreateAndStart(opts.BindAddr, opts.LogFormat, opts.WebReadTimeout, accessLogOut, handler, opts.WebConfigFile)
 	if err != nil {
 		logrus.Fatalf("Error creating server: %v", err)
 	}
