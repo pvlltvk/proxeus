@@ -4,22 +4,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
-// BackendType is the type a downstream backend is declared as in the
-// server_group config. The set is open — any string is allowed — but these
-// constants cover the backends we currently care about. BackendUnknown is
-// used when the config omits backend_type.
-type BackendType string
-
-const (
-	BackendThanos          BackendType = "thanos"
-	BackendVictoriaMetrics BackendType = "victoriametrics"
-	BackendPrometheus      BackendType = "prometheus"
-	BackendCortex          BackendType = "cortex"
-	BackendMimir           BackendType = "mimir"
-	BackendUnknown         BackendType = "unknown"
-)
+// BackendUnknown is what the inventory shows for a server_group that declares
+// no backend_type. It is a display value only -- the configurable set lives in
+// servergroup.BackendType.
+const BackendUnknown servergroup.BackendType = "unknown"
 
 // buildInfoData matches the "data" object of /api/v1/status/buildinfo.
 type buildInfoData struct {

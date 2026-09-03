@@ -48,7 +48,7 @@ type ProbeResult struct {
 type TargetInfo struct {
 	URL string `json:"url"`
 	ProbeResult
-	BackendType BackendType `json:"backendType"`
+	BackendType servergroup.BackendType `json:"backendType"`
 }
 
 // GroupInfo carries the full inventory snapshot for a single server_group.
@@ -295,7 +295,7 @@ func (p *Prober) Inventory() Inventory {
 			Labels:  labelSetToMap(sgCfg),
 		}
 
-		backendType := BackendType(sgCfg.BackendType)
+		backendType := sgCfg.BackendType
 		if backendType == "" {
 			backendType = BackendUnknown
 		}
