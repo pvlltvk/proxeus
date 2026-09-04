@@ -108,7 +108,9 @@ retried by another: a wrong password is a 401, not a fall-through to the bearer 
 ```yaml
 proxeus:
   auth:
-    # Paths that skip authentication, matched as prefixes below --web.route-prefix.
+    # Paths that skip authentication, matched verbatim on whole segments —
+    # include --web.route-prefix yourself if you set one. Setting this replaces
+    # the defaults (/-/healthy, /-/ready and --metrics-path, prefixed for you).
     exempt_paths: [/-/healthy, /-/ready, /metrics]
 
     # Username -> bcrypt hash, the same shape as exporter-toolkit's basic_auth_users.
@@ -132,11 +134,19 @@ proxeus:
 ```
 
 A request that reaches the end of the chain without an identity gets a 401 with `WWW-Authenticate` listing the enabled
-schemes. The authenticated name appears in the access log's user field.
+schemes — except when trusted_header is the only provider, where there is no auth scheme to advertise and the 401 is
+sent bare. CORS preflights (`OPTIONS` with `Access-Control-Request-Method`) skip the chain, since a browser will not
+attach credentials to one. The authenticated name appears in the access log's user field.
 
 `trusted_proxies` is matched against the connection's remote address, never `X-Forwarded-For`, so the header cannot be
 spoofed by whoever is talking to proxeus — from an address outside the list the header is ignored entirely and the
 remaining providers still run.
+
+> Keep `trusted_proxies` to the narrowest range that covers the proxy itself, ideally a `/32`. Anything that can
+> connect to proxeus from inside that range can name itself any user it likes.
+
+`Identity.Groups` is parsed from the token or header and put in the request context, but proxeus does not act on it
+yet — it is the seam for authorization later.
 
 > The `auth` block is read at **startup only**: OIDC discovery and the provider chain are built once. A SIGHUP reload
 > picks up every other change but not this one — restart proxeus after editing it.
@@ -163,7 +173,9 @@ proxeus:
     trusted_header:
       user_header: X-Forwarded-User
       groups_header: X-Forwarded-Groups
-      trusted_proxies: [10.0.0.0/8]   # the oauth2-proxy pods
+      # the oauth2-proxy address only — everything in this range can claim to
+      # be any user
+      trusted_proxies: [10.42.7.13/32]
 ```
 
 ### Grafana
@@ -181,7 +193,7 @@ datasources:
       basicAuthPassword: ...
 ```
 
-Forwarding the logged-in user's OIDC token instead (Grafana must be configured with the same issuer):
+Forwarding the logged-in user's OIDC token instead, with Grafana configured against the same issuer:
 
 ```yaml
 datasources:
@@ -191,6 +203,10 @@ datasources:
     jsonData:
       oauthPassThru: true
 ```
+
+The forwarded token is issued to *Grafana*, so the issuer has to be told to name proxeus in it: add proxeus'
+`client_id` to the token's `aud` (in Keycloak, an "Audience" mapper on the Grafana client's dedicated scope adding the
+proxeus client). Without that step proxeus rejects every forwarded token as the wrong audience.
 
 ## Prometheus fork
 

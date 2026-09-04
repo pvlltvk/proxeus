@@ -40,8 +40,11 @@ proxeus:
   #       front of all of this and rejects anything that is not `Basic`, bearer
   #       tokens included -- use one or the other.
   #auth:
-  #  # request path prefixes that skip authentication, resolved relative to
-  #  # --web.route-prefix. These are the defaults.
+  #  # request paths that skip authentication, matched verbatim on whole
+  #  # segments (/metrics also covers /metrics/foo, but not /metrics2).
+  #  # Include --web.route-prefix yourself if you set one. Setting this
+  #  # replaces the defaults, which are /-/healthy, /-/ready and
+  #  # --metrics-path with the route prefix already applied.
   #  exempt_paths: [/-/healthy, /-/ready, /metrics]
   #
   #  # username -> bcrypt hash, the same shape as exporter-toolkit's
@@ -75,7 +78,9 @@ proxeus:
   #    # required: the header is only honored when the connection comes from one
   #    # of these CIDRs (the remote address, never X-Forwarded-For). From
   #    # anywhere else it is ignored and the remaining providers still run.
-  #    trusted_proxies: [127.0.0.1/32, 10.0.0.0/8]
+  #    # Keep this to the narrowest range covering the proxy itself: anything
+  #    # that can reach proxeus from inside it can claim to be any user.
+  #    trusted_proxies: [127.0.0.1/32]
 
   server_groups:
     # All upstream prometheus service discovery mechanisms are supported with the same
