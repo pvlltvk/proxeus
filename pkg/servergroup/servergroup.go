@@ -319,6 +319,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 						URL:              &config_util.URL{u},
 						HTTPClientConfig: s.Cfg.HTTPConfig.HTTPConfig,
 						SigV4Config:      s.Cfg.HTTPConfig.SigV4Config,
+						Headers:          s.headers,
 						Timeout:          model.Duration(time.Minute * 2),
 						ChunkedReadLimit: prom_config.DefaultChunkedReadLimit,
 					}
