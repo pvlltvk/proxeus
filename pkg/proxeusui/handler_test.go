@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
 // newHandlerForTest builds a Handler with a fixed Inventory injected via
@@ -40,7 +42,7 @@ func TestHandlerBackendsJSON_Envelope(t *testing.T) {
 							LastProbeAt: now,
 							Version:     "0.36.0",
 						},
-						BackendType: BackendThanos,
+						BackendType: servergroup.BackendThanos,
 					},
 				},
 			},
@@ -87,7 +89,7 @@ func TestHandlerBackendsJSON_Envelope(t *testing.T) {
 	if !tgt.Healthy {
 		t.Error("expected target to be healthy")
 	}
-	if tgt.BackendType != BackendThanos {
+	if tgt.BackendType != servergroup.BackendThanos {
 		t.Errorf("expected backendType 'thanos', got %q", tgt.BackendType)
 	}
 	if tgt.Version != "0.36.0" {

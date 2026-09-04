@@ -113,6 +113,11 @@ type ServerGroup struct {
 	client        *http.Client
 	targetManager *discovery.Manager
 
+	// headers are the HTTP headers set on every downstream request: those
+	// derived from the dialect block merged with the generic http_headers map.
+	// Computed once in ApplyConfig rather than per request.
+	headers map[string]string
+
 	OriginalURLs []string
 
 	state atomic.Value
@@ -180,7 +185,7 @@ func (s *ServerGroup) RoundTrip(r *http.Request) (*http.Response, error) {
 	for k, v := range middleware.GetHeaders(r.Context()) {
 		r.Header.Set(k, v)
 	}
-	for k, v := range s.Cfg.HTTPClientHeaders {
+	for k, v := range s.headers {
 		r.Header.Set(k, v)
 		logrus.Tracef("Set ServerGroup custom header %s: %s", k, v)
 	}
@@ -233,6 +238,7 @@ func apiClientMetricFunc(sgName string, targets []string) promclient.MultiAPIMet
 func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgroup.Group) (err error) {
 	targets := make([]string, 0)
 	apiClients := make([]promclient.API, 0)
+	queryParams := s.Cfg.queryParams()
 
 	ctx, ctxCancel := context.WithCancel(context.Background())
 	oldState := s.State()
@@ -293,8 +299,8 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 					return err
 				}
 
-				if len(s.Cfg.QueryParams) > 0 {
-					client = promclient.NewClientArgsWrap(client, s.Cfg.QueryParams)
+				if len(queryParams) > 0 {
+					client = promclient.NewClientArgsWrap(client, queryParams)
 				}
 
 				var apiClient promclient.API
@@ -313,6 +319,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 						URL:              &config_util.URL{u},
 						HTTPClientConfig: s.Cfg.HTTPConfig.HTTPConfig,
 						SigV4Config:      s.Cfg.HTTPConfig.SigV4Config,
+						Headers:          s.headers,
 						Timeout:          model.Duration(time.Minute * 2),
 						ChunkedReadLimit: prom_config.DefaultChunkedReadLimit,
 					}
@@ -447,6 +454,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 // TODO: move config + client into state object to be swapped with atomics
 func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 	s.Cfg = cfg
+	s.headers = cfg.httpHeaders()
 
 	// Copy/paste from upstream prometheus/common until https://github.com/prometheus/common/issues/144 is resolved
 	tlsConfig, err := config_util.NewTLSConfig(&cfg.HTTPConfig.HTTPConfig.TLSConfig)

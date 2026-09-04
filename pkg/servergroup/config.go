@@ -144,15 +144,25 @@ type Config struct {
 	ServiceDiscoveryConfigs discovery.Configs `yaml:"-"`
 	// PathPrefix to prepend to all queries to hosts in this servergroup
 	PathPrefix string `yaml:"path_prefix"`
-	// BackendType identifies the kind of backend for inventory-UI display
-	// (e.g. "thanos", "victoriametrics", "prometheus", "cortex", "mimir").
-	// Free-form; not validated. Auto-detection from /api/v1/status/buildinfo
-	// is unreliable (Thanos and VM omit the application field), so this is
-	// the canonical signal. Empty means the UI shows "unknown".
-	BackendType string `yaml:"backend_type,omitempty"`
+	// BackendType identifies the kind of backend this server group talks to
+	// (prometheus, thanos, victoriametrics, cortex, mimir). It gates which typed
+	// dialect block below may be set and is what the inventory UI displays;
+	// empty means the UI shows "unknown". See BackendType.
+	BackendType BackendType `yaml:"backend_type,omitempty"`
+	// Thanos are the Thanos-specific query options for this server group.
+	// Requires `backend_type: thanos`.
+	Thanos *ThanosConfig `yaml:"thanos,omitempty"`
+	// VictoriaMetrics are the VictoriaMetrics-specific query options for this
+	// server group. Requires `backend_type: victoriametrics`.
+	VictoriaMetrics *VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
+	// Mimir are the Mimir/Cortex-specific options for this server group.
+	// Requires `backend_type: mimir` or `backend_type: cortex`.
+	Mimir *MimirConfig `yaml:"mimir,omitempty"`
 	// QueryParams are a map of query params to add to all HTTP calls made to this downstream
 	// the main use-case for this is to add `nocache=1` to VictoriaMetrics downstreams
 	// (see https://github.com/jacksontj/promxy/issues/202)
+	// These are applied after the params derived from the dialect block above,
+	// so they win on key conflict.
 	QueryParams map[string]string `yaml:"query_params"`
 	// TODO cache this as a model.Time after unmarshal
 	// AntiAffinity defines how large of a gap in the timeseries will cause proxeus
@@ -266,6 +276,8 @@ type Config struct {
 	// the main use-case for this is to support the X-Scope-OrgID header required by Mimir and Cortex
 	// in multi-tenancy mode
 	// (see https://github.com/jacksontj/promxy/issues/643)
+	// These are applied after the headers derived from the dialect block, so
+	// they win on key conflict.
 	HTTPClientHeaders map[string]string `yaml:"http_headers"`
 
 	// AlignQueryRangeWithStep declares that this backend snaps query_range results
@@ -324,6 +336,10 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	// Validate inject_matchers parses at config-load time rather than failing later
 	// during a discovery sync.
 	if _, err := c.GetInjectMatchers(); err != nil {
+		return err
+	}
+
+	if err := c.validateDialect(); err != nil {
 		return err
 	}
 
