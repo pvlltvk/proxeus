@@ -1,9 +1,11 @@
 package logging
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"runtime/debug"
@@ -197,13 +199,53 @@ func (h *ApacheLoggingHandler) runHandler(rw http.ResponseWriter, r *http.Reques
 	return
 }
 
+// maxFormBody is the limit net/http itself puts on a form-urlencoded body.
+const maxFormBody = 10 << 20
+
+// parseForm is r.ParseForm with the body left readable for the handler
+// downstream. ParseForm drains the body of a form-urlencoded POST/PUT/PATCH and
+// does not put it back, which breaks the reverse proxy in front of /api/v1/*:
+// the proxied request would go out with the original Content-Length and no
+// body. Grafana's Prometheus datasource posts its queries that way.
+func parseForm(r *http.Request) {
+	if !hasFormBody(r) {
+		_ = r.ParseForm()
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxFormBody+1))
+	if err != nil || len(body) > maxFormBody {
+		// Nothing to log the params from, but the body must still reach the
+		// handler whole.
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	_ = r.ParseForm()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+}
+
+// hasFormBody reports whether ParseForm would read r's body.
+func hasFormBody(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return false
+	}
+	if r.Body == nil || r.Body == http.NoBody {
+		return false
+	}
+	ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && ct == "application/x-www-form-urlencoded"
+}
+
 func (h *ApacheLoggingHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	clientIP := r.RemoteAddr
 	if colon := strings.LastIndex(clientIP, ":"); colon != -1 {
 		clientIP = clientIP[:colon]
 	}
 
-	r.ParseForm()
+	parseForm(r)
 
 	record := &ApacheLogRecord{
 		ResponseWriter: rw,
