@@ -100,10 +100,18 @@ var (
 // emptyInput is the input of the tools that take no arguments.
 type emptyInput struct{}
 
-// timeRangeInput provides the optional start/end times of the time-bounded tools.
+// timeRangeInput provides the optional start/end times of the query tools,
+// which default to the last 5 minutes.
 type timeRangeInput struct {
 	StartTime string `json:"start_time,omitempty" jsonschema:"start timestamp for the query. Accepts: Unix epoch seconds, RFC3339, or a duration string relative to now (e.g. 5m, 1h30m, etc). Defaults to 5m ago."`
 	EndTime   string `json:"end_time,omitempty" jsonschema:"end timestamp for the query. Accepts: Unix epoch seconds, RFC3339, or a duration string relative to now (e.g. 5m, 1h30m, etc). Defaults to current time."`
+}
+
+// openTimeRangeInput provides the optional start/end times of the metadata
+// tools, which query the whole retention of the backends when unset.
+type openTimeRangeInput struct {
+	StartTime string `json:"start_time,omitempty" jsonschema:"start timestamp for the query. Accepts: Unix epoch seconds, RFC3339, or a duration string relative to now (e.g. 5m, 1h30m, etc). Unbounded if unset."`
+	EndTime   string `json:"end_time,omitempty" jsonschema:"end timestamp for the query. Accepts: Unix epoch seconds, RFC3339, or a duration string relative to now (e.g. 5m, 1h30m, etc). Unbounded if unset."`
 }
 
 // truncatableInput provides the optional per-call truncation limit. Unlike
@@ -127,21 +135,21 @@ type rangeQueryInput struct {
 }
 
 type seriesInput struct {
-	Matches []string `json:"matches" jsonschema:"series selector arguments that select the series to return,required"`
-	timeRangeInput
+	Matches []string `json:"matches" jsonschema:"series selector arguments that select the series to return"`
+	openTimeRangeInput
 	truncatableInput
 }
 
 type labelNamesInput struct {
 	Matches []string `json:"matches,omitempty" jsonschema:"series selector arguments to filter label names"`
-	timeRangeInput
+	openTimeRangeInput
 	truncatableInput
 }
 
 type labelValuesInput struct {
-	Label   string   `json:"label" jsonschema:"the label to query values for,required"`
+	Label   string   `json:"label" jsonschema:"the label to query values for"`
 	Matches []string `json:"matches,omitempty" jsonschema:"series selector arguments to filter label values"`
-	timeRangeInput
+	openTimeRangeInput
 	truncatableInput
 }
 

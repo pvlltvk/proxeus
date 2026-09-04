@@ -212,6 +212,11 @@ func TestProber_Inventory_TimeRangeAndRemoteRead(t *testing.T) {
 				{Name: "relative", RelativeTimeRangeConfig: &servergroup.RelativeTimeRangeConfig{Start: &relStart, End: &relEnd}},
 				{Name: "relative-open", RelativeTimeRangeConfig: &servergroup.RelativeTimeRangeConfig{Start: &relStart}},
 				{Name: "absolute", AbsoluteTimeRangeConfig: &servergroup.AbsoluteTimeRangeConfig{Start: absStart}},
+				{
+					Name:                    "both",
+					AbsoluteTimeRangeConfig: &servergroup.AbsoluteTimeRangeConfig{Start: absStart},
+					RelativeTimeRangeConfig: &servergroup.RelativeTimeRangeConfig{End: &relEnd},
+				},
 			},
 		},
 	}
@@ -226,6 +231,7 @@ func TestProber_Inventory_TimeRangeAndRemoteRead(t *testing.T) {
 		{timeRange: "now-90d to now-3d"},
 		{timeRange: "now-90d to +inf"},
 		{timeRange: "2024-01-01T00:00:00Z to +inf"},
+		{timeRange: "2024-01-01T00:00:00Z to +inf and -inf to now-3d"},
 	}
 	if len(inv.Groups) != len(want) {
 		t.Fatalf("expected %d groups, got %d", len(want), len(inv.Groups))

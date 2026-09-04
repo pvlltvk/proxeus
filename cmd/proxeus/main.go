@@ -125,7 +125,7 @@ type cliOpts struct {
 	MCPEnable       bool          `long:"mcp.enable" description:"Enable the MCP (Model Context Protocol) endpoint at <route-prefix>/mcp. Read-only; it must not be exposed without authentication."`
 	MCPMaxSeries    int           `long:"mcp.max-series" description:"Maximum number of series (or label names/values) an MCP tool call returns. A per-call truncation_limit may lower it, never raise it. 0 disables the cap." default:"100"`
 	MCPMaxSamples   int           `long:"mcp.max-samples" description:"Maximum number of samples an MCP tool call returns. 0 disables the cap." default:"5000"`
-	MCPQueryTimeout time.Duration `long:"mcp.query-timeout" description:"Maximum time a single API call made by an MCP tool may take." default:"60s"`
+	MCPQueryTimeout time.Duration `long:"mcp.query-timeout" description:"Maximum time an MCP tool call may take. 0 means no timeout." default:"60s"`
 
 	ShutdownDelay   time.Duration `long:"http.shutdown-delay" description:"time to wait before shutting down the http server, this allows for a grace period for upstreams (e.g. LoadBalancers) to discover the new stopping status through healthchecks" default:"10s"`
 	ShutdownTimeout time.Duration `long:"http.shutdown-timeout" description:"max time to wait for a graceful shutdown of the HTTP server" default:"60s"`
@@ -704,11 +704,14 @@ func main() {
 		// listener, so they take the same dedup, pushdown and metrics path
 		// as any other HTTP client.
 		mcpHandler, err := mcp.New(mcp.Config{
-			APIURL:       internalURL.String(),
+			// The internal handler mounts its routes under the route prefix,
+			// so the tools have to call it through the prefix too.
+			APIURL:       internalURL.JoinPath(webOptions.RoutePrefix).String(),
 			MaxSeries:    opts.MCPMaxSeries,
 			MaxSamples:   opts.MCPMaxSamples,
 			QueryTimeout: opts.MCPQueryTimeout,
 			Inventory:    proxeusUIHandler.Inventory,
+			Metadata:     ps.Metadata,
 		})
 		if err != nil {
 			logrus.Fatalf("Error creating MCP handler: %v", err)

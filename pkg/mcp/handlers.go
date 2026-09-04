@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,14 +26,20 @@ const defaultLookback = 5 * time.Minute
 // step is not given; the step is derived from the range to hit it.
 const defaultRangeQueryDataPoints = 250
 
+// maxEpochSeconds is where a Unix epoch in seconds stops fitting in a
+// time.Time's int64 nanoseconds (year 2262). A millisecond epoch is well past
+// it and would otherwise wrap into 1677.
+const maxEpochSeconds = 9.2e9
+
+// maxErrorDetail caps the API error detail quoted back to the model:
+// intermediaries answer with whole HTML pages.
+const maxErrorDetail = 512
+
 func (s *Server) query(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
 	ts, err := parseTime(in.Timestamp, time.Now())
 	if err != nil {
 		return nil, queryOutput{}, fmt.Errorf("failed to parse timestamp: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
 
 	val, warnings, err := s.api.Query(ctx, in.Query, ts)
 	if err != nil {
@@ -55,9 +62,6 @@ func (s *Server) rangeQuery(ctx context.Context, _ *mcp.CallToolRequest, in rang
 		return nil, queryOutput{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
-
 	val, warnings, err := s.api.QueryRange(ctx, in.Query, v1.Range{Start: start, End: end, Step: step})
 	if err != nil {
 		return nil, queryOutput{}, apiError("failed to execute range query", err)
@@ -66,13 +70,10 @@ func (s *Server) rangeQuery(ctx context.Context, _ *mcp.CallToolRequest, in rang
 }
 
 func (s *Server) series(ctx context.Context, _ *mcp.CallToolRequest, in seriesInput) (*mcp.CallToolResult, seriesOutput, error) {
-	start, end, err := parseTimeRange(in.timeRangeInput)
+	start, end, err := parseTimeRange(in.openTimeRangeInput)
 	if err != nil {
 		return nil, seriesOutput{}, err
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
 
 	lsets, warnings, err := s.api.Series(ctx, in.Matches, start, end)
 	if err != nil {
@@ -88,13 +89,10 @@ func (s *Server) series(ctx context.Context, _ *mcp.CallToolRequest, in seriesIn
 }
 
 func (s *Server) labelNames(ctx context.Context, _ *mcp.CallToolRequest, in labelNamesInput) (*mcp.CallToolResult, labelNamesOutput, error) {
-	start, end, err := parseTimeRange(in.timeRangeInput)
+	start, end, err := parseTimeRange(in.openTimeRangeInput)
 	if err != nil {
 		return nil, labelNamesOutput{}, err
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
 
 	names, warnings, err := s.api.LabelNames(ctx, in.Matches, start, end)
 	if err != nil {
@@ -109,13 +107,10 @@ func (s *Server) labelValues(ctx context.Context, _ *mcp.CallToolRequest, in lab
 	if in.Label == "" {
 		return nil, labelValuesOutput{}, errors.New("label parameter is required")
 	}
-	start, end, err := parseTimeRange(in.timeRangeInput)
+	start, end, err := parseTimeRange(in.openTimeRangeInput)
 	if err != nil {
 		return nil, labelValuesOutput{}, err
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
 
 	values, warnings, err := s.api.LabelValues(ctx, in.Label, in.Matches, start, end)
 	if err != nil {
@@ -131,17 +126,14 @@ func (s *Server) labelValues(ctx context.Context, _ *mcp.CallToolRequest, in lab
 }
 
 func (s *Server) metricMetadata(ctx context.Context, _ *mcp.CallToolRequest, in metricMetadataInput) (*mcp.CallToolResult, metricMetadataOutput, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
-
 	// The limit argument is forwarded to the backends as-is; the server-wide
 	// cap is applied to whatever comes back.
-	md, err := s.api.Metadata(ctx, in.Metric, in.Limit)
+	md, err := s.cfg.Metadata(ctx, in.Metric, in.Limit)
 	if err != nil {
 		return nil, metricMetadataOutput{}, apiError("failed to get metric metadata", err)
 	}
 
-	kept, tr := truncateSlice(slices.Sorted(maps.Keys(md)), s.seriesLimit(0))
+	kept, tr := truncateSlice(slices.Sorted(maps.Keys(md)), s.cfg.MaxSeries)
 	out := metricMetadataOutput{Metadata: make(map[string][]metadataEntry, len(kept)), truncation: tr}
 	for _, name := range kept {
 		entries := make([]metadataEntry, len(md[name]))
@@ -154,9 +146,6 @@ func (s *Server) metricMetadata(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 func (s *Server) buildInfo(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, buildInfoOutput, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
-	defer cancel()
-
 	bi, err := s.api.Buildinfo(ctx)
 	if err != nil {
 		return nil, buildInfoOutput{}, apiError("failed to get build info", err)
@@ -211,11 +200,13 @@ func (s *Server) listServerGroups(_ context.Context, _ *mcp.CallToolRequest, _ e
 // the series cap and then the sample cap.
 func (s *Server) toQueryOutput(val model.Value, warnings v1.Warnings, argLimit int) queryOutput {
 	kept, tr := truncateSlice(flattenValue(val), s.seriesLimit(argLimit))
-	kept, cutSamples := capSamples(kept, s.cfg.MaxSamples)
-	if cutSamples {
+	kept, samplesBefore := capSamples(kept, s.cfg.MaxSamples)
+	if samplesBefore > 0 {
 		tr.Truncated = true
 		tr.Returned = len(kept)
-		tr.Note = fmt.Sprintf("the result was cut to the server-wide cap of %d samples; shorten the range, widen the step or aggregate", s.cfg.MaxSamples)
+		tr.Note = appendNote(tr.Note, fmt.Sprintf(
+			"only %d of %d samples are shown (server-wide cap), leaving %d series; shorten the range, widen the step or aggregate",
+			s.cfg.MaxSamples, samplesBefore, len(kept)))
 	}
 	return queryOutput{
 		ResultType: val.Type().String(),
@@ -279,11 +270,17 @@ func truncateSlice[T any](vals []T, limit int) ([]T, truncation) {
 
 // capSamples trims series so that at most limit samples are returned in total
 // (0 means uncapped), dropping whole series once the budget runs out and
-// cutting the one that straddles it. It reports whether anything was dropped.
-func capSamples(series []seriesResult, limit int) ([]seriesResult, bool) {
-	if limit <= 0 {
-		return series, false
+// cutting the one that straddles it. It returns the number of samples there
+// were before the cut, or 0 when nothing was dropped.
+func capSamples(series []seriesResult, limit int) ([]seriesResult, int) {
+	total := 0
+	for i := range series {
+		total += len(series[i].Values)
 	}
+	if limit <= 0 || total <= limit {
+		return series, 0
+	}
+
 	budget := limit
 	for i := range series {
 		if n := len(series[i].Values); n <= budget {
@@ -291,12 +288,20 @@ func capSamples(series []seriesResult, limit int) ([]seriesResult, bool) {
 			continue
 		}
 		if budget == 0 {
-			return series[:i], true
+			return series[:i], total
 		}
 		series[i].Values = series[i].Values[:budget]
-		return series[:i+1], true
+		return series[:i+1], total
 	}
-	return series, false
+	return series, 0
+}
+
+// appendNote joins the truncation notes of the caps that fired.
+func appendNote(existing, note string) string {
+	if existing == "" {
+		return note
+	}
+	return existing + " " + note
 }
 
 // parseTime accepts a Unix epoch (seconds, possibly fractional), an RFC3339
@@ -307,6 +312,9 @@ func parseTime(s string, def time.Time) (time.Time, error) {
 		return def, nil
 	}
 	if epoch, err := strconv.ParseFloat(s, 64); err == nil {
+		if math.IsNaN(epoch) || math.IsInf(epoch, 0) || math.Abs(epoch) > maxEpochSeconds {
+			return time.Time{}, fmt.Errorf("%q is out of range for a timestamp: pass Unix epoch seconds (not milliseconds) or an RFC3339 timestamp", s)
+		}
 		return time.Unix(0, int64(epoch*float64(time.Second))), nil
 	}
 	if ts, err := time.Parse(time.RFC3339, s); err == nil {
@@ -320,7 +328,7 @@ func parseTime(s string, def time.Time) (time.Time, error) {
 
 // parseTimeRange parses the optional start/end of the metadata tools. Unset
 // bounds stay zero, which the Prometheus API reads as "no bound".
-func parseTimeRange(tr timeRangeInput) (start, end time.Time, err error) {
+func parseTimeRange(tr openTimeRangeInput) (start, end time.Time, err error) {
 	if start, err = parseTime(tr.StartTime, time.Time{}); err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("failed to parse start_time: %w", err)
 	}
@@ -354,11 +362,19 @@ func apiError(what string, err error) error {
 	if errors.As(err, &apiErr) {
 		msg := apiErr.Msg
 		if apiErr.Detail != "" {
-			msg += ": " + apiErr.Detail
+			msg += ": " + clip(apiErr.Detail, maxErrorDetail)
 		}
 		return fmt.Errorf("%s: %s", what, msg)
 	}
 	return fmt.Errorf("%s: %w", what, err)
+}
+
+// clip shortens s to at most limit bytes, dropping any partial trailing rune.
+func clip(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return strings.ToValidUTF8(s[:limit], "") + "... (truncated)"
 }
 
 func metricToMap(m model.Metric) map[string]string {

@@ -12,6 +12,8 @@
 package mcp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -49,11 +51,17 @@ type Config struct {
 	MaxSeries  int
 	MaxSamples int
 
-	// QueryTimeout bounds a single API call.
+	// QueryTimeout bounds a single tool call. Zero means no timeout.
 	QueryTimeout time.Duration
 
 	// Inventory returns the server_group snapshot list_server_groups reports.
 	Inventory func() proxeusui.Inventory
+
+	// Metadata returns the metric metadata merged across the server_groups.
+	// It does not go over the API like the other tools do: the internal
+	// listener serves /api/v1/metadata from the scrape manager, which proxeus
+	// never runs, so that endpoint always answers with an empty set.
+	Metadata func(ctx context.Context, metric, limit string) (map[string][]v1.Metadata, error)
 }
 
 // Server is the MCP endpoint as an http.Handler. Mount it at
@@ -67,8 +75,17 @@ type Server struct {
 	cfg Config
 }
 
-// New builds the MCP endpoint. The only failure mode is an unusable APIURL.
+// New builds the MCP endpoint.
 func New(cfg Config) (*Server, error) {
+	// The SDK does not recover panics in tool handlers, so a missing
+	// dependency has to fail here rather than on the first tool call.
+	if cfg.Inventory == nil {
+		return nil, errors.New("mcp: Config.Inventory is required")
+	}
+	if cfg.Metadata == nil {
+		return nil, errors.New("mcp: Config.Metadata is required")
+	}
+
 	client, err := api.NewClient(api.Config{Address: cfg.APIURL})
 	if err != nil {
 		return nil, fmt.Errorf("error creating prometheus api client: %w", err)
@@ -80,14 +97,14 @@ func New(cfg Config) (*Server, error) {
 		&mcp.Implementation{Name: "proxeus", Title: "Proxeus", Version: version.Version},
 		&mcp.ServerOptions{Instructions: instructions},
 	)
-	addTool(m, queryToolDef, s.query)
-	addTool(m, rangeQueryToolDef, s.rangeQuery)
-	addTool(m, seriesToolDef, s.series)
-	addTool(m, labelNamesToolDef, s.labelNames)
-	addTool(m, labelValuesToolDef, s.labelValues)
-	addTool(m, metricMetadataToolDef, s.metricMetadata)
-	addTool(m, buildInfoToolDef, s.buildInfo)
-	addTool(m, listServerGroupsToolDef, s.listServerGroups)
+	addTool(s, m, queryToolDef, s.query)
+	addTool(s, m, rangeQueryToolDef, s.rangeQuery)
+	addTool(s, m, seriesToolDef, s.series)
+	addTool(s, m, labelNamesToolDef, s.labelNames)
+	addTool(s, m, labelValuesToolDef, s.labelValues)
+	addTool(s, m, metricMetadataToolDef, s.metricMetadata)
+	addTool(s, m, buildInfoToolDef, s.buildInfo)
+	addTool(s, m, listServerGroupsToolDef, s.listServerGroups)
 
 	s.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return m },

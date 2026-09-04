@@ -280,7 +280,7 @@ exactly as they do for any other client.
 | `--mcp.enable` | serve the MCP endpoint | off |
 | `--mcp.max-series` | max series (or label names/values) a tool call returns; `0` disables the cap | `100` |
 | `--mcp.max-samples` | max samples a tool call returns; `0` disables the cap | `5000` |
-| `--mcp.query-timeout` | max time for a single API call made by a tool | `60s` |
+| `--mcp.query-timeout` | max time for one tool call; `0` disables the timeout | `60s` |
 
 Tool names, argument names and descriptions mirror
 [prometheus/prometheus-mcp](https://github.com/prometheus/prometheus-mcp), so skills written for that server work here
@@ -301,14 +301,16 @@ unchanged. All tools are read-only; there are no admin or TSDB tools.
 missing or a range partial because the backend holding it is unhealthy or configured for a different time range.
 
 Results are capped by the flags above; `truncation_limit` may lower a cap for one call but never raise it. A truncated
-result says so (`truncated`, `returned`, `total_before_truncation`), so the model can narrow the query instead of
-guessing that the data does not exist. Tool calls are counted in `proxeus_mcp_tool_calls_total{tool,result}` and timed
+result says so (`truncated`, `returned`, `total_before_truncation`, `note`), so the model can narrow the query instead
+of guessing that the data does not exist. For `range_query` the sample cap is usually the one that bites first: with
+the default step (~250 points per series) 5000 samples is about 20 series, well below `--mcp.max-series`. Tool calls are counted in `proxeus_mcp_tool_calls_total{tool,result}` and timed
 in `proxeus_mcp_tool_call_duration_seconds{tool}`.
 
-> **Do not expose this endpoint unauthenticated.** It carries no auth of its own: anything that can POST to `/mcp` can
-> read every metric in every backend. Put basic auth or TLS client certs in front of it with `--web.config.file` (see
-> the [Prometheus HTTPS/auth schema](https://prometheus.io/docs/prometheus/latest/configuration/https/)), or terminate
-> auth in your ingress. MCP clients pass credentials in the `Authorization` header:
+> **Do not expose this endpoint unauthenticated.** The MCP package carries no auth of its own: anything that can POST
+> to `/mcp` can read every metric in every backend. It is served by the same router as everything else, so an
+> [`auth` block](#authentication) covers it — do not put `/mcp` in `exempt_paths`. Basic auth via `--web.config.file`
+> (the [Prometheus HTTPS/auth schema](https://prometheus.io/docs/prometheus/latest/configuration/https/)) or auth
+> terminated in your ingress work too. MCP clients pass credentials in the `Authorization` header:
 
 ```json
 {

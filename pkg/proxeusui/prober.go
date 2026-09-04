@@ -336,15 +336,18 @@ func (p *Prober) Inventory() Inventory {
 // timeRangeDescription renders the time range a server_group is configured to
 // answer for, e.g. "now-90d to now-3d" or "2024-01-01T00:00:00Z to +inf".
 // Unconfigured bounds are reported as -inf/+inf; the empty string means the
-// group has no time range at all and is queried for everything.
+// group has no time range at all and is queried for everything. A group with
+// both an absolute and a relative range is filtered by both, so both are
+// rendered, joined by "and".
 func timeRangeDescription(sgCfg *servergroup.Config) string {
+	var ranges []string
 	if tr := sgCfg.AbsoluteTimeRangeConfig; tr != nil {
-		return absoluteBound(tr.Start, "-inf") + " to " + absoluteBound(tr.End, "+inf")
+		ranges = append(ranges, absoluteBound(tr.Start, "-inf")+" to "+absoluteBound(tr.End, "+inf"))
 	}
 	if tr := sgCfg.RelativeTimeRangeConfig; tr != nil {
-		return relativeBound(tr.Start, "-inf") + " to " + relativeBound(tr.End, "+inf")
+		ranges = append(ranges, relativeBound(tr.Start, "-inf")+" to "+relativeBound(tr.End, "+inf"))
 	}
-	return ""
+	return strings.Join(ranges, " and ")
 }
 
 func absoluteBound(t time.Time, unset string) string {

@@ -22,9 +22,11 @@ var toolCalls = promauto.NewCounterVec(
 
 var toolCallDuration = promauto.NewHistogramVec(
 	prometheus.HistogramOpts{
-		Name:    "proxeus_mcp_tool_call_duration_seconds",
-		Help:    "Duration of MCP tool calls, by tool.",
-		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+		Name: "proxeus_mcp_tool_call_duration_seconds",
+		Help: "Duration of MCP tool calls, by tool.",
+		// Up to 102.4s, so the default --mcp.query-timeout of 60s falls
+		// inside the buckets rather than in +Inf.
+		Buckets: prometheus.ExponentialBuckets(0.05, 2, 12),
 	},
 	[]string{"tool"},
 )
@@ -34,10 +36,16 @@ type truncatable interface {
 	wasTruncated() bool
 }
 
-// addTool registers an instrumented tool: one duration observation and one
-// call counted per invocation.
-func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
-	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+// addTool registers a tool on m, bounded by the configured query timeout and
+// instrumented: one duration observation and one call counted per invocation.
+func addTool[In, Out any](s *Server, m *mcp.Server, def *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
+	mcp.AddTool(m, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		if s.cfg.QueryTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, s.cfg.QueryTimeout)
+			defer cancel()
+		}
+
 		start := time.Now()
 		res, out, err := h(ctx, req, in)
 		toolCallDuration.WithLabelValues(def.Name).Observe(time.Since(start).Seconds())

@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,23 +14,25 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 
 	"github.com/pvlltvk/proxeus/pkg/fakeprom"
 	"github.com/pvlltvk/proxeus/pkg/proxeusui"
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
-// testBackend is fakeprom plus the endpoints it does not implement
-// (/api/v1/metadata), i.e. everything the tools call.
+// testBackend stands in for proxeus's own API.
 func testBackend(series int) http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("/", fakeprom.New(fakeprom.Config{Series: series}))
-	mux.HandleFunc("/api/v1/metadata", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"status":"success","data":{`+ //nolint:errcheck
-			`"fake_metric":[{"type":"gauge","help":"a fake metric","unit":""}],`+
-			`"other_metric":[{"type":"counter","help":"another one","unit":"seconds"}]}}`)
-	})
-	return mux
+	return fakeprom.New(fakeprom.Config{Series: series})
+}
+
+// testMetadata stands in for the federated metadata lookup, which does not go
+// over the API.
+func testMetadata(_ context.Context, _, _ string) (map[string][]v1.Metadata, error) {
+	return map[string][]v1.Metadata{
+		"fake_metric":  {{Type: "gauge", Help: "a fake metric"}},
+		"other_metric": {{Type: "counter", Help: "another one", Unit: "seconds"}},
+	}, nil
 }
 
 // newTestSession serves an MCP endpoint in front of backend and returns a
@@ -39,9 +43,12 @@ func newTestSession(t *testing.T, backend http.Handler, cfg Config) *mcp.ClientS
 	backendSrv := httptest.NewServer(backend)
 	t.Cleanup(backendSrv.Close)
 
-	cfg.APIURL = backendSrv.URL
-	if cfg.QueryTimeout == 0 {
-		cfg.QueryTimeout = 10 * time.Second
+	cfg.APIURL = backendSrv.URL + cfg.APIURL
+	if cfg.Inventory == nil {
+		cfg.Inventory = func() proxeusui.Inventory { return proxeusui.Inventory{} }
+	}
+	if cfg.Metadata == nil {
+		cfg.Metadata = testMetadata
 	}
 	s, err := New(cfg)
 	if err != nil {
@@ -368,12 +375,12 @@ func TestListServerGroups(t *testing.T) {
 				Targets: []proxeusui.TargetInfo{
 					{
 						URL:         "http://thanos:10902",
-						BackendType: proxeusui.BackendThanos,
+						BackendType: servergroup.BackendThanos,
 						ProbeResult: proxeusui.ProbeResult{Healthy: true, LastProbeAt: probedAt, Version: "0.36.0"},
 					},
 					{
 						URL:         "http://thanos-2:10902",
-						BackendType: proxeusui.BackendThanos,
+						BackendType: servergroup.BackendThanos,
 						ProbeResult: proxeusui.ProbeResult{Healthy: false, LastError: "probe timed out", LastProbeAt: probedAt},
 					},
 				},
@@ -403,5 +410,174 @@ func TestListServerGroups(t *testing.T) {
 	}
 	if out.Groups[1].BackendType != string(proxeusui.BackendUnknown) {
 		t.Errorf("group without targets: got backend type %q, want unknown", out.Groups[1].BackendType)
+	}
+}
+
+func TestNewRequiresDependencies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "no inventory", cfg: Config{Metadata: testMetadata}},
+		{name: "no metadata", cfg: Config{Inventory: func() proxeusui.Inventory { return proxeusui.Inventory{} }}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := New(tc.cfg); err == nil {
+				t.Error("expected an error, got none")
+			}
+		})
+	}
+}
+
+// TestAPIURLWithRoutePrefix guards the tools against a proxeus running under
+// --web.route-prefix: the API base URL then carries a path.
+func TestAPIURLWithRoutePrefix(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("/foo/", http.StripPrefix("/foo", testBackend(1)))
+	// newTestSession appends APIURL to the backend's, so this is the route
+	// prefix the API is served under.
+	session := newTestSession(t, mux, Config{APIURL: "/foo"})
+
+	out := callTool[queryOutput](t, session, "query", map[string]any{"query": "fake_metric"})
+	if len(out.Result) != 1 {
+		t.Errorf("got %d series, want 1", len(out.Result))
+	}
+}
+
+func TestQueryTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		{name: "no timeout", timeout: 0},
+		{name: "generous timeout", timeout: 10 * time.Second},
+		{name: "expired timeout", timeout: time.Nanosecond, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := newTestSession(t, testBackend(1), Config{QueryTimeout: tc.timeout})
+
+			res := call(t, session, "query", map[string]any{"query": "fake_metric"})
+			if res.IsError != tc.wantErr {
+				t.Errorf("IsError: got %v, want %v (%s)", res.IsError, tc.wantErr, resultText(res))
+			}
+		})
+	}
+}
+
+func TestSeriesRequiresMatches(t *testing.T) {
+	session := newTestSession(t, testBackend(1), Config{})
+
+	res := call(t, session, "series", nil)
+	if !res.IsError {
+		t.Fatal("expected an error result when matches is missing")
+	}
+	if got := resultText(res); !strings.Contains(got, "matches") {
+		t.Errorf("error text: got %q, want it to name the missing argument", got)
+	}
+}
+
+func TestMetadataError(t *testing.T) {
+	session := newTestSession(t, testBackend(1), Config{
+		Metadata: func(context.Context, string, string) (map[string][]v1.Metadata, error) {
+			return nil, errors.New("all server_groups failed")
+		},
+	})
+
+	res := call(t, session, "metric_metadata", nil)
+	if !res.IsError {
+		t.Fatal("expected an error result")
+	}
+	if got := resultText(res); !strings.Contains(got, "all server_groups failed") {
+		t.Errorf("error text: got %q", got)
+	}
+}
+
+func TestBothCapsTruncate(t *testing.T) {
+	start := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
+	session := newTestSession(t, testBackend(4), Config{MaxSeries: 3, MaxSamples: 8})
+
+	out := callTool[queryOutput](t, session, "range_query", map[string]any{
+		"query":      "fake_metric",
+		"start_time": strconv.FormatInt(start.Unix(), 10),
+		"end_time":   strconv.FormatInt(start.Add(5*time.Minute).Unix(), 10),
+		"step":       "1m",
+	})
+
+	// 4 series of 6 samples: the series cap keeps 3, the sample cap then keeps
+	// the first one whole and cuts the second at the 8-sample budget.
+	if len(out.Result) != 2 {
+		t.Fatalf("got %d series, want 2", len(out.Result))
+	}
+	if got := len(out.Result[1].Values); got != 2 {
+		t.Errorf("second series carries %d samples, want 2", got)
+	}
+	if !strings.Contains(out.Note, "3 of 4 entries") {
+		t.Errorf("note does not report the series cap: %q", out.Note)
+	}
+	if !strings.Contains(out.Note, "8 of 18 samples") {
+		t.Errorf("note does not report the sample cap: %q", out.Note)
+	}
+}
+
+func TestParseTime(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    time.Time
+		wantErr bool
+	}{
+		{in: "1779580800", want: time.Unix(1779580800, 0)},
+		{in: "2026-05-23T14:00:00Z", want: time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)},
+		{in: "1779580800000", wantErr: true}, // milliseconds
+		{in: "NaN", wantErr: true},
+		{in: "+Inf", wantErr: true},
+		{in: "1e300", wantErr: true},
+		{in: "yesterday", wantErr: true},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parseTime(tc.in, time.Time{})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTimeRelative(t *testing.T) {
+	got, err := parseTime("1h30m", time.Time{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d := time.Since(got); d < 90*time.Minute || d > 91*time.Minute {
+		t.Errorf("1h30m resolved to %v ago, want ~90m", d)
+	}
+}
+
+func TestAPIErrorDetailIsClipped(t *testing.T) {
+	detail := strings.Repeat("x", 4096)
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"status": "error", "errorType": "bad_data", "error": "boom", "errorDetail": detail,
+		})
+	})
+	session := newTestSession(t, backend, Config{})
+
+	res := call(t, session, "query", map[string]any{"query": "up"})
+	if !res.IsError {
+		t.Fatal("expected an error result")
+	}
+	if got := len(resultText(res)); got > maxErrorDetail+256 {
+		t.Errorf("error text is %d bytes, want the detail clipped to ~%d", got, maxErrorDetail)
 	}
 }
