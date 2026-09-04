@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/pkg/errors"
 )
@@ -65,12 +66,13 @@ func FormPrefix(form url.Values) string {
 	return buf.String()
 }
 
-const ApacheFormatPattern = "%s - - [%s] \"%s %d %d\" %f %s\n"
+const ApacheFormatPattern = "%s - %s [%s] \"%s %d %d\" %f %s\n"
 
 type ApacheLogRecord struct {
 	http.ResponseWriter `json:"-"`
 
 	IP            string    `json:"remoteAddr,omitempty"`
+	User          string    `json:"user,omitempty"`
 	Time          time.Time `json:"time,omitempty"`
 	Method        string    `json:"method,omitempty"`
 	URI           string    `json:"path,omitempty"`
@@ -84,8 +86,33 @@ type ApacheLogRecord struct {
 func (r *ApacheLogRecord) Log(out io.Writer) {
 	timeFormatted := r.Time.Format("02/Jan/2006 15:04:05")
 	requestLine := fmt.Sprintf("%s %s %s", r.Method, r.URI, r.Protocol)
-	fmt.Fprintf(out, ApacheFormatPattern, r.IP, timeFormatted, requestLine, r.Status, r.ResponseBytes,
+	user := r.User
+	if user == "" {
+		user = "-"
+	}
+	fmt.Fprintf(out, ApacheFormatPattern, r.IP, user, timeFormatted, requestLine, r.Status, r.ResponseBytes,
 		r.ElapsedTime, r.FormPrefix)
+}
+
+// SetUser records the authenticated user of a request on its access log line.
+// It is a no-op when access logging is disabled, in which case w is whatever
+// net/http handed us rather than the log record.
+//
+// The name comes from a token or a header, so whitespace and control
+// characters are replaced: the text format is positional, and a user called
+// "a b" or one carrying a newline could otherwise forge log fields or lines.
+func SetUser(w http.ResponseWriter, user string) {
+	record, ok := w.(*ApacheLogRecord)
+	if !ok {
+		return
+	}
+
+	record.User = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, user)
 }
 
 func (r *ApacheLogRecord) LogJson(out io.Writer) {

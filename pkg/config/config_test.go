@@ -2,6 +2,7 @@ package proxyconfig
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -118,5 +119,54 @@ remote_write:
 				}
 			}
 		})
+	}
+}
+
+// The `auth` block is optional: absent means every request is anonymous, which
+// is what proxeus has always done.
+func TestAuthConfig(t *testing.T) {
+	cfg, err := ConfigFromBytes([]byte("proxeus:\n  server_groups: []\n"))
+	if err != nil {
+		t.Fatalf("ConfigFromBytes: %v", err)
+	}
+	if cfg.Auth != nil {
+		t.Fatalf("Auth = %+v, want nil when there is no auth block", cfg.Auth)
+	}
+
+	cfg, err = ConfigFromBytes([]byte(`
+proxeus:
+  auth:
+    trusted_header:
+      user_header: X-Forwarded-User
+      trusted_proxies: [127.0.0.1/32]
+`))
+	if err != nil {
+		t.Fatalf("ConfigFromBytes: %v", err)
+	}
+	if cfg.Auth == nil || cfg.Auth.TrustedHeader.UserHeader != "X-Forwarded-User" {
+		t.Fatalf("Auth = %+v, want the trusted_header provider", cfg.Auth)
+	}
+
+	if _, err := ConfigFromBytes([]byte("proxeus:\n  auth: {}\n")); err == nil {
+		t.Fatal("an auth block with no provider was accepted")
+	}
+}
+
+// Config.String() is what /api/v1/status/config serves, so the basic auth
+// hashes must not survive the round trip -- they are offline-crackable.
+func TestAuthConfigRedactsPasswordHashes(t *testing.T) {
+	const hash = "$2a$10$nRYmVvmznzCXqV9O7Bq/beEBbTBlv7GVEt9gyhqiGt.lZdBYcojHK"
+
+	cfg, err := ConfigFromBytes([]byte("proxeus:\n  auth:\n    basic:\n      users:\n        alice: " + hash + "\n"))
+	if err != nil {
+		t.Fatalf("ConfigFromBytes: %v", err)
+	}
+
+	rendered := cfg.String()
+	if strings.Contains(rendered, hash) {
+		t.Fatalf("rendered config contains the password hash:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "<secret>") {
+		t.Fatalf("rendered config does not mark the password as a secret:\n%s", rendered)
 	}
 }

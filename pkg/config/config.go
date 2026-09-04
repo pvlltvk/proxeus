@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/prometheus/config"
 	yaml "gopkg.in/yaml.v2"
 
+	"github.com/pvlltvk/proxeus/pkg/auth"
 	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
@@ -114,6 +115,12 @@ func (c *Config) String() string {
 type ProxeusConfig struct {
 	// Config for each of the server groups proxeus is configured to aggregate
 	ServerGroups []*servergroup.Config `yaml:"server_groups"`
+
+	// Auth configures authentication of incoming requests. When absent every
+	// request is anonymous, which is proxeus' historical behavior. Unlike the
+	// rest of this config it is read at startup only -- changing it requires a
+	// restart.
+	Auth *auth.Config `yaml:"auth,omitempty"`
 
 	// CrossGroupDedup, when true, enables deterministic cross-server_group
 	// deduplication: series that match modulo each server_group's external
