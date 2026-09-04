@@ -102,7 +102,9 @@ func (h *Handler) redirectToBackends(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, path.Join(h.routePrefix, "/proxeus/backends"), http.StatusFound)
 }
 
-func (h *Handler) inventory() Inventory {
+// Inventory returns the current server_group snapshot. The MCP
+// list_server_groups tool reports the same data as the UI pages below.
+func (h *Handler) Inventory() Inventory {
 	if h.inventoryFn != nil {
 		return h.inventoryFn()
 	}
@@ -110,7 +112,7 @@ func (h *Handler) inventory() Inventory {
 }
 
 func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
-	inv := h.inventory()
+	inv := h.Inventory()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := h.tmpl.ExecuteTemplate(w, "inventory.html", inv); err != nil {
 		logrus.WithError(err).Error("proxeusui: error rendering index template")
@@ -118,7 +120,7 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveJSON(w http.ResponseWriter, r *http.Request) {
-	inv := h.inventory()
+	inv := h.Inventory()
 
 	resp := Inventory{
 		GeneratedAt: inv.GeneratedAt.UTC(),

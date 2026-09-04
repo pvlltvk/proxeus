@@ -322,6 +322,12 @@ func (p *ProxyStorage) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Metadata returns the metric metadata merged across all server_groups.
+// The state is resolved per call, so a config reload is picked up.
+func (p *ProxyStorage) Metadata(ctx context.Context, metric, limit string) (map[string][]v1.Metadata, error) {
+	return p.GetState().client.Metadata(ctx, metric, limit)
+}
+
 // MetadataHandler is an implementation of the metadata handler within the prometheus API
 func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 	// Check that "limit" is valid
@@ -336,8 +342,7 @@ func (p *ProxyStorage) MetadataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Do the metadata lookup
-	state := p.GetState()
-	metadata, err := state.client.Metadata(r.Context(), r.FormValue("metric"), r.FormValue("limit"))
+	metadata, err := p.Metadata(r.Context(), r.FormValue("metric"), r.FormValue("limit"))
 
 	// Trim the results to the requested limit
 	if limit != nil && len(metadata) > *limit {

@@ -54,6 +54,7 @@ import (
 	"github.com/pvlltvk/proxeus/pkg/federate"
 	"github.com/pvlltvk/proxeus/pkg/logging"
 	"github.com/pvlltvk/proxeus/pkg/mantineui"
+	"github.com/pvlltvk/proxeus/pkg/mcp"
 	"github.com/pvlltvk/proxeus/pkg/middleware"
 	"github.com/pvlltvk/proxeus/pkg/proxeusui"
 	"github.com/pvlltvk/proxeus/pkg/proxystorage"
@@ -120,6 +121,11 @@ type cliOpts struct {
 	ForGracePeriod            time.Duration `long:"rules.alert.for-grace-period" description:"Minimum duration between alert and restored for state. This is maintained only for alerts with configured for time greater than grace period." default:"10m"`
 	ResendDelay               time.Duration `long:"rules.alert.resend-delay" description:"Minimum amount of time to wait before resending an alert to Alertmanager." default:"1m"`
 	AlertBackfill             bool          `long:"rules.alertbackfill" description:"Enable proxeus to recalculate alert state on startup when the downstream datastore doesn't have an ALERTS_FOR_STATE"`
+
+	MCPEnable       bool          `long:"mcp.enable" description:"Enable the MCP (Model Context Protocol) endpoint at <route-prefix>/mcp. Read-only; it must not be exposed without authentication."`
+	MCPMaxSeries    int           `long:"mcp.max-series" description:"Maximum number of series (or label names/values) an MCP tool call returns. A per-call truncation_limit may lower it, never raise it. 0 disables the cap." default:"100"`
+	MCPMaxSamples   int           `long:"mcp.max-samples" description:"Maximum number of samples an MCP tool call returns. 0 disables the cap." default:"5000"`
+	MCPQueryTimeout time.Duration `long:"mcp.query-timeout" description:"Maximum time an MCP tool call may take. 0 means no timeout." default:"60s"`
 
 	ShutdownDelay   time.Duration `long:"http.shutdown-delay" description:"time to wait before shutting down the http server, this allows for a grace period for upstreams (e.g. LoadBalancers) to discover the new stopping status through healthchecks" default:"10s"`
 	ShutdownTimeout time.Duration `long:"http.shutdown-timeout" description:"max time to wait for a graceful shutdown of the HTTP server" default:"60s"`
@@ -692,6 +698,32 @@ func main() {
 
 	r.HandlerFunc("GET", opts.MetricsPath, promhttp.Handler().ServeHTTP)
 	r.HandlerFunc("GET", path.Join(webOptions.RoutePrefix, "/federate"), federateHandler.ServeHTTP)
+
+	if opts.MCPEnable {
+		// The MCP tools query proxeus through its own /api/v1 on the internal
+		// listener, so they take the same dedup, pushdown and metrics path
+		// as any other HTTP client.
+		mcpHandler, err := mcp.New(mcp.Config{
+			// The internal handler mounts its routes under the route prefix,
+			// so the tools have to call it through the prefix too.
+			APIURL:       internalURL.JoinPath(webOptions.RoutePrefix).String(),
+			MaxSeries:    opts.MCPMaxSeries,
+			MaxSamples:   opts.MCPMaxSamples,
+			QueryTimeout: opts.MCPQueryTimeout,
+			Inventory:    proxeusUIHandler.Inventory,
+			Metadata:     ps.Metadata,
+		})
+		if err != nil {
+			logrus.Fatalf("Error creating MCP handler: %v", err)
+		}
+		mcpPath := path.Join(webOptions.RoutePrefix, "/mcp")
+		// Stateless streamable HTTP only answers POST; GET and DELETE are
+		// registered so the SDK can reply 405 instead of our 404 fallback.
+		r.Handler("POST", mcpPath, mcpHandler)
+		r.Handler("GET", mcpPath, mcpHandler)
+		r.Handler("DELETE", mcpPath, mcpHandler)
+		logrus.Infof("MCP endpoint enabled at %s", mcpPath)
+	}
 
 	stopping := false
 	r.NotFound = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
