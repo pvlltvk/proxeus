@@ -102,10 +102,22 @@ func TestApacheLogRecordUser(t *testing.T) {
 }
 
 func TestSetUser(t *testing.T) {
-	record := &ApacheLogRecord{ResponseWriter: httptest.NewRecorder()}
-	SetUser(record, "alice")
-	if record.User != "alice" {
-		t.Errorf("User = %q, want %q", record.User, "alice")
+	// The name comes from a token claim or a header, and the text format is
+	// positional, so anything that could forge a field or a line is replaced.
+	tests := map[string]string{
+		"alice":              "alice",
+		"alice@example.com":  "alice@example.com",
+		"alice smith":        "alice_smith",
+		"alice\n1.2.3.4 - -": "alice_1.2.3.4_-_-",
+		"alice\tbob":         "alice_bob",
+	}
+
+	for user, want := range tests {
+		record := &ApacheLogRecord{ResponseWriter: httptest.NewRecorder()}
+		SetUser(record, user)
+		if record.User != want {
+			t.Errorf("SetUser(%q): User = %q, want %q", user, record.User, want)
+		}
 	}
 
 	// Without access logging the handler chain sees a plain ResponseWriter.

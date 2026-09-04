@@ -30,8 +30,8 @@ type contextKey int
 
 const identityKey contextKey = 0
 
-// NewContext returns ctx with id attached.
-func NewContext(ctx context.Context, id Identity) context.Context {
+// newContext returns ctx with id attached.
+func newContext(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, identityKey, id)
 }
 
@@ -59,18 +59,24 @@ type Authenticator struct {
 
 // New builds the provider chain described by cfg. It returns a nil
 // Authenticator when cfg is nil (no `auth` block: every request is anonymous),
-// so callers can leave their handler unwrapped. exemptPaths are resolved
-// relative to routePrefix, matching how proxeus registers its own routes.
+// so callers can leave their handler unwrapped. defaultExempt are the paths
+// exempted when the config does not list any of its own; the caller owns them
+// because only it knows where its routes ended up (--web.route-prefix,
+// --metrics-path).
 //
 // OIDC discovery happens here, so a bad or unreachable issuer fails startup.
-func New(ctx context.Context, cfg *Config, routePrefix string) (*Authenticator, error) {
+func New(ctx context.Context, cfg *Config, defaultExempt []string) (*Authenticator, error) {
 	if cfg == nil {
 		return nil, nil
 	}
 
-	a := &Authenticator{exemptPaths: make([]string, len(cfg.ExemptPaths))}
-	for i, p := range cfg.ExemptPaths {
-		a.exemptPaths[i] = path.Join(routePrefix, p)
+	exempt := cfg.ExemptPaths
+	if exempt == nil {
+		exempt = defaultExempt
+	}
+	a := &Authenticator{exemptPaths: make([]string, len(exempt))}
+	for i, p := range exempt {
+		a.exemptPaths[i] = path.Clean(p)
 	}
 
 	var challenges []string
@@ -101,7 +107,10 @@ func New(ctx context.Context, cfg *Config, routePrefix string) (*Authenticator, 
 // Middleware wraps next with the provider chain.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.exempt(r.URL.Path) {
+		// A CORS preflight carries no Authorization header -- the browser will
+		// not send one until it has the answer -- and the API responds to it
+		// without touching any data.
+		if a.exempt(r.URL.Path) || isPreflight(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -117,7 +126,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			}
 
 			logging.SetUser(w, id.Name)
-			next.ServeHTTP(w, r.WithContext(NewContext(r.Context(), id)))
+			next.ServeHTTP(w, r.WithContext(newContext(r.Context(), id)))
 			return
 		}
 
@@ -125,17 +134,26 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// exempt matches on whole path segments, so exempting /metrics covers
+// /metrics/foo but neither /metrics2 nor /metrics/../api/v1/query.
 func (a *Authenticator) exempt(urlPath string) bool {
+	clean := path.Clean(urlPath)
 	for _, p := range a.exemptPaths {
-		if strings.HasPrefix(urlPath, p) {
+		if clean == p || strings.HasPrefix(clean, p+"/") {
 			return true
 		}
 	}
 	return false
 }
 
+func isPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
+}
+
 // unauthorized rejects the request. The reason is only logged: telling the
 // client which part of its credentials was wrong helps nobody but an attacker.
+// The challenge is empty when trusted_header is the only provider -- there is
+// no auth scheme for "come back through the proxy", so none is advertised.
 func (a *Authenticator) unauthorized(w http.ResponseWriter, r *http.Request, err error) {
 	logrus.Debugf("Rejecting %s %s from %s: %v", r.Method, r.URL.Path, r.RemoteAddr, err)
 	if a.challenge != "" {

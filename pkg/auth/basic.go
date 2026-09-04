@@ -25,16 +25,22 @@ type basicProvider struct {
 
 	// verified holds the (user, password) pairs already checked against their
 	// hash, so a dashboard polling every few seconds pays for bcrypt once.
-	// Only successes are cached, which bounds it at one entry per user.
+	// Only successful checks of configured users are cached, which bounds it
+	// at one entry per user -- an unknown user or a wrong password must never
+	// let a caller grow this map.
 	mtx      sync.Mutex
 	verified map[string]struct{}
 }
 
 func newBasicProvider(cfg *BasicConfig) *basicProvider {
-	return &basicProvider{
-		users:    cfg.Users,
+	p := &basicProvider{
+		users:    make(map[string]string, len(cfg.Users)),
 		verified: make(map[string]struct{}, len(cfg.Users)),
 	}
+	for user, hash := range cfg.Users {
+		p.users[user] = string(hash)
+	}
+	return p
 }
 
 func (p *basicProvider) authenticate(r *http.Request) (Identity, error) {
@@ -48,19 +54,23 @@ func (p *basicProvider) authenticate(r *http.Request) (Identity, error) {
 
 	hash, known := p.users[user]
 	if !known {
-		hash = fakeHash
+		// Spend the same bcrypt round on a fixed hash, so that an unknown user
+		// costs what a wrong password costs. Nothing is cached here: the key
+		// would be entirely attacker-chosen.
+		p.bcryptMatches(fakeHash, password)
+		return Identity{}, fmt.Errorf("basic: invalid credentials for user %q", user)
 	}
 
-	if !p.compare(user, hash, password) || !known {
+	if !p.verify(user, hash, password) {
 		return Identity{}, fmt.Errorf("basic: invalid credentials for user %q", user)
 	}
 
 	return Identity{Name: user, Provider: "basic"}, nil
 }
 
-// compare reports whether password matches hash, remembering the successful
-// pairs it has already seen.
-func (p *basicProvider) compare(user, hash, password string) bool {
+// verify reports whether password matches the configured hash of user,
+// remembering the successful pairs it has already seen.
+func (p *basicProvider) verify(user, hash, password string) bool {
 	sum := sha256.Sum256([]byte(password))
 	key := user + "\x00" + hash + "\x00" + hex.EncodeToString(sum[:])
 
@@ -71,10 +81,7 @@ func (p *basicProvider) compare(user, hash, password string) bool {
 		return true
 	}
 
-	p.bcryptMtx.Lock()
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	p.bcryptMtx.Unlock()
-	if err != nil {
+	if !p.bcryptMatches(hash, password) {
 		return false
 	}
 
@@ -82,4 +89,10 @@ func (p *basicProvider) compare(user, hash, password string) bool {
 	p.verified[key] = struct{}{}
 	p.mtx.Unlock()
 	return true
+}
+
+func (p *basicProvider) bcryptMatches(hash, password string) bool {
+	p.bcryptMtx.Lock()
+	defer p.bcryptMtx.Unlock()
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }

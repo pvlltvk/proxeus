@@ -102,7 +102,7 @@ oidc:
   username_claim: preferred_username
   groups_claim: groups
 `, issuer.url))
-	a, err := New(context.Background(), cfg, "/")
+	a, err := New(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestOIDCDiscoveryFailureFailsStartup(t *testing.T) {
 	defer srv.Close()
 
 	cfg := configFromYAML(t, fmt.Sprintf("oidc:\n  issuer_url: %s\n  client_id: proxeus", srv.URL))
-	if _, err := New(context.Background(), cfg, "/"); err == nil {
+	if _, err := New(context.Background(), cfg, nil); err == nil {
 		t.Fatal("New succeeded against an issuer with no discovery document")
 	}
 }
@@ -229,7 +229,7 @@ oidc:
   issuer_url: %s
   client_id: proxeus
 `, hashFor(t, "s3cret"), issuer.url))
-	a, err := New(context.Background(), cfg, "/")
+	a, err := New(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

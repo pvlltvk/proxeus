@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+// discoveryTimeout bounds the startup fetch of the issuer's discovery
+// document, so an issuer that accepts the connection and then says nothing
+// fails the boot instead of hanging it.
+const discoveryTimeout = 30 * time.Second
 
 type oidcProvider struct {
 	verifier      *oidc.IDTokenVerifier
@@ -19,7 +25,10 @@ type oidcProvider struct {
 // newOIDCProvider fetches the issuer's discovery document and builds the token
 // verifier from it. The JWKS behind it is fetched lazily and cached by go-oidc.
 func newOIDCProvider(ctx context.Context, cfg *OIDCConfig) (*oidcProvider, error) {
-	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+	discoveryCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	defer cancel()
+
+	provider, err := oidc.NewProvider(discoveryCtx, cfg.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("auth.oidc: discovery of %s failed: %w", cfg.IssuerURL, err)
 	}

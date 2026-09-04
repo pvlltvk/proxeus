@@ -755,11 +755,13 @@ func main() {
 	// Authentication is configured at startup only: auth.New does OIDC
 	// discovery and compiles the provider chain, so a change to the `auth`
 	// block needs a restart. Without the block the router is left unwrapped.
-	authCfg, err := proxyconfig.ConfigFromFile(opts.ConfigFile)
-	if err != nil {
-		logrus.Fatalf("Error loading cfg: %v", err)
-	}
-	authenticator, err := auth.New(ctx, authCfg.Auth, webOptions.RoutePrefix)
+	// The exempt paths here are the defaults, used unless the config lists its
+	// own; only we know where these routes actually ended up.
+	authenticator, err := auth.New(ctx, ps.Config().Auth, []string{
+		path.Join(webOptions.RoutePrefix, "/-/healthy"),
+		path.Join(webOptions.RoutePrefix, "/-/ready"),
+		opts.MetricsPath,
+	})
 	if err != nil {
 		logrus.Fatalf("Error configuring authentication: %v", err)
 	}

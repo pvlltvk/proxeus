@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	config_util "github.com/prometheus/common/config"
 	yaml "gopkg.in/yaml.v2"
 
 	"golang.org/x/crypto/bcrypt"
@@ -47,7 +48,7 @@ func identityHandler(got *Identity) http.Handler {
 
 // An absent `auth` block must leave the handler chain untouched.
 func TestNewWithoutConfig(t *testing.T) {
-	a, err := New(context.Background(), nil, "/")
+	a, err := New(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -124,8 +125,8 @@ oidc:
   client_id: proxeus
 `)
 
-	if got, want := strings.Join(cfg.ExemptPaths, ","), "/-/healthy,/-/ready,/metrics"; got != want {
-		t.Errorf("ExemptPaths = %q, want %q", got, want)
+	if cfg.ExemptPaths != nil {
+		t.Errorf("ExemptPaths = %v, want nil so New falls back to the caller's defaults", cfg.ExemptPaths)
 	}
 	if got := cfg.OIDC.UsernameClaim; got != "sub" {
 		t.Errorf("UsernameClaim = %q, want %q", got, "sub")
@@ -142,7 +143,7 @@ trusted_header:
   groups_header: X-Forwarded-Groups
   trusted_proxies: [192.0.2.1/32]
 `)
-	a, err := New(context.Background(), cfg, "/")
+	a, err := New(context.Background(), cfg, []string{"/-/healthy"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -246,24 +247,141 @@ trusted_header:
 	}
 }
 
-// Exempt paths are prefixes below --web.route-prefix, like every other route
-// proxeus registers.
-func TestMiddlewareExemptPathsUseRoutePrefix(t *testing.T) {
+// Exempt paths are taken verbatim -- the caller has already resolved them
+// against --web.route-prefix -- and match on whole segments, so neither a
+// longer name nor a traversal that lands elsewhere slips through.
+func TestMiddlewareExemptPaths(t *testing.T) {
+	basic := "basic:\n  users:\n    alice: " + hashFor(t, "s3cret")
+
+	tests := []struct {
+		name     string
+		raw      string
+		defaults []string
+		path     string
+		status   int
+	}{
+		{
+			name:     "default exempt path",
+			raw:      basic,
+			defaults: []string{"/proxeus/-/ready", "/metrics"},
+			path:     "/proxeus/-/ready",
+			status:   http.StatusOK,
+		},
+		{
+			name:     "below a default exempt path",
+			raw:      basic,
+			defaults: []string{"/metrics"},
+			path:     "/metrics/foo",
+			status:   http.StatusOK,
+		},
+		{
+			name:     "a longer path is not the exempt one",
+			raw:      basic,
+			defaults: []string{"/metrics"},
+			path:     "/metrics2",
+			status:   http.StatusUnauthorized,
+		},
+		{
+			name:     "traversal out of an exempt path",
+			raw:      basic,
+			defaults: []string{"/metrics"},
+			path:     "/metrics/../api/v1/query",
+			status:   http.StatusUnauthorized,
+		},
+		{
+			name:     "configured paths replace the defaults",
+			raw:      basic + "\nexempt_paths: [/healthz]",
+			defaults: []string{"/metrics"},
+			path:     "/metrics",
+			status:   http.StatusUnauthorized,
+		},
+		{
+			name:     "configured path",
+			raw:      basic + "\nexempt_paths: [/healthz]",
+			defaults: []string{"/metrics"},
+			path:     "/healthz",
+			status:   http.StatusOK,
+		},
+		{
+			name:     "an empty list exempts nothing",
+			raw:      basic + "\nexempt_paths: []",
+			defaults: []string{"/metrics"},
+			path:     "/metrics",
+			status:   http.StatusUnauthorized,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			a, err := New(context.Background(), configFromYAML(t, test.raw), test.defaults)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			w := httptest.NewRecorder()
+			// httptest.NewRequest parses the target, so build the URL by hand
+			// to keep traversals intact the way a client would send them.
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.URL.Path = test.path
+			a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
+
+			if w.Code != test.status {
+				t.Fatalf("GET %s: status = %d, want %d", test.path, w.Code, test.status)
+			}
+		})
+	}
+}
+
+// Browsers do not send Authorization on a CORS preflight, so it must not be
+// answered with a 401.
+func TestMiddlewarePassesCORSPreflight(t *testing.T) {
 	cfg := configFromYAML(t, "basic:\n  users:\n    alice: "+hashFor(t, "s3cret"))
-	a, err := New(context.Background(), cfg, "/proxeus")
+	a, err := New(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	for path, want := range map[string]int{
-		"/proxeus/-/ready": http.StatusOK,
-		"/-/ready":         http.StatusUnauthorized,
+	for _, test := range []struct {
+		name   string
+		method string
+		header string
+		status int
+	}{
+		{name: "preflight", method: http.MethodOptions, header: "GET", status: http.StatusOK},
+		{name: "plain OPTIONS still needs credentials", method: http.MethodOptions, status: http.StatusUnauthorized},
+		{name: "the header alone does not exempt a GET", method: http.MethodGet, header: "GET", status: http.StatusUnauthorized},
 	} {
-		w := httptest.NewRecorder()
-		a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
-		if w.Code != want {
-			t.Errorf("GET %s: status = %d, want %d", path, w.Code, want)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, "/api/v1/query", nil)
+			if test.header != "" {
+				req.Header.Set("Access-Control-Request-Method", test.header)
+			}
+			w := httptest.NewRecorder()
+			a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
+			if w.Code != test.status {
+				t.Fatalf("status = %d, want %d", w.Code, test.status)
+			}
+		})
+	}
+}
+
+// With only trusted_header configured there is no auth scheme to advertise, so
+// the 401 deliberately carries no WWW-Authenticate.
+func TestMiddlewareTrustedHeaderOnlyHasNoChallenge(t *testing.T) {
+	cfg := configFromYAML(t, "trusted_header:\n  user_header: X-Forwarded-User\n  trusted_proxies: [192.0.2.1/32]")
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/query", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if got := w.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q, want none", got)
 	}
 }
 
@@ -271,7 +389,7 @@ func TestMiddlewareExemptPathsUseRoutePrefix(t *testing.T) {
 // be traced back to whoever made it.
 func TestMiddlewareRecordsUserInAccessLog(t *testing.T) {
 	cfg := configFromYAML(t, "basic:\n  users:\n    alice: "+hashFor(t, "s3cret"))
-	a, err := New(context.Background(), cfg, "/")
+	a, err := New(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -288,7 +406,9 @@ func TestMiddlewareRecordsUserInAccessLog(t *testing.T) {
 
 // Repeated requests with the same credentials must not re-run bcrypt.
 func TestBasicProviderCachesVerifications(t *testing.T) {
-	p := newBasicProvider(&BasicConfig{Users: map[string]string{"alice": hashFor(t, "s3cret")}})
+	p := newBasicProvider(&BasicConfig{Users: map[string]config_util.Secret{
+		"alice": config_util.Secret(hashFor(t, "s3cret")),
+	}})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
 	req.SetBasicAuth("alice", "s3cret")
@@ -305,5 +425,27 @@ func TestBasicProviderCachesVerifications(t *testing.T) {
 	req.SetBasicAuth("alice", "hunter2")
 	if _, err := p.authenticate(req); err == nil {
 		t.Fatal("authenticate with a wrong password succeeded")
+	}
+	if len(p.verified) != 1 {
+		t.Fatalf("cached %d verifications after a wrong password, want 1", len(p.verified))
+	}
+}
+
+// Unknown users are checked against a fixed hash for constant cost, but caching
+// that would let anyone grow the map with names they made up.
+func TestBasicProviderDoesNotCacheUnknownUsers(t *testing.T) {
+	p := newBasicProvider(&BasicConfig{Users: map[string]config_util.Secret{
+		"alice": config_util.Secret(hashFor(t, "s3cret")),
+	}})
+
+	for _, password := range []string{"s3cret", "fakepassword"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+		req.SetBasicAuth("mallory", password)
+		if _, err := p.authenticate(req); err == nil {
+			t.Fatalf("authenticate as an unknown user with %q succeeded", password)
+		}
+	}
+	if len(p.verified) != 0 {
+		t.Fatalf("cached %d verifications for an unknown user, want 0", len(p.verified))
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/pkg/errors"
 )
@@ -96,10 +97,22 @@ func (r *ApacheLogRecord) Log(out io.Writer) {
 // SetUser records the authenticated user of a request on its access log line.
 // It is a no-op when access logging is disabled, in which case w is whatever
 // net/http handed us rather than the log record.
+//
+// The name comes from a token or a header, so whitespace and control
+// characters are replaced: the text format is positional, and a user called
+// "a b" or one carrying a newline could otherwise forge log fields or lines.
 func SetUser(w http.ResponseWriter, user string) {
-	if record, ok := w.(*ApacheLogRecord); ok {
-		record.User = user
+	record, ok := w.(*ApacheLogRecord)
+	if !ok {
+		return
 	}
+
+	record.User = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, user)
 }
 
 func (r *ApacheLogRecord) LogJson(out io.Writer) {

@@ -4,13 +4,9 @@ import (
 	"fmt"
 	"net/netip"
 
+	config_util "github.com/prometheus/common/config"
 	"golang.org/x/crypto/bcrypt"
 )
-
-// DefaultConfig is the base config an `auth` block is unmarshaled into.
-var DefaultConfig = Config{
-	ExemptPaths: []string{"/-/healthy", "/-/ready", "/metrics"},
-}
 
 // DefaultOIDCConfig is the base config an `auth.oidc` block is unmarshaled into.
 var DefaultOIDCConfig = OIDCConfig{
@@ -21,8 +17,10 @@ var DefaultOIDCConfig = OIDCConfig{
 // proxeus applies to incoming requests. When the block is absent every request
 // is anonymous.
 type Config struct {
-	// ExemptPaths are request path prefixes that bypass authentication
-	// entirely. They are resolved relative to --web.route-prefix.
+	// ExemptPaths are request paths that bypass authentication entirely,
+	// matched verbatim: a path is exempt when it is equal to an entry or sits
+	// below it. They must include --web.route-prefix if one is set. When unset
+	// the defaults passed to New apply; an empty list exempts nothing.
 	ExemptPaths []string `yaml:"exempt_paths"`
 
 	// Providers, tried in the order they are documented here: trusted_header,
@@ -34,8 +32,6 @@ type Config struct {
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
 func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	*c = DefaultConfig
-
 	type plain Config
 	if err := unmarshal((*plain)(c)); err != nil {
 		return err
@@ -52,9 +48,11 @@ func (c *Config) validate() error {
 }
 
 // BasicConfig configures HTTP basic authentication. Users has the same shape as
-// exporter-toolkit's basic_auth_users: username -> bcrypt hash.
+// exporter-toolkit's basic_auth_users: username -> bcrypt hash. The hashes are
+// Secrets so that /api/v1/status/config renders them as <secret> rather than
+// handing every caller something to crack offline.
 type BasicConfig struct {
-	Users map[string]string `yaml:"users"`
+	Users map[string]config_util.Secret `yaml:"users"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.

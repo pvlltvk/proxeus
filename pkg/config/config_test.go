@@ -2,6 +2,7 @@ package proxyconfig
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +149,24 @@ proxeus:
 
 	if _, err := ConfigFromBytes([]byte("proxeus:\n  auth: {}\n")); err == nil {
 		t.Fatal("an auth block with no provider was accepted")
+	}
+}
+
+// Config.String() is what /api/v1/status/config serves, so the basic auth
+// hashes must not survive the round trip -- they are offline-crackable.
+func TestAuthConfigRedactsPasswordHashes(t *testing.T) {
+	const hash = "$2a$10$nRYmVvmznzCXqV9O7Bq/beEBbTBlv7GVEt9gyhqiGt.lZdBYcojHK"
+
+	cfg, err := ConfigFromBytes([]byte("proxeus:\n  auth:\n    basic:\n      users:\n        alice: " + hash + "\n"))
+	if err != nil {
+		t.Fatalf("ConfigFromBytes: %v", err)
+	}
+
+	rendered := cfg.String()
+	if strings.Contains(rendered, hash) {
+		t.Fatalf("rendered config contains the password hash:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "<secret>") {
+		t.Fatalf("rendered config does not mark the password as a secret:\n%s", rendered)
 	}
 }
