@@ -50,12 +50,12 @@ backend_type: influxdb
 			errMsg:  `invalid backend_type "influxdb"`,
 		},
 		{
-			name: "empty thanos block defaults to dedup",
+			name: "empty thanos block emits nothing",
 			config: `
 backend_type: thanos
 thanos: {}
 `,
-			wantParams:  url.Values{"dedup": []string{"true"}},
+			wantParams:  url.Values{},
 			wantHeaders: map[string]string{},
 		},
 		{
@@ -85,10 +85,7 @@ backend_type: thanos
 thanos:
   max_source_resolution: auto
 `,
-			wantParams: url.Values{
-				"dedup":                 []string{"true"},
-				"max_source_resolution": []string{"auto"},
-			},
+			wantParams:  url.Values{"max_source_resolution": []string{"auto"}},
 			wantHeaders: map[string]string{},
 		},
 		{
@@ -98,10 +95,7 @@ backend_type: thanos
 thanos:
   max_source_resolution: 0s
 `,
-			wantParams: url.Values{
-				"dedup":                 []string{"true"},
-				"max_source_resolution": []string{"0s"},
-			},
+			wantParams:  url.Values{"max_source_resolution": []string{"0s"}},
 			wantHeaders: map[string]string{},
 		},
 		{
@@ -140,16 +134,16 @@ backend_type: victoriametrics
 victoriametrics:
   nocache: true
   max_lookback: 10m
-  denyPartialResponse: true
+  deny_partial_response: true
   extra_filters:
     - '{env="prod"}'
     - '{job=~"api.*"}'
 `,
 			wantParams: url.Values{
-				"nocache":             []string{"1"},
-				"max_lookback":        []string{"10m"},
-				"denyPartialResponse": []string{"1"},
-				"extra_filters":       []string{`{env="prod"}`, `{job=~"api.*"}`},
+				"nocache":               []string{"1"},
+				"max_lookback":          []string{"10m"},
+				"deny_partial_response": []string{"1"},
+				"extra_filters":         []string{`{env="prod"}`, `{job=~"api.*"}`},
 			},
 			wantHeaders: map[string]string{},
 		},
@@ -290,6 +284,21 @@ http_headers:
 				t.Errorf("headers mismatch\nexpected=%v\nactual=%v", tt.wantHeaders, headers)
 			}
 		})
+	}
+}
+
+// TestDialectQueryParamsAreOwnedByCaller checks the params don't alias the
+// config slices -- the caller merges query_params into them.
+func TestDialectQueryParamsAreOwnedByCaller(t *testing.T) {
+	cfg := Config{
+		BackendType: BackendThanos,
+		Thanos:      &ThanosConfig{ReplicaLabels: []string{"replica"}},
+	}
+
+	cfg.queryParams()["replicaLabels[]"][0] = "mutated"
+
+	if cfg.Thanos.ReplicaLabels[0] != "replica" {
+		t.Fatalf("expected config to be untouched, got replica_labels=%v", cfg.Thanos.ReplicaLabels)
 	}
 }
 

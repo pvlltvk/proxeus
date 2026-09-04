@@ -3,6 +3,7 @@ package servergroup
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 
 	"github.com/prometheus/common/model"
@@ -24,8 +25,8 @@ const (
 	BackendMimir           BackendType = "mimir"
 )
 
-// backendTypes is the set of values accepted for backend_type, in the order
-// they are listed back to the operator on a validation error.
+// backendTypes is the set of values accepted for backend_type (on top of the
+// empty one), in the order they are listed back to the operator on error.
 var backendTypes = []BackendType{
 	BackendPrometheus,
 	BackendThanos,
@@ -34,21 +35,14 @@ var backendTypes = []BackendType{
 	BackendMimir,
 }
 
-// dialect is a typed per-backend-family config block. Each implementation
-// translates its knobs into the query params and HTTP headers that flavor of
-// backend expects, so operators don't have to know the raw parameter names.
-// queryParams returns a fresh, non-nil set the caller is free to add to.
-type dialect interface {
-	queryParams() url.Values
-	headers() map[string]string
-	validate() error
-}
-
 // ThanosConfig configures the Thanos-specific query options of a server group.
 // Only valid with `backend_type: thanos`.
+//
+// These become query params on the HTTP API calls, so they do not apply to
+// requests made with `remote_read: true`.
 type ThanosConfig struct {
-	// Dedup enables Thanos' own replica deduplication (`dedup`). Unset means
-	// true -- the same default Thanos itself uses.
+	// Dedup enables Thanos' own replica deduplication (`dedup`). Unset leaves
+	// the choice to the downstream default.
 	Dedup *bool `yaml:"dedup,omitempty"`
 	// PartialResponse allows Thanos to return partial results when some of its
 	// stores are unavailable (`partial_response`). Unset leaves the choice to
@@ -64,7 +58,9 @@ type ThanosConfig struct {
 
 func (c *ThanosConfig) queryParams() url.Values {
 	v := url.Values{}
-	v.Set("dedup", strconv.FormatBool(c.Dedup == nil || *c.Dedup))
+	if c.Dedup != nil {
+		v.Set("dedup", strconv.FormatBool(*c.Dedup))
+	}
 	if c.PartialResponse != nil {
 		v.Set("partial_response", strconv.FormatBool(*c.PartialResponse))
 	}
@@ -72,17 +68,15 @@ func (c *ThanosConfig) queryParams() url.Values {
 		v.Set("max_source_resolution", c.MaxSourceResolution)
 	}
 	if len(c.ReplicaLabels) > 0 {
-		v["replicaLabels[]"] = c.ReplicaLabels
+		v["replicaLabels[]"] = slices.Clone(c.ReplicaLabels)
 	}
 	return v
 }
 
-func (c *ThanosConfig) headers() map[string]string { return nil }
-
 func (c *ThanosConfig) validate() error {
 	if c.MaxSourceResolution != "" && c.MaxSourceResolution != "auto" {
 		if _, err := model.ParseDuration(c.MaxSourceResolution); err != nil {
-			return fmt.Errorf("invalid thanos max_source_resolution %q: must be \"auto\" or a duration", c.MaxSourceResolution)
+			return fmt.Errorf("invalid thanos max_source_resolution %q, must be \"auto\" or a duration: %w", c.MaxSourceResolution, err)
 		}
 	}
 	return nil
@@ -90,19 +84,22 @@ func (c *ThanosConfig) validate() error {
 
 // VictoriaMetricsConfig configures the VictoriaMetrics-specific query options of
 // a server group. Only valid with `backend_type: victoriametrics`.
+//
+// These become query params on the HTTP API calls, so they do not apply to
+// requests made with `remote_read: true`.
 type VictoriaMetricsConfig struct {
 	// NoCache disables VictoriaMetrics' response cache (`nocache`).
 	NoCache *bool `yaml:"nocache,omitempty"`
 	// ExtraFilters are label-matcher sets (e.g. `{env="prod"}`) added to every
 	// selector of every query by the downstream (`extra_filters`), sent as one
-	// param per filter.
+	// param per filter. Multiple entries are OR'ed by VictoriaMetrics.
 	ExtraFilters []string `yaml:"extra_filters,omitempty"`
 	// MaxLookback overrides the downstream lookback-delta (`max_lookback`).
 	MaxLookback string `yaml:"max_lookback,omitempty"`
 	// DenyPartialResponse makes VictoriaMetrics error out instead of returning
 	// partial results when some of its storage nodes are unavailable
-	// (`denyPartialResponse`).
-	DenyPartialResponse *bool `yaml:"denyPartialResponse,omitempty"`
+	// (`deny_partial_response`).
+	DenyPartialResponse *bool `yaml:"deny_partial_response,omitempty"`
 }
 
 func (c *VictoriaMetricsConfig) queryParams() url.Values {
@@ -111,18 +108,16 @@ func (c *VictoriaMetricsConfig) queryParams() url.Values {
 		v.Set("nocache", vmBool(*c.NoCache))
 	}
 	if len(c.ExtraFilters) > 0 {
-		v["extra_filters"] = c.ExtraFilters
+		v["extra_filters"] = slices.Clone(c.ExtraFilters)
 	}
 	if c.MaxLookback != "" {
 		v.Set("max_lookback", c.MaxLookback)
 	}
 	if c.DenyPartialResponse != nil {
-		v.Set("denyPartialResponse", vmBool(*c.DenyPartialResponse))
+		v.Set("deny_partial_response", vmBool(*c.DenyPartialResponse))
 	}
 	return v
 }
-
-func (c *VictoriaMetricsConfig) headers() map[string]string { return nil }
 
 func (c *VictoriaMetricsConfig) validate() error {
 	for _, filter := range c.ExtraFilters {
@@ -150,12 +145,6 @@ type MimirConfig struct {
 	Tenant string `yaml:"tenant"`
 }
 
-func (c *MimirConfig) queryParams() url.Values { return url.Values{} }
-
-func (c *MimirConfig) headers() map[string]string {
-	return map[string]string{"X-Scope-OrgID": c.Tenant}
-}
-
 func (c *MimirConfig) validate() error {
 	if c.Tenant == "" {
 		return fmt.Errorf("mimir tenant is required")
@@ -163,40 +152,30 @@ func (c *MimirConfig) validate() error {
 	return nil
 }
 
-// dialect returns the configured dialect block, or nil if there is none.
-func (c *Config) dialect() dialect {
-	switch {
-	case c.Thanos != nil:
-		return c.Thanos
-	case c.VictoriaMetrics != nil:
-		return c.VictoriaMetrics
-	case c.Mimir != nil:
-		return c.Mimir
-	}
-	return nil
-}
-
 // validateDialect checks that backend_type is a known value and that any typed
 // dialect block matches it.
 func (c *Config) validateDialect() error {
-	switch c.BackendType {
-	case "", BackendPrometheus, BackendThanos, BackendVictoriaMetrics, BackendCortex, BackendMimir:
-	default:
+	if c.BackendType != "" && !slices.Contains(backendTypes, c.BackendType) {
 		return fmt.Errorf("invalid backend_type %q: must be one of %v (or empty)", c.BackendType, backendTypes)
 	}
 
-	if c.Thanos != nil && c.BackendType != BackendThanos {
-		return fmt.Errorf("thanos block requires backend_type: thanos, got %q", c.BackendType)
+	if c.Thanos != nil {
+		if c.BackendType != BackendThanos {
+			return fmt.Errorf("thanos block requires backend_type: thanos, got %q", c.BackendType)
+		}
+		return c.Thanos.validate()
 	}
-	if c.VictoriaMetrics != nil && c.BackendType != BackendVictoriaMetrics {
-		return fmt.Errorf("victoriametrics block requires backend_type: victoriametrics, got %q", c.BackendType)
+	if c.VictoriaMetrics != nil {
+		if c.BackendType != BackendVictoriaMetrics {
+			return fmt.Errorf("victoriametrics block requires backend_type: victoriametrics, got %q", c.BackendType)
+		}
+		return c.VictoriaMetrics.validate()
 	}
-	if c.Mimir != nil && c.BackendType != BackendMimir && c.BackendType != BackendCortex {
-		return fmt.Errorf("mimir block requires backend_type: mimir or cortex, got %q", c.BackendType)
-	}
-
-	if d := c.dialect(); d != nil {
-		return d.validate()
+	if c.Mimir != nil {
+		if c.BackendType != BackendMimir && c.BackendType != BackendCortex {
+			return fmt.Errorf("mimir block requires backend_type: mimir or cortex, got %q", c.BackendType)
+		}
+		return c.Mimir.validate()
 	}
 	return nil
 }
@@ -206,8 +185,11 @@ func (c *Config) validateDialect() error {
 // which overrides them on key conflict.
 func (c *Config) queryParams() url.Values {
 	params := url.Values{}
-	if d := c.dialect(); d != nil {
-		params = d.queryParams()
+	if c.Thanos != nil {
+		params = c.Thanos.queryParams()
+	}
+	if c.VictoriaMetrics != nil {
+		params = c.VictoriaMetrics.queryParams()
 	}
 	for k, v := range c.QueryParams {
 		params.Set(k, v)
@@ -220,10 +202,8 @@ func (c *Config) queryParams() url.Values {
 // overrides them on key conflict.
 func (c *Config) httpHeaders() map[string]string {
 	headers := make(map[string]string, len(c.HTTPClientHeaders))
-	if d := c.dialect(); d != nil {
-		for k, v := range d.headers() {
-			headers[k] = v
-		}
+	if c.Mimir != nil {
+		headers["X-Scope-OrgID"] = c.Mimir.Tenant
 	}
 	for k, v := range c.HTTPClientHeaders {
 		headers[k] = v
