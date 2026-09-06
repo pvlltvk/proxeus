@@ -5,10 +5,10 @@
 // argument names and descriptions mirror github.com/prometheus/prometheus-mcp,
 // so agents and skills written for that server work against proxeus unchanged.
 //
-// The tools reach the data through proxeus's own /api/v1 on the internal
-// loopback listener rather than through the storage layer directly, so dedup,
-// pushdown, the backend metrics and the access log see MCP traffic exactly as
-// they see any other HTTP client.
+// The tools reach the data through proxeus's own /api/v1 handler rather than
+// through the storage layer directly, so dedup, pushdown and the backend
+// metrics see MCP traffic exactly as they see any other API request. The calls
+// are served in this process (see handlerTransport), not over the network.
 package mcp
 
 import (
@@ -40,9 +40,13 @@ const instructions = "Proxeus is a single Prometheus-compatible PromQL endpoint 
 
 // Config configures the MCP endpoint; it is built from the --mcp.* flags.
 type Config struct {
-	// APIURL is the base URL of the Prometheus API the tools call, i.e.
-	// proxeus's own internal listener.
-	APIURL string
+	// Handler is the Prometheus API handler the tools call. Requests to it
+	// are served in-process rather than over HTTP.
+	Handler http.Handler
+
+	// RoutePrefix is proxeus's --web.route-prefix. Handler mounts its routes
+	// under it, so the tools have to call it through the prefix too.
+	RoutePrefix string
 
 	// MaxSeries and MaxSamples cap what a single tool call returns, in
 	// series (or entries, for the label and series tools) and in samples.
@@ -51,15 +55,17 @@ type Config struct {
 	MaxSeries  int
 	MaxSamples int
 
-	// QueryTimeout bounds a single tool call. Zero means no timeout.
+	// QueryTimeout bounds a single tool call. Zero means no timeout. The
+	// Prometheus handler runs on the tool's goroutine, so the bound holds as
+	// far as the code under it honors its context.
 	QueryTimeout time.Duration
 
 	// Inventory returns the server_group snapshot list_server_groups reports.
 	Inventory func() proxeusui.Inventory
 
 	// Metadata returns the metric metadata merged across the server_groups.
-	// It does not go over the API like the other tools do: the internal
-	// listener serves /api/v1/metadata from the scrape manager, which proxeus
+	// It does not go through Handler like the other tools do: the Prometheus
+	// handler serves /api/v1/metadata from the scrape manager, which proxeus
 	// never runs, so that endpoint always answers with an empty set.
 	Metadata func(ctx context.Context, metric, limit string) (map[string][]v1.Metadata, error)
 }
@@ -79,6 +85,9 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	// The SDK does not recover panics in tool handlers, so a missing
 	// dependency has to fail here rather than on the first tool call.
+	if cfg.Handler == nil {
+		return nil, errors.New("mcp: Config.Handler is required")
+	}
 	if cfg.Inventory == nil {
 		return nil, errors.New("mcp: Config.Inventory is required")
 	}
@@ -86,7 +95,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("mcp: Config.Metadata is required")
 	}
 
-	client, err := api.NewClient(api.Config{Address: cfg.APIURL})
+	// The host is never resolved -- handlerTransport serves the request
+	// straight from cfg.Handler -- but the client needs a well-formed URL.
+	client, err := api.NewClient(api.Config{
+		Address:      "http://proxeus" + cfg.RoutePrefix,
+		RoundTripper: handlerTransport{handler: cfg.Handler},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("error creating prometheus api client: %w", err)
 	}

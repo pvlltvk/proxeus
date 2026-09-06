@@ -183,11 +183,12 @@ func (h *ApacheLoggingHandler) runHandler(rw http.ResponseWriter, r *http.Reques
 	defer func() {
 		if rec := recover(); rec != nil {
 			// http.ErrAbortHandler is how a handler says "the client went
-			// away, stop quietly" — httputil.ReverseProxy raises it whenever a
-			// client disconnects mid-response, which is the normal way a
-			// long-lived SSE stream ends. Turning that into a 500 plus a stack
-			// trace spams the log and tries to rewrite already-sent headers, so
-			// let net/http handle it as it would without this wrapper.
+			// away, stop quietly" -- net/http and the handlers it serves raise
+			// it when a client disconnects mid-response, which is the normal
+			// way a long-lived SSE stream ends. Turning that into a 500 plus a
+			// stack trace spams the log and tries to rewrite already-sent
+			// headers, so let net/http handle it as it would without this
+			// wrapper.
 			if e, ok := rec.(error); ok && errors.Is(e, http.ErrAbortHandler) {
 				panic(rec)
 			}
@@ -204,9 +205,9 @@ const maxFormBody = 10 << 20
 
 // parseForm is r.ParseForm with the body left readable for the handler
 // downstream. ParseForm drains the body of a form-urlencoded POST/PUT/PATCH and
-// does not put it back, which breaks the reverse proxy in front of /api/v1/*:
-// the proxied request would go out with the original Content-Length and no
-// body. Grafana's Prometheus datasource posts its queries that way.
+// does not put it back, so any handler that reads the body itself rather than
+// the cached form would see an empty one. Grafana's Prometheus datasource posts
+// its queries that way.
 func parseForm(r *http.Request) {
 	if !hasFormBody(r) {
 		_ = r.ParseForm()

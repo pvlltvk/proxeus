@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
@@ -630,22 +629,12 @@ func main() {
 	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(webHandler))
 	webHandler.SetReady(web.Ready)
 
-	// Start the internal web handler on a loopback listener so that
-	// web.Handler.Run() registers all standard Prometheus routes
-	// (/api/v1/*, /-/ready, /version, /federate, etc.) without us needing
-	// to reach into its unexported router or apiV1 fields.
-	// proxeus reverse-proxies unhandled requests to this internal server.
-	internalLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		logrus.Fatalf("Error creating internal web listener: %v", err)
-	}
-	internalURL, _ := url.Parse("http://" + internalLn.Addr().String())
-	webProxy := httputil.NewSingleHostReverseProxy(internalURL)
-	go func() {
-		if runErr := webHandler.Run(ctx, []net.Listener{internalLn}, ""); runErr != nil {
-			logrus.Errorf("internal web handler: %v", runErr)
-		}
-	}()
+	// The embedded Prometheus handler serves all the standard routes
+	// (/api/v1/*, /-/ready, /version, /federate, etc.) under the route prefix.
+	// proxeus mounts it in-process and hands it every request its own router
+	// does not answer itself. It must not also be Run(), which would register
+	// the API routes a second time.
+	promHandler := webHandler.HTTPHandler()
 
 	// Create the proxeus inventory UI handler.
 	proxeusUIHandler, err := proxeusui.NewHandler(ps, webOptions.RoutePrefix)
@@ -687,7 +676,7 @@ func main() {
 	// proxeus's own /federate handler: a faster encoder for the common
 	// text/plain path (issue #784) that delegates other formats to the vendored
 	// handler. Kept in sync with the configured external_labels on reload.
-	federateHandler := federate.New(ps, opts.QueryLookbackDelta, webProxy)
+	federateHandler := federate.New(ps, opts.QueryLookbackDelta, promHandler)
 	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{F: func(cfg *config.Config) error {
 		federateHandler.SetExternalLabels(cfg.GlobalConfig.ExternalLabels)
 		return nil
@@ -700,13 +689,11 @@ func main() {
 	r.HandlerFunc("GET", path.Join(webOptions.RoutePrefix, "/federate"), federateHandler.ServeHTTP)
 
 	if opts.MCPEnable {
-		// The MCP tools query proxeus through its own /api/v1 on the internal
-		// listener, so they take the same dedup, pushdown and metrics path
-		// as any other HTTP client.
+		// The MCP tools query proxeus through its own /api/v1 handler, so they
+		// take the same dedup, pushdown and metrics path as any other client.
 		mcpHandler, err := mcp.New(mcp.Config{
-			// The internal handler mounts its routes under the route prefix,
-			// so the tools have to call it through the prefix too.
-			APIURL:       internalURL.JoinPath(webOptions.RoutePrefix).String(),
+			Handler:      promHandler,
+			RoutePrefix:  webOptions.RoutePrefix,
 			MaxSeries:    opts.MCPMaxSeries,
 			MaxSamples:   opts.MCPMaxSamples,
 			QueryTimeout: opts.MCPQueryTimeout,
@@ -735,7 +722,7 @@ func main() {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				fmt.Fprintf(w, "Proxeus is Stopping.\n")
 			} else {
-				webProxy.ServeHTTP(w, r)
+				promHandler.ServeHTTP(w, r)
 			}
 		} else if r.URL.Path == configPath {
 			ps.ConfigHandler(w, r)
@@ -759,7 +746,7 @@ func main() {
 			mantineAssetsServer.ServeHTTP(w, r)
 		} else {
 			// all else we send direct to the local prometheus UI
-			webProxy.ServeHTTP(w, r)
+			promHandler.ServeHTTP(w, r)
 		}
 	})
 
