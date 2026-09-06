@@ -40,10 +40,9 @@ func testMetadata(_ context.Context, _, _ string) (map[string][]v1.Metadata, err
 func newTestSession(t *testing.T, backend http.Handler, cfg Config) *mcp.ClientSession {
 	t.Helper()
 
-	backendSrv := httptest.NewServer(backend)
-	t.Cleanup(backendSrv.Close)
-
-	cfg.APIURL = backendSrv.URL + cfg.APIURL
+	// The tools reach the backend through the in-process transport, exactly
+	// as they reach the Prometheus handler in proxeus.
+	cfg.Handler = backend
 	if cfg.Inventory == nil {
 		cfg.Inventory = func() proxeusui.Inventory { return proxeusui.Inventory{} }
 	}
@@ -418,8 +417,9 @@ func TestNewRequiresDependencies(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{name: "no inventory", cfg: Config{Metadata: testMetadata}},
-		{name: "no metadata", cfg: Config{Inventory: func() proxeusui.Inventory { return proxeusui.Inventory{} }}},
+		{name: "no handler", cfg: Config{Inventory: func() proxeusui.Inventory { return proxeusui.Inventory{} }, Metadata: testMetadata}},
+		{name: "no inventory", cfg: Config{Handler: testBackend(1), Metadata: testMetadata}},
+		{name: "no metadata", cfg: Config{Handler: testBackend(1), Inventory: func() proxeusui.Inventory { return proxeusui.Inventory{} }}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := New(tc.cfg); err == nil {
@@ -429,14 +429,12 @@ func TestNewRequiresDependencies(t *testing.T) {
 	}
 }
 
-// TestAPIURLWithRoutePrefix guards the tools against a proxeus running under
-// --web.route-prefix: the API base URL then carries a path.
-func TestAPIURLWithRoutePrefix(t *testing.T) {
+// TestRoutePrefix guards the tools against a proxeus running under
+// --web.route-prefix: the API is then served under a path.
+func TestRoutePrefix(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/foo/", http.StripPrefix("/foo", testBackend(1)))
-	// newTestSession appends APIURL to the backend's, so this is the route
-	// prefix the API is served under.
-	session := newTestSession(t, mux, Config{APIURL: "/foo"})
+	session := newTestSession(t, mux, Config{RoutePrefix: "/foo"})
 
 	out := callTool[queryOutput](t, session, "query", map[string]any{"query": "fake_metric"})
 	if len(out.Result) != 1 {
