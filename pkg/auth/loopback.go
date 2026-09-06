@@ -85,9 +85,18 @@ func (l *Loopback) forget(key string) {
 	delete(l.ids, key)
 }
 
-// registeredConn forgets its identity once the connection is gone. Both ends do
-// this: the accepted end covers the common case, the dialed one a connection
-// that is closed before it is ever accepted.
+// registeredConn forgets its identity once the connection is gone. Only the
+// dial side does this, never the accepted side: dialContext's Transport has
+// DisableKeepAlives set, which forces "Connection: close" onto every request,
+// and Go's Transport responds to that by closing the conn it dialed exactly
+// once, whether the round trip succeeds, fails, or is never accepted at all --
+// so this single Close covers every case, including the "closed before it is
+// ever accepted" one. Crucially, it forgets *before* closing the underlying
+// conn, so the OS cannot hand the same local port to a new connection until
+// after the entry is gone. An accepted-side forget would have no such
+// ordering guarantee -- its own Close races the client's port reuse on an
+// unrelated, concurrent connection -- and could delete a fresh registration
+// out from under it. See TestLoopbackAcceptedConnCloseLeavesRegistryAlone.
 type registeredConn struct {
 	net.Conn
 	loopback *Loopback
@@ -109,16 +118,17 @@ func (l *loopbackListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := conn.RemoteAddr().String()
 	return &acceptedConn{
-		registeredConn: registeredConn{Conn: conn, loopback: l.loopback, key: key},
-		addr:           identityAddr{Addr: conn.LocalAddr(), loopback: l.loopback, key: key},
+		Conn: conn,
+		addr: identityAddr{Addr: conn.LocalAddr(), loopback: l.loopback, key: conn.RemoteAddr().String()},
 	}, nil
 }
 
-// acceptedConn is a connection whose local address resolves an identity.
+// acceptedConn is a connection whose local address resolves an identity. It
+// only ever reads the registry, through its LocalAddr -- see registeredConn's
+// comment for why cleanup is the dial side's job alone.
 type acceptedConn struct {
-	registeredConn
+	net.Conn
 	addr identityAddr
 }
 

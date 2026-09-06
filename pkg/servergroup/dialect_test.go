@@ -537,6 +537,30 @@ func TestResolveTenant(t *testing.T) {
 			identity: auth.Identity{Name: "alice", Groups: []string{"admins"}},
 			want:     "",
 		},
+		{
+			name: "group mapped to the empty string resolves to none",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceGroup,
+				Map:    map[string]string{"admins": ""},
+			}},
+			identity: auth.Identity{Name: "alice", Groups: []string{"admins"}},
+			want:     "",
+		},
+		{
+			name: "user mapped to the empty string resolves to none",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceUser,
+				Map:    map[string]string{"alice": ""},
+			}},
+			identity: auth.Identity{Name: "alice"},
+			want:     "",
+		},
+		{
+			name:     "user source with no name and no map resolves to none",
+			mimir:    &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{Source: TenantSourceUser}},
+			identity: auth.Identity{},
+			want:     "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -586,6 +610,18 @@ func TestDialectTenantFromIdentityOnRequest(t *testing.T) {
 		{
 			name:       "anonymous request falls back",
 			cfg:        &Config{BackendType: BackendMimir, Mimir: withFallback},
+			wantTenant: "tenant-fallback",
+		},
+		{
+			name: "group mapped to the empty string falls back like no match at all",
+			cfg: &Config{BackendType: BackendMimir, Mimir: &MimirConfig{
+				Tenant: "tenant-fallback",
+				TenantFromIdentity: &TenantFromIdentityConfig{
+					Source: TenantSourceGroup,
+					Map:    map[string]string{"admins": ""},
+				},
+			}},
+			identity:   &auth.Identity{Name: "alice", Groups: []string{"admins"}},
 			wantTenant: "tenant-fallback",
 		},
 		{
