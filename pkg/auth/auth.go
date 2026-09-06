@@ -206,8 +206,8 @@ func (a *Authenticator) exempt(urlPath string) bool {
 }
 
 // allowed reports whether id may have urlPath: it has to pass the top-level
-// policy and, if one of the route rules covers the path, that rule too. The
-// first matching rule is the only one consulted.
+// policy and every route rule that covers the path. Rules only ever tighten,
+// so their order does not matter.
 func (a *Authenticator) allowed(id Identity, urlPath string) bool {
 	if a.authz == nil {
 		return true
@@ -218,8 +218,8 @@ func (a *Authenticator) allowed(id Identity, urlPath string) bool {
 
 	clean := path.Clean(urlPath)
 	for _, route := range a.authz.routes {
-		if under(clean, route.pathPrefix) {
-			return route.policy.allows(id)
+		if under(clean, route.pathPrefix) && !route.policy.allows(id) {
+			return false
 		}
 	}
 	return true

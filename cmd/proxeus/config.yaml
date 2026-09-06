@@ -96,8 +96,8 @@ proxeus:
   #    allowed_groups: [admins]
   #
   #    # per-path rules, applied in addition to the lists above: a caller has
-  #    # to pass both. Only the first rule whose path_prefix matches is used;
-  #    # a path no rule covers needs only the top-level policy. path_prefix
+  #    # to pass the lists and every rule whose path_prefix covers the path.
+  #    # A path no rule covers needs only the top-level policy. path_prefix
   #    # matches on whole segments like exempt_paths (/mcp also covers
   #    # /mcp/messages, but not /mcpx) and must include --web.route-prefix if
   #    # one is set.

@@ -112,7 +112,32 @@ func TestConfigValidation(t *testing.T) {
 		{
 			name: "route without a path prefix",
 			raw:  "authorization:\n  allowed_users: [alice]\n  routes:\n    - allowed_groups: [admins]",
-			err:  "path_prefix must be set",
+			err:  `path_prefix "" must start with /`,
+		},
+		{
+			name: "route with a relative path prefix",
+			raw:  "authorization:\n  routes:\n    - path_prefix: mcp\n      allowed_users: [bot]",
+			err:  `path_prefix "mcp" must start with /`,
+		},
+		{
+			name: "route with the root as path prefix",
+			raw:  "authorization:\n  routes:\n    - path_prefix: /\n      allowed_groups: [admins]",
+			err:  "path_prefix / covers only the root",
+		},
+		{
+			name: "null route",
+			raw:  "authorization:\n  routes:\n    - ~",
+			err:  `path_prefix "" must start with /`,
+		},
+		{
+			name: "empty allow-list entry",
+			raw:  "authorization:\n  allowed_users:\n    -",
+			err:  "auth.authorization: allow-list entries must not be empty",
+		},
+		{
+			name: "empty allow-list entry in a route",
+			raw:  "authorization:\n  routes:\n    - path_prefix: /mcp\n      allowed_groups: ['']",
+			err:  `"/mcp": allow-list entries must not be empty`,
 		},
 		{
 			name: "route without an allow-list",
@@ -583,9 +608,9 @@ authorization:
 	}
 }
 
-// Only the first route rule whose path_prefix matches a request is consulted,
-// even when a later rule names a longer, more specific prefix.
-func TestMiddlewareAuthorizationFirstRouteWins(t *testing.T) {
+// Every route rule covering a request applies, whatever the order: a broader
+// rule listed first does not shadow a stricter one underneath it.
+func TestMiddlewareAuthorizationAllMatchingRoutesApply(t *testing.T) {
 	cfg := configFromYAML(t, `
 trusted_header:
   user_header: X-Forwarded-User
@@ -611,14 +636,19 @@ authorization:
 		status int
 	}{
 		{
-			name:   "the earlier, broader rule decides the outcome",
+			name:   "in the broader group only",
 			groups: "api-users",
-			status: http.StatusOK,
+			status: http.StatusForbidden,
 		},
 		{
-			name:   "the later, more specific rule is never reached",
+			name:   "in the stricter group only",
 			groups: "admins",
 			status: http.StatusForbidden,
+		},
+		{
+			name:   "in both",
+			groups: "api-users,admins",
+			status: http.StatusOK,
 		},
 	}
 
@@ -636,41 +666,6 @@ authorization:
 				t.Fatalf("status = %d, want %d", w.Code, test.status)
 			}
 		})
-	}
-}
-
-// A route rule with a "/" path_prefix only matches the root itself, the same
-// way an exempt_paths entry of "/" would: matching on whole segments requires
-// the prefix plus a trailing "/", which "/" already ends with. This is a
-// corollary of the shared segment-matching logic, not something specific to
-// authorization; a rule meant to cover the whole API should simply be left
-// off, since the top-level policy already applies everywhere.
-func TestMiddlewareAuthorizationRootRoutePrefix(t *testing.T) {
-	cfg := configFromYAML(t, `
-basic:
-  users:
-    alice: `+hashFor(t, "s3cret")+`
-authorization:
-  allowed_users: [alice]
-  routes:
-    - path_prefix: /
-      allowed_groups: [admins]
-`)
-	a, err := New(context.Background(), cfg, nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
-	req.SetBasicAuth("alice", "s3cret")
-
-	w := httptest.NewRecorder()
-	a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
-
-	// alice satisfies the top-level policy; the "/" route rule does not cover
-	// "/api/v1/query" at all, so it never gets a say.
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
 	}
 }
 

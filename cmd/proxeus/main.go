@@ -784,6 +784,16 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Error configuring authentication: %v", err)
 	}
+	// A route rule outside the route prefix can never match, i.e. it restricts
+	// nothing. Worth a warning: the prefix may only be implied by
+	// --web.external-url, which is easy to miss when copying the docs.
+	if authCfg := ps.Config().Auth; authCfg != nil && authCfg.Authorization != nil {
+		for _, route := range authCfg.Authorization.Routes {
+			if !strings.HasPrefix(path.Clean(route.PathPrefix), webOptions.RoutePrefix) {
+				logrus.Warnf("auth.authorization route %q lies outside the route prefix %q and will never match", route.PathPrefix, webOptions.RoutePrefix)
+			}
+		}
+	}
 	var handler http.Handler = middleware.NewProxyHeaders(r, opts.ProxyHeaders)
 	if authenticator != nil {
 		handler = authenticator.Middleware(handler)

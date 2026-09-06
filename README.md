@@ -164,9 +164,9 @@ proxeus:
       allowed_groups: [admins]
 
       # Per-path rules, applied on top of the lists above — a caller must pass
-      # both. The first rule whose path_prefix matches is the only one used;
-      # paths no rule covers need only the top-level policy. Each rule needs at
-      # least one non-empty list.
+      # the lists and every rule whose path_prefix covers the path, so order
+      # does not matter. Paths no rule covers need only the top-level policy.
+      # Each rule needs at least one non-empty list.
       routes:
         - path_prefix: /mcp
           allowed_users: []
@@ -186,12 +186,15 @@ proxeus:
 
 A denied caller gets a 403 with no `WWW-Authenticate`: the credentials were fine, sending them again changes nothing.
 `path_prefix` matches on whole segments the way `exempt_paths` does — `/mcp` covers `/mcp/messages` but not `/mcpx` —
-and, like `exempt_paths`, it must include `--web.route-prefix` if you set one. Exempt paths stay exempt: they skip
-authentication and authorization alike.
+and, like `exempt_paths`, it must include `--web.route-prefix` if you set one — also when the prefix is only implied
+by the path of `--web.external-url`. A rule whose prefix never matches restricts nothing, so proxeus logs a warning at
+startup for rules outside the route prefix. Exempt paths stay exempt: they skip authentication and authorization alike.
+Like the rest of the `auth` block, the policy is read at startup only; a SIGHUP reload does not change it.
 
 Groups are whatever the provider hands over: the OIDC `groups_claim`, the trusted-header `groups_header`, and nothing
 at all for basic auth. A policy that only lists `allowed_groups` therefore locks out every basic-auth user — name them
-in `allowed_users` if they should get through.
+in `allowed_users` if they should get through. Names and groups are compared exactly, case included: list them the way
+the provider spells them.
 
 ### Interaction with `--web.config.file`
 
