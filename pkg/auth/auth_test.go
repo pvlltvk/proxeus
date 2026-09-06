@@ -105,9 +105,9 @@ func TestConfigValidation(t *testing.T) {
 			err:  "is not a CIDR",
 		},
 		{
-			name: "authorization without an allow-list",
+			name: "authorization without an allow-list or routes",
 			raw:  "authorization:\n  allowed_users: []",
-			err:  "auth.authorization: at least one of allowed_users or allowed_groups",
+			err:  "auth.authorization: at least one of allowed_users, allowed_groups or routes",
 		},
 		{
 			name: "route without a path prefix",
@@ -380,6 +380,12 @@ authorization:
     - path_prefix: /mcp
       allowed_groups: [mcp-users]
 `
+		routesOnly = `
+authorization:
+  routes:
+    - path_prefix: /mcp
+      allowed_users: [bob]
+`
 	)
 
 	tests := []struct {
@@ -395,6 +401,27 @@ authorization:
 			name:   "no authorization block allows every identity",
 			path:   "/api/v1/query",
 			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusOK,
+		},
+		{
+			name:   "routes only: anyone authenticated outside the rule",
+			authz:  routesOnly,
+			path:   "/api/v1/query",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusOK,
+		},
+		{
+			name:   "routes only: the rule still restricts",
+			authz:  routesOnly,
+			path:   "/mcp",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "routes only: the named user passes the rule",
+			authz:  routesOnly,
+			path:   "/mcp",
+			user:   "bob",
 			status: http.StatusOK,
 		},
 		{

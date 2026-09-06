@@ -158,17 +158,30 @@ proxeus:
   auth:
     authorization:
       # An identity passes when its name is listed here or one of its groups is
-      # listed below. At least one of the two lists must be non-empty.
+      # listed below. Leave both lists out to let every authenticated identity
+      # through and restrict with routes alone.
       allowed_users:  [alice, admin@example.com]
       allowed_groups: [admins]
 
       # Per-path rules, applied on top of the lists above — a caller must pass
       # both. The first rule whose path_prefix matches is the only one used;
-      # paths no rule covers need only the top-level policy.
+      # paths no rule covers need only the top-level policy. Each rule needs at
+      # least one non-empty list.
       routes:
         - path_prefix: /mcp
           allowed_users: []
           allowed_groups: [mcp-users]
+```
+
+The common "everyone may query, one account may use MCP" setup is therefore just a route rule:
+
+```yaml
+proxeus:
+  auth:
+    authorization:
+      routes:
+        - path_prefix: /mcp
+          allowed_users: [mcp-bot]
 ```
 
 A denied caller gets a 403 with no `WWW-Authenticate`: the credentials were fine, sending them again changes nothing.
