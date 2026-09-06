@@ -145,11 +145,56 @@ remaining providers still run.
 > Keep `trusted_proxies` to the narrowest range that covers the proxy itself, ideally a `/32`. Anything that can
 > connect to proxeus from inside that range can name itself any user it likes.
 
-`Identity.Groups` is parsed from the token or header and put in the request context, but proxeus does not act on it
-yet — it is the seam for authorization later.
-
 > The `auth` block is read at **startup only**: OIDC discovery and the provider chain are built once. A SIGHUP reload
 > picks up every other change but not this one — restart proxeus after editing it.
+
+### Authorization
+
+Authentication says who the caller is; the optional `authorization` block says which of those callers are served.
+Without it every authenticated identity is, as before.
+
+```yaml
+proxeus:
+  auth:
+    authorization:
+      # An identity passes when its name is listed here or one of its groups is
+      # listed below. Leave both lists out to let every authenticated identity
+      # through and restrict with routes alone.
+      allowed_users:  [alice, admin@example.com]
+      allowed_groups: [admins]
+
+      # Per-path rules, applied on top of the lists above — a caller must pass
+      # the lists and every rule whose path_prefix covers the path, so order
+      # does not matter. Paths no rule covers need only the top-level policy.
+      # Each rule needs at least one non-empty list.
+      routes:
+        - path_prefix: /mcp
+          allowed_users: []
+          allowed_groups: [mcp-users]
+```
+
+The common "everyone may query, one account may use MCP" setup is therefore just a route rule:
+
+```yaml
+proxeus:
+  auth:
+    authorization:
+      routes:
+        - path_prefix: /mcp
+          allowed_users: [mcp-bot]
+```
+
+A denied caller gets a 403 with no `WWW-Authenticate`: the credentials were fine, sending them again changes nothing.
+`path_prefix` matches on whole segments the way `exempt_paths` does — `/mcp` covers `/mcp/messages` but not `/mcpx` —
+and, like `exempt_paths`, it must include `--web.route-prefix` if you set one — also when the prefix is only implied
+by the path of `--web.external-url`. A rule whose prefix never matches restricts nothing, so proxeus logs a warning at
+startup for rules outside the route prefix. Exempt paths stay exempt: they skip authentication and authorization alike.
+Like the rest of the `auth` block, the policy is read at startup only; a SIGHUP reload does not change it.
+
+Groups are whatever the provider hands over: the OIDC `groups_claim`, the trusted-header `groups_header`, and nothing
+at all for basic auth. A policy that only lists `allowed_groups` therefore locks out every basic-auth user — name them
+in `allowed_users` if they should get through. Names and groups are compared exactly, case included: list them the way
+the provider spells them.
 
 ### Interaction with `--web.config.file`
 
@@ -308,7 +353,8 @@ in `proxeus_mcp_tool_call_duration_seconds{tool}`.
 
 > **Do not expose this endpoint unauthenticated.** The MCP package carries no auth of its own: anything that can POST
 > to `/mcp` can read every metric in every backend. It is served by the same router as everything else, so an
-> [`auth` block](#authentication) covers it — do not put `/mcp` in `exempt_paths`. Basic auth via `--web.config.file`
+> [`auth` block](#authentication) covers it — do not put `/mcp` in `exempt_paths`, and use an
+> [`authorization` route rule](#authorization) if only some of your users should reach it. Basic auth via `--web.config.file`
 > (the [Prometheus HTTPS/auth schema](https://prometheus.io/docs/prometheus/latest/configuration/https/)) or auth
 > terminated in your ingress work too. MCP clients pass credentials in the `Authorization` header:
 

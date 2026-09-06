@@ -3,6 +3,9 @@ package auth
 import (
 	"fmt"
 	"net/netip"
+	"path"
+	"slices"
+	"strings"
 
 	config_util "github.com/prometheus/common/config"
 	"golang.org/x/crypto/bcrypt"
@@ -28,6 +31,10 @@ type Config struct {
 	Basic         *BasicConfig         `yaml:"basic,omitempty"`
 	OIDC          *OIDCConfig          `yaml:"oidc,omitempty"`
 	TrustedHeader *TrustedHeaderConfig `yaml:"trusted_header,omitempty"`
+
+	// Authorization restricts which authenticated identities are served. When
+	// the block is absent every identity is allowed.
+	Authorization *AuthorizationConfig `yaml:"authorization,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
@@ -165,4 +172,89 @@ func (c *TrustedHeaderConfig) prefixes() ([]netip.Prefix, error) {
 		prefixes[i] = prefix.Masked()
 	}
 	return prefixes, nil
+}
+
+// AuthorizationConfig is the `auth.authorization` block: which of the callers
+// authentication let in are actually served. An identity passes an allow-list
+// pair when its name is in allowed_users or one of its groups is in
+// allowed_groups. With both top-level lists empty every authenticated identity
+// passes and only the route rules restrict.
+type AuthorizationConfig struct {
+	// AllowedUsers are identity names allowed anywhere.
+	AllowedUsers []string `yaml:"allowed_users"`
+	// AllowedGroups are groups whose members are allowed anywhere. Only the
+	// providers that carry groups can satisfy this -- oidc with a groups_claim,
+	// trusted_header with a groups_header -- so a group-only policy locks out
+	// basic auth users, who have no groups at all.
+	AllowedGroups []string `yaml:"allowed_groups"`
+
+	// Routes tighten the policy for parts of the API. Every rule whose
+	// path_prefix covers the request applies in addition to the lists above:
+	// an identity must pass all of them. A path no rule covers needs only the
+	// top-level policy.
+	Routes []RouteAuthorizationConfig `yaml:"routes"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *AuthorizationConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type plain AuthorizationConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+
+	return c.validate()
+}
+
+func (c *AuthorizationConfig) validate() error {
+	if len(c.AllowedUsers) == 0 && len(c.AllowedGroups) == 0 && len(c.Routes) == 0 {
+		return fmt.Errorf("auth.authorization: at least one of allowed_users, allowed_groups or routes must not be empty")
+	}
+	if err := validateNames("auth.authorization", c.AllowedUsers, c.AllowedGroups); err != nil {
+		return err
+	}
+	// Validated from here rather than in their own UnmarshalYAML: yaml skips
+	// the unmarshaler for a null item, which would let an empty rule through.
+	for _, route := range c.Routes {
+		if err := route.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateNames rejects empty entries: no provider ever yields an empty name
+// or group, so the entry can only match nothing and turn the list into a
+// blanket denial with no hint as to why.
+func validateNames(where string, lists ...[]string) error {
+	for _, list := range lists {
+		if slices.Contains(list, "") {
+			return fmt.Errorf("%s: allow-list entries must not be empty", where)
+		}
+	}
+	return nil
+}
+
+// RouteAuthorizationConfig is one entry of `auth.authorization.routes`.
+type RouteAuthorizationConfig struct {
+	// PathPrefix is the request path the rule covers, matched on whole segments
+	// the way exempt_paths is: /mcp also covers /mcp/foo, but not /mcpx. It
+	// must include --web.route-prefix if one is set. "/" is rejected: it would
+	// match only the root itself, and a rule for everything is what the
+	// top-level lists are.
+	PathPrefix    string   `yaml:"path_prefix"`
+	AllowedUsers  []string `yaml:"allowed_users"`
+	AllowedGroups []string `yaml:"allowed_groups"`
+}
+
+func (c *RouteAuthorizationConfig) validate() error {
+	if !strings.HasPrefix(c.PathPrefix, "/") {
+		return fmt.Errorf("auth.authorization.routes: path_prefix %q must start with /", c.PathPrefix)
+	}
+	if path.Clean(c.PathPrefix) == "/" {
+		return fmt.Errorf("auth.authorization.routes: path_prefix / covers only the root; use allowed_users/allowed_groups for everything")
+	}
+	if len(c.AllowedUsers) == 0 && len(c.AllowedGroups) == 0 {
+		return fmt.Errorf("auth.authorization.routes: %q: at least one of allowed_users or allowed_groups must not be empty", c.PathPrefix)
+	}
+	return validateNames(fmt.Sprintf("auth.authorization.routes: %q", c.PathPrefix), c.AllowedUsers, c.AllowedGroups)
 }
