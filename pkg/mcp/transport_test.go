@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -120,6 +123,72 @@ func TestHandlerTransportStripsAcceptEncoding(t *testing.T) {
 	if want := "gzip"; req.Header.Get("Accept-Encoding") != want {
 		t.Errorf("caller's request was modified: Accept-Encoding = %q, want %q", req.Header.Get("Accept-Encoding"), want)
 	}
+}
+
+// The MCP SDK calls tool handlers on a goroutine of its own that nothing else
+// recovers panics on, so a panic here must turn into an error rather than
+// crash the process.
+func TestHandlerTransportRecoversPanic(t *testing.T) {
+	transport := handlerTransport{handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://proxeus/", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("RoundTrip returned no error for a panicking handler")
+	}
+	if resp != nil {
+		t.Errorf("RoundTrip returned a response for a panicking handler: %+v", resp)
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %q, want it to mention the panic value", err)
+	}
+}
+
+// The MCP SDK dispatches concurrent tool calls, each doing its own RoundTrip
+// against the same transport: nothing here may be shared across requests.
+func TestHandlerTransportConcurrent(t *testing.T) {
+	transport := handlerTransport{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := r.URL.Query().Get("n")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, n)
+	})}
+
+	const calls = 50
+	var wg sync.WaitGroup
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://proxeus/?n="+strconv.Itoa(i), nil)
+			if err != nil {
+				t.Errorf("building request: %v", err)
+				return
+			}
+			resp, err := transport.RoundTrip(req)
+			if err != nil {
+				t.Errorf("RoundTrip: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Errorf("reading the body: %v", err)
+				return
+			}
+			if got := string(body); got != strconv.Itoa(i) {
+				t.Errorf("body = %q, want %q", got, strconv.Itoa(i))
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestHandlerTransportContextCanceled(t *testing.T) {
