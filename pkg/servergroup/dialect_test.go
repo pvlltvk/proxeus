@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/api"
 	"gopkg.in/yaml.v2"
 
+	"github.com/pvlltvk/proxeus/pkg/auth"
 	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
@@ -218,6 +219,74 @@ mimir: {}
 			errMsg:  "mimir tenant is required",
 		},
 		{
+			name: "mimir tenant_from_identity without a static tenant",
+			config: `
+backend_type: mimir
+mimir:
+  tenant_from_identity:
+    source: user
+`,
+			wantParams:  url.Values{},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name: "mimir tenant_from_identity with a static tenant as the fallback",
+			config: `
+backend_type: mimir
+mimir:
+  tenant: tenant-fallback
+  tenant_from_identity:
+    source: group
+    map:
+      admins: tenant-a
+`,
+			wantParams:  url.Values{},
+			wantHeaders: map[string]string{"X-Scope-OrgID": "tenant-fallback"},
+		},
+		{
+			name: "mimir tenant_from_identity without a source",
+			config: `
+backend_type: mimir
+mimir:
+  tenant_from_identity: {}
+`,
+			wantErr: true,
+			errMsg:  `invalid mimir tenant_from_identity source ""`,
+		},
+		{
+			name: "mimir tenant_from_identity with an unknown source",
+			config: `
+backend_type: mimir
+mimir:
+  tenant_from_identity:
+    source: token
+`,
+			wantErr: true,
+			errMsg:  `invalid mimir tenant_from_identity source "token"`,
+		},
+		{
+			name: "mimir tenant_from_identity by group without a map",
+			config: `
+backend_type: mimir
+mimir:
+  tenant_from_identity:
+    source: group
+`,
+			wantErr: true,
+			errMsg:  "mimir tenant_from_identity map is required with source: group",
+		},
+		{
+			name: "mimir tenant_from_identity without matching backend_type",
+			config: `
+backend_type: thanos
+mimir:
+  tenant_from_identity:
+    source: user
+`,
+			wantErr: true,
+			errMsg:  "mimir block requires backend_type: mimir or cortex",
+		},
+		{
 			name: "mimir block without matching backend_type",
 			config: `
 backend_type: thanos
@@ -392,6 +461,185 @@ func TestDialectHeadersOnRequest(t *testing.T) {
 				t.Fatalf("failed to create request: %v", err)
 			}
 			resp, err := sg.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("failed to make request: %v", err)
+			}
+			resp.Body.Close()
+
+			if gotTenant != tt.wantTenant {
+				t.Fatalf("expected X-Scope-OrgID %q, got %q", tt.wantTenant, gotTenant)
+			}
+		})
+	}
+}
+
+func TestResolveTenant(t *testing.T) {
+	tests := []struct {
+		name     string
+		mimir    *MimirConfig
+		identity auth.Identity
+		want     string
+	}{
+		{
+			name:     "user without a map is the tenant",
+			mimir:    &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{Source: TenantSourceUser}},
+			identity: auth.Identity{Name: "alice"},
+			want:     "alice",
+		},
+		{
+			name: "user the map renames",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceUser,
+				Map:    map[string]string{"alice": "tenant-a"},
+			}},
+			identity: auth.Identity{Name: "alice"},
+			want:     "tenant-a",
+		},
+		{
+			name: "user the map does not rename keeps its name",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceUser,
+				Map:    map[string]string{"alice": "tenant-a"},
+			}},
+			identity: auth.Identity{Name: "bob"},
+			want:     "bob",
+		},
+		{
+			name: "first mapped group in identity order wins",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceGroup,
+				Map:    map[string]string{"admins": "tenant-a", "devs": "tenant-b"},
+			}},
+			identity: auth.Identity{Name: "alice", Groups: []string{"everyone", "devs", "admins"}},
+			want:     "tenant-b",
+		},
+		{
+			name: "no group is mapped",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceGroup,
+				Map:    map[string]string{"admins": "tenant-a"},
+			}},
+			identity: auth.Identity{Name: "alice", Groups: []string{"everyone"}},
+			want:     "",
+		},
+		{
+			name: "identity has no groups at all",
+			mimir: &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+				Source: TenantSourceGroup,
+				Map:    map[string]string{"admins": "tenant-a"},
+			}},
+			identity: auth.Identity{Name: "alice"},
+			want:     "",
+		},
+		{
+			name:     "static tenant only resolves nothing",
+			mimir:    &MimirConfig{Tenant: "tenant-a"},
+			identity: auth.Identity{Name: "alice", Groups: []string{"admins"}},
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.mimir.resolveTenant(tt.identity); got != tt.want {
+				t.Fatalf("expected tenant %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+// TestDialectTenantFromIdentityOnRequest checks the tenant of the caller in the
+// request context reaches the downstream, and that a request nothing resolves a
+// tenant for is failed rather than sent without one.
+func TestDialectTenantFromIdentityOnRequest(t *testing.T) {
+	fromGroup := &MimirConfig{TenantFromIdentity: &TenantFromIdentityConfig{
+		Source: TenantSourceGroup,
+		Map:    map[string]string{"admins": "tenant-a", "devs": "tenant-b"},
+	}}
+	withFallback := &MimirConfig{Tenant: "tenant-fallback", TenantFromIdentity: fromGroup.TenantFromIdentity}
+
+	tests := []struct {
+		name       string
+		cfg        *Config
+		identity   *auth.Identity
+		wantTenant string
+		wantErr    string
+	}{
+		{
+			name:       "identity resolves a tenant",
+			cfg:        &Config{BackendType: BackendMimir, Mimir: fromGroup},
+			identity:   &auth.Identity{Name: "alice", Groups: []string{"devs"}},
+			wantTenant: "tenant-b",
+		},
+		{
+			name:       "identity resolves a tenant over http_headers",
+			cfg:        &Config{BackendType: BackendMimir, Mimir: fromGroup, HTTPClientHeaders: map[string]string{"X-Scope-OrgID": "tenant-header"}},
+			identity:   &auth.Identity{Name: "alice", Groups: []string{"admins"}},
+			wantTenant: "tenant-a",
+		},
+		{
+			name:       "identity resolves nothing and falls back",
+			cfg:        &Config{BackendType: BackendMimir, Mimir: withFallback},
+			identity:   &auth.Identity{Name: "alice", Groups: []string{"everyone"}},
+			wantTenant: "tenant-fallback",
+		},
+		{
+			name:       "anonymous request falls back",
+			cfg:        &Config{BackendType: BackendMimir, Mimir: withFallback},
+			wantTenant: "tenant-fallback",
+		},
+		{
+			name:     "identity resolves nothing and there is no fallback",
+			cfg:      &Config{BackendType: BackendMimir, Mimir: fromGroup},
+			identity: &auth.Identity{Name: "alice", Groups: []string{"everyone"}},
+			wantErr:  `no mimir tenant for user "alice"`,
+		},
+		{
+			name:    "anonymous request and there is no fallback",
+			cfg:     &Config{BackendType: BackendMimir, Mimir: fromGroup},
+			wantErr: "no mimir tenant for this request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotTenant string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotTenant = r.Header.Get("X-Scope-OrgID")
+			}))
+			defer server.Close()
+
+			sg, err := NewServerGroup()
+			if err != nil {
+				t.Fatalf("failed to create servergroup: %v", err)
+			}
+			defer sg.Cancel()
+
+			tt.cfg.Scheme = "http"
+			tt.cfg.HTTPConfig.DialTimeout = 200 * time.Millisecond
+			if err := sg.ApplyConfig(tt.cfg); err != nil {
+				t.Fatalf("failed to apply config: %v", err)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+			if err != nil {
+				t.Fatalf("failed to create request: %v", err)
+			}
+			if tt.identity != nil {
+				req = req.WithContext(auth.NewContext(req.Context(), *tt.identity))
+			}
+
+			resp, err := sg.RoundTrip(req)
+			if tt.wantErr != "" {
+				if err == nil {
+					resp.Body.Close()
+					t.Fatalf("expected error containing %q, got none (tenant %q)", tt.wantErr, gotTenant)
+				}
+				if !contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("failed to make request: %v", err)
 			}

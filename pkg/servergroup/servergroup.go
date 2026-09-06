@@ -118,6 +118,10 @@ type ServerGroup struct {
 	// Computed once in ApplyConfig rather than per request.
 	headers map[string]string
 
+	// mimir is the dialect block when it derives the tenant from the caller,
+	// nil otherwise -- which leaves RoundTrip on the static header path.
+	mimir *MimirConfig
+
 	OriginalURLs []string
 
 	state atomic.Value
@@ -188,6 +192,15 @@ func (s *ServerGroup) RoundTrip(r *http.Request) (*http.Response, error) {
 	for k, v := range s.headers {
 		r.Header.Set(k, v)
 		logrus.Tracef("Set ServerGroup custom header %s: %s", k, v)
+	}
+	// A tenant derived from the caller is the most specific thing we know, so
+	// it wins over both the static tenant and http_headers.
+	if s.mimir != nil {
+		tenant, err := s.mimir.requestTenant(r.Context())
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("X-Scope-OrgID", tenant)
 	}
 	// Ensure Body is non-nil so downstream transports (e.g. SigV4) that
 	// unconditionally read the body don't panic on GET requests.
@@ -455,6 +468,10 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 	s.Cfg = cfg
 	s.headers = cfg.httpHeaders()
+	s.mimir = nil
+	if cfg.Mimir != nil && cfg.Mimir.TenantFromIdentity != nil {
+		s.mimir = cfg.Mimir
+	}
 
 	// Copy/paste from upstream prometheus/common until https://github.com/prometheus/common/issues/144 is resolved
 	tlsConfig, err := config_util.NewTLSConfig(&cfg.HTTPConfig.HTTPConfig.TLSConfig)
