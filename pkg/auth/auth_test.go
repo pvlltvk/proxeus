@@ -103,6 +103,21 @@ func TestConfigValidation(t *testing.T) {
 			raw:  "trusted_header:\n  user_header: X-Forwarded-User\n  trusted_proxies: [127.0.0.1]",
 			err:  "is not a CIDR",
 		},
+		{
+			name: "authorization without an allow-list",
+			raw:  "authorization:\n  allowed_users: []",
+			err:  "auth.authorization: at least one of allowed_users or allowed_groups",
+		},
+		{
+			name: "route without a path prefix",
+			raw:  "authorization:\n  allowed_users: [alice]\n  routes:\n    - allowed_groups: [admins]",
+			err:  "path_prefix must be set",
+		},
+		{
+			name: "route without an allow-list",
+			raw:  "authorization:\n  allowed_users: [alice]\n  routes:\n    - path_prefix: /mcp",
+			err:  `"/mcp": at least one of allowed_users or allowed_groups`,
+		},
 	}
 
 	for _, test := range tests {
@@ -327,6 +342,162 @@ func TestMiddlewareExemptPaths(t *testing.T) {
 
 			if w.Code != test.status {
 				t.Fatalf("GET %s: status = %d, want %d", test.path, w.Code, test.status)
+			}
+		})
+	}
+}
+
+// Authorization runs on the identity authentication produced: the top-level
+// allow-lists decide every request, and the first matching route rule has to
+// allow it too.
+func TestMiddlewareAuthorization(t *testing.T) {
+	providers := "basic:\n  users:\n    alice: " + hashFor(t, "s3cret") + `
+trusted_header:
+  user_header: X-Forwarded-User
+  groups_header: X-Forwarded-Groups
+  trusted_proxies: [192.0.2.1/32]
+`
+	const (
+		byUser = `
+authorization:
+  allowed_users: [alice]
+`
+		byGroup = `
+authorization:
+  allowed_groups: [admins]
+`
+		withRoute = `
+authorization:
+  allowed_users: [alice]
+  allowed_groups: [admins]
+  routes:
+    - path_prefix: /mcp
+      allowed_groups: [mcp-users]
+`
+	)
+
+	tests := []struct {
+		name   string
+		authz  string
+		path   string
+		basic  [2]string
+		groups string
+		status int
+	}{
+		{
+			name:   "no authorization block allows every identity",
+			path:   "/api/v1/query",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusOK,
+		},
+		{
+			name:   "allowed by name",
+			authz:  byUser,
+			path:   "/api/v1/query",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusOK,
+		},
+		{
+			name:   "an authenticated user not on the list",
+			authz:  byUser,
+			path:   "/api/v1/query",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "allowed by group",
+			authz:  byGroup,
+			path:   "/api/v1/query",
+			groups: "admins, viewers",
+			status: http.StatusOK,
+		},
+		{
+			name:   "none of the groups is on the list",
+			authz:  byGroup,
+			path:   "/api/v1/query",
+			groups: "viewers",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "basic auth carries no groups",
+			authz:  byGroup,
+			path:   "/api/v1/query",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "a route rule tightens the top-level policy",
+			authz:  withRoute,
+			path:   "/mcp",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "a route rule covers what is below its prefix",
+			authz:  withRoute,
+			path:   "/mcp/messages",
+			groups: "admins, mcp-users",
+			status: http.StatusOK,
+		},
+		{
+			name:   "a route rule does not cover a longer name",
+			authz:  withRoute,
+			path:   "/mcpx",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusOK,
+		},
+		{
+			name:   "a route rule does not widen the top-level policy",
+			authz:  withRoute,
+			path:   "/mcp",
+			groups: "mcp-users",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "paths no rule covers need only the top-level policy",
+			authz:  withRoute,
+			path:   "/api/v1/query",
+			groups: "admins",
+			status: http.StatusOK,
+		},
+		{
+			name:   "an exempt path stays exempt",
+			authz:  withRoute + "exempt_paths: [/-/healthy]\n",
+			path:   "/-/healthy",
+			status: http.StatusOK,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			a, err := New(context.Background(), configFromYAML(t, providers+test.authz), nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			if test.basic[0] != "" {
+				req.SetBasicAuth(test.basic[0], test.basic[1])
+			} else {
+				req.RemoteAddr = "192.0.2.1:4321"
+				req.Header.Set("X-Forwarded-User", "bob")
+				req.Header.Set("X-Forwarded-Groups", test.groups)
+			}
+
+			w := httptest.NewRecorder()
+			a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
+
+			if w.Code != test.status {
+				t.Fatalf("GET %s: status = %d, want %d", test.path, w.Code, test.status)
+			}
+			if test.status != http.StatusForbidden {
+				return
+			}
+			if got := w.Body.String(); got != http.StatusText(http.StatusForbidden)+"\n" {
+				t.Errorf("body = %q, want %q", got, http.StatusText(http.StatusForbidden)+"\n")
+			}
+			// The credentials were fine, so there is nothing to challenge for.
+			if got := w.Header().Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want none", got)
 			}
 		})
 	}
