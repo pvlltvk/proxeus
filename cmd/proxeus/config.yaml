@@ -81,6 +81,28 @@ proxeus:
   #    # Keep this to the narrowest range covering the proxy itself: anything
   #    # that can reach proxeus from inside it can claim to be any user.
   #    trusted_proxies: [127.0.0.1/32]
+  #
+  #  # which of the authenticated identities are served. Without this block
+  #  # every one of them is. A denied caller gets a 403, not a 401 -- its
+  #  # credentials were fine.
+  #  authorization:
+  #    # an identity passes when its name is listed here or one of its groups
+  #    # is in allowed_groups; at least one of the two lists must be set.
+  #    # Groups come from the provider: the oidc groups_claim or the
+  #    # trusted_header groups_header. Basic auth users have none, so a
+  #    # group-only policy locks them out -- name them here instead.
+  #    allowed_users: [alice, admin@example.com]
+  #    allowed_groups: [admins]
+  #
+  #    # per-path rules, applied in addition to the lists above: a caller has
+  #    # to pass both. Only the first rule whose path_prefix matches is used;
+  #    # a path no rule covers needs only the top-level policy. path_prefix
+  #    # matches on whole segments like exempt_paths (/mcp also covers
+  #    # /mcp/messages, but not /mcpx) and must include --web.route-prefix if
+  #    # one is set.
+  #    routes:
+  #      - path_prefix: /mcp
+  #        allowed_groups: [mcp-users]
 
   server_groups:
     # All upstream prometheus service discovery mechanisms are supported with the same
