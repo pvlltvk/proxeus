@@ -174,7 +174,8 @@ func (c *TrustedHeaderConfig) prefixes() ([]netip.Prefix, error) {
 // AuthorizationConfig is the `auth.authorization` block: which of the callers
 // authentication let in are actually served. An identity passes an allow-list
 // pair when its name is in allowed_users or one of its groups is in
-// allowed_groups.
+// allowed_groups. With both top-level lists empty every authenticated identity
+// passes and only the route rules restrict.
 type AuthorizationConfig struct {
 	// AllowedUsers are identity names allowed anywhere.
 	AllowedUsers []string `yaml:"allowed_users"`
@@ -202,8 +203,8 @@ func (c *AuthorizationConfig) UnmarshalYAML(unmarshal func(interface{}) error) e
 }
 
 func (c *AuthorizationConfig) validate() error {
-	if len(c.AllowedUsers) == 0 && len(c.AllowedGroups) == 0 {
-		return fmt.Errorf("auth.authorization: at least one of allowed_users or allowed_groups must not be empty")
+	if len(c.AllowedUsers) == 0 && len(c.AllowedGroups) == 0 && len(c.Routes) == 0 {
+		return fmt.Errorf("auth.authorization: at least one of allowed_users, allowed_groups or routes must not be empty")
 	}
 	return nil
 }

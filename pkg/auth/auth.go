@@ -68,7 +68,9 @@ type authorization struct {
 	routes []routePolicy
 }
 
-// policy is one allow-list pair. An identity passes it by name or by group.
+// policy is one allow-list pair. An identity passes it by name or by group; a
+// policy with neither list -- only the top-level one can be empty, routes are
+// validated -- passes everyone.
 type policy struct {
 	users  []string
 	groups []string
@@ -91,6 +93,9 @@ func newAuthorization(cfg *AuthorizationConfig) *authorization {
 }
 
 func (p policy) allows(id Identity) bool {
+	if len(p.users) == 0 && len(p.groups) == 0 {
+		return true
+	}
 	if slices.Contains(p.users, id.Name) {
 		return true
 	}

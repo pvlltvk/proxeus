@@ -87,7 +87,8 @@ proxeus:
   #  # credentials were fine.
   #  authorization:
   #    # an identity passes when its name is listed here or one of its groups
-  #    # is in allowed_groups; at least one of the two lists must be set.
+  #    # is in allowed_groups. Leave both out to let every authenticated
+  #    # identity through and restrict with routes alone.
   #    # Groups come from the provider: the oidc groups_claim or the
   #    # trusted_header groups_header. Basic auth users have none, so a
   #    # group-only policy locks them out -- name them here instead.
