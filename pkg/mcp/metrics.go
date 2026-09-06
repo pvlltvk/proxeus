@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,8 +40,18 @@ type truncatable interface {
 
 // addTool registers a tool on m, bounded by the configured query timeout and
 // instrumented: one duration observation and one call counted per invocation.
+// A panic anywhere in the tool fails that one call: the SDK runs tool handlers
+// on goroutines of its own that nothing else recovers on, and the Prometheus
+// handler the tools call runs in-process, so a panic in it would otherwise
+// take proxeus down.
 func addTool[In, Out any](s *Server, m *mcp.Server, def *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
-	mcp.AddTool(m, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+	mcp.AddTool(m, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (res *mcp.CallToolResult, out Out, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				res, err = nil, fmt.Errorf("mcp: tool %s panicked: %v\n%s", def.Name, r, debug.Stack())
+				toolCalls.WithLabelValues(def.Name, "error").Inc()
+			}
+		}()
 		if s.cfg.QueryTimeout > 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, s.cfg.QueryTimeout)
@@ -47,7 +59,7 @@ func addTool[In, Out any](s *Server, m *mcp.Server, def *mcp.Tool, h mcp.ToolHan
 		}
 
 		start := time.Now()
-		res, out, err := h(ctx, req, in)
+		res, out, err = h(ctx, req, in)
 		toolCallDuration.WithLabelValues(def.Name).Observe(time.Since(start).Seconds())
 		toolCalls.WithLabelValues(def.Name, callResult(out, err)).Inc()
 		return res, out, err

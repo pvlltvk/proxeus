@@ -55,7 +55,9 @@ type Config struct {
 	MaxSeries  int
 	MaxSamples int
 
-	// QueryTimeout bounds a single tool call. Zero means no timeout.
+	// QueryTimeout bounds a single tool call. Zero means no timeout. The
+	// Prometheus handler runs on the tool's goroutine, so the bound holds as
+	// far as the code under it honors its context.
 	QueryTimeout time.Duration
 
 	// Inventory returns the server_group snapshot list_server_groups reports.

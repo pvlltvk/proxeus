@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime/debug"
 )
 
 // handlerTransport is an http.RoundTripper that answers a request by calling an
@@ -20,7 +19,7 @@ type handlerTransport struct {
 	handler http.Handler
 }
 
-func (t handlerTransport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+func (t handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err := req.Context().Err(); err != nil {
 		return nil, err
 	}
@@ -35,17 +34,6 @@ func (t handlerTransport) RoundTrip(req *http.Request) (resp *http.Response, err
 		// Server requests always have a body; handlers rely on it.
 		req.Body = http.NoBody
 	}
-
-	// Over HTTP, a panic in the Prometheus handler would be recovered by
-	// net/http's own per-connection recover. In-process, the MCP SDK calls
-	// tool handlers on a goroutine of its own that nothing recovers panics
-	// on, so without this a panic here would crash proxeus instead of just
-	// failing the one tool call.
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("mcp: prometheus handler panicked: %v\n%s", r, debug.Stack())
-		}
-	}()
 
 	rec := &responseRecorder{header: make(http.Header), code: http.StatusOK}
 	t.handler.ServeHTTP(rec, req)
@@ -63,7 +51,9 @@ func (t handlerTransport) RoundTrip(req *http.Request) (resp *http.Response, err
 	}, nil
 }
 
-// responseRecorder buffers what the handler writes.
+// responseRecorder buffers what the handler writes. It is what
+// httptest.ResponseRecorder does, kept here so the binary does not import a
+// testing package.
 type responseRecorder struct {
 	header      http.Header
 	body        bytes.Buffer

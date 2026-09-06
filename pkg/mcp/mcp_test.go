@@ -491,6 +491,25 @@ func TestMetadataError(t *testing.T) {
 	}
 }
 
+func TestPanicFailsOnlyTheCall(t *testing.T) {
+	session := newTestSession(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}), Config{})
+
+	res := call(t, session, "query", map[string]any{"query": "up"})
+	if !res.IsError {
+		t.Fatal("expected an error result")
+	}
+	if got := resultText(res); !strings.Contains(got, "boom") {
+		t.Errorf("error text: got %q", got)
+	}
+
+	// The server is still up and answers the next call.
+	if res := call(t, session, "list_server_groups", nil); res.IsError {
+		t.Errorf("list_server_groups after the panic: %s", resultText(res))
+	}
+}
+
 func TestBothCapsTruncate(t *testing.T) {
 	start := time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)
 	session := newTestSession(t, testBackend(4), Config{MaxSeries: 3, MaxSamples: 8})

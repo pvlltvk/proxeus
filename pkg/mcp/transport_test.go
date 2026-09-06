@@ -128,28 +128,6 @@ func TestHandlerTransportStripsAcceptEncoding(t *testing.T) {
 // The MCP SDK calls tool handlers on a goroutine of its own that nothing else
 // recovers panics on, so a panic here must turn into an error rather than
 // crash the process.
-func TestHandlerTransportRecoversPanic(t *testing.T) {
-	transport := handlerTransport{handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		panic("boom")
-	})}
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://proxeus/", nil)
-	if err != nil {
-		t.Fatalf("building request: %v", err)
-	}
-
-	resp, err := transport.RoundTrip(req)
-	if err == nil {
-		t.Fatal("RoundTrip returned no error for a panicking handler")
-	}
-	if resp != nil {
-		t.Errorf("RoundTrip returned a response for a panicking handler: %+v", resp)
-	}
-	if !strings.Contains(err.Error(), "boom") {
-		t.Errorf("error = %q, want it to mention the panic value", err)
-	}
-}
-
 // The MCP SDK dispatches concurrent tool calls, each doing its own RoundTrip
 // against the same transport: nothing here may be shared across requests.
 func TestHandlerTransportConcurrent(t *testing.T) {
