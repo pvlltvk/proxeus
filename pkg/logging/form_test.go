@@ -11,8 +11,8 @@ import (
 )
 
 // The access log records the form params of a request, which for a POST means
-// reading its body — and the handler behind the wrapper (for /api/v1/* a
-// reverse proxy) must still see that body.
+// reading its body — and the handler behind the wrapper (for /api/v1/* the
+// embedded Prometheus handler) must still see that body.
 func TestApacheLoggingHandlerPreservesBody(t *testing.T) {
 	tests := []struct {
 		name        string

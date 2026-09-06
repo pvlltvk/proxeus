@@ -204,9 +204,9 @@ const maxFormBody = 10 << 20
 
 // parseForm is r.ParseForm with the body left readable for the handler
 // downstream. ParseForm drains the body of a form-urlencoded POST/PUT/PATCH and
-// does not put it back, which breaks the reverse proxy in front of /api/v1/*:
-// the proxied request would go out with the original Content-Length and no
-// body. Grafana's Prometheus datasource posts its queries that way.
+// does not put it back, so any handler that reads the body itself rather than
+// the cached form would see an empty one. Grafana's Prometheus datasource posts
+// its queries that way.
 func parseForm(r *http.Request) {
 	if !hasFormBody(r) {
 		_ = r.ParseForm()
