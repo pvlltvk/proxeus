@@ -28,6 +28,10 @@ type Config struct {
 	Basic         *BasicConfig         `yaml:"basic,omitempty"`
 	OIDC          *OIDCConfig          `yaml:"oidc,omitempty"`
 	TrustedHeader *TrustedHeaderConfig `yaml:"trusted_header,omitempty"`
+
+	// Authorization restricts which authenticated identities are served. When
+	// the block is absent every identity is allowed.
+	Authorization *AuthorizationConfig `yaml:"authorization,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
@@ -165,4 +169,71 @@ func (c *TrustedHeaderConfig) prefixes() ([]netip.Prefix, error) {
 		prefixes[i] = prefix.Masked()
 	}
 	return prefixes, nil
+}
+
+// AuthorizationConfig is the `auth.authorization` block: which of the callers
+// authentication let in are actually served. An identity passes an allow-list
+// pair when its name is in allowed_users or one of its groups is in
+// allowed_groups.
+type AuthorizationConfig struct {
+	// AllowedUsers are identity names allowed anywhere.
+	AllowedUsers []string `yaml:"allowed_users"`
+	// AllowedGroups are groups whose members are allowed anywhere. Only the
+	// providers that carry groups can satisfy this -- oidc with a groups_claim,
+	// trusted_header with a groups_header -- so a group-only policy locks out
+	// basic auth users, who have no groups at all.
+	AllowedGroups []string `yaml:"allowed_groups"`
+
+	// Routes tighten the policy for parts of the API. The first rule whose
+	// path_prefix matches the request applies in addition to the lists above:
+	// an identity must pass both. A path no rule covers needs only the
+	// top-level policy.
+	Routes []RouteAuthorizationConfig `yaml:"routes"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *AuthorizationConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type plain AuthorizationConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+
+	return c.validate()
+}
+
+func (c *AuthorizationConfig) validate() error {
+	if len(c.AllowedUsers) == 0 && len(c.AllowedGroups) == 0 {
+		return fmt.Errorf("auth.authorization: at least one of allowed_users or allowed_groups must not be empty")
+	}
+	return nil
+}
+
+// RouteAuthorizationConfig is one entry of `auth.authorization.routes`.
+type RouteAuthorizationConfig struct {
+	// PathPrefix is the request path the rule covers, matched on whole segments
+	// the way exempt_paths is: /mcp also covers /mcp/foo, but not /mcpx. It
+	// must include --web.route-prefix if one is set.
+	PathPrefix    string   `yaml:"path_prefix"`
+	AllowedUsers  []string `yaml:"allowed_users"`
+	AllowedGroups []string `yaml:"allowed_groups"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *RouteAuthorizationConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type plain RouteAuthorizationConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+
+	return c.validate()
+}
+
+func (c *RouteAuthorizationConfig) validate() error {
+	if c.PathPrefix == "" {
+		return fmt.Errorf("auth.authorization.routes: path_prefix must be set")
+	}
+	if len(c.AllowedUsers) == 0 && len(c.AllowedGroups) == 0 {
+		return fmt.Errorf("auth.authorization.routes: %q: at least one of allowed_users or allowed_groups must not be empty", c.PathPrefix)
+	}
+	return nil
 }
