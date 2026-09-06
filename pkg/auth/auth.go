@@ -32,15 +32,23 @@ type contextKey int
 
 const identityKey contextKey = 0
 
-// newContext returns ctx with id attached.
-func newContext(ctx context.Context, id Identity) context.Context {
+// NewContext returns ctx with id attached, the way the middleware does it.
+func NewContext(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, identityKey, id)
 }
 
 // FromContext returns the identity authenticated for this request, if any.
 func FromContext(ctx context.Context) (Identity, bool) {
-	id, ok := ctx.Value(identityKey).(Identity)
-	return id, ok
+	if id, ok := ctx.Value(identityKey).(Identity); ok {
+		return id, true
+	}
+	// Behind the internal loopback listener the request context is a fresh one
+	// built by net/http: the connection's local address is the only thing the
+	// identity could travel in. See loopback.go.
+	if addr, ok := ctx.Value(http.LocalAddrContextKey).(identityAddr); ok {
+		return addr.identity()
+	}
+	return Identity{}, false
 }
 
 // provider authenticates a request against one credential source.
@@ -185,7 +193,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(newContext(r.Context(), id)))
+			next.ServeHTTP(w, r.WithContext(NewContext(r.Context(), id)))
 			return
 		}
 

@@ -641,8 +641,14 @@ func main() {
 	}
 	internalURL, _ := url.Parse("http://" + internalLn.Addr().String())
 	webProxy := httputil.NewSingleHostReverseProxy(internalURL)
+	// The identity of the caller has to survive the trip over the loopback --
+	// the per-request Mimir tenant is derived from it down in the server
+	// groups. The listener is always wrapped (it costs nothing without the
+	// matching transport); the transport is only installed when authentication
+	// is configured, further down, because it cannot pool connections.
+	loopback := auth.NewLoopback()
 	go func() {
-		if runErr := webHandler.Run(ctx, []net.Listener{internalLn}, ""); runErr != nil {
+		if runErr := webHandler.Run(ctx, []net.Listener{loopback.Listener(internalLn)}, ""); runErr != nil {
 			logrus.Errorf("internal web handler: %v", runErr)
 		}
 	}()
@@ -800,6 +806,7 @@ func main() {
 	var handler http.Handler = middleware.NewProxyHeaders(r, opts.ProxyHeaders)
 	if authenticator != nil {
 		handler = authenticator.Middleware(handler)
+		webProxy.Transport = loopback.Transport()
 	}
 
 	srv, err := server.CreateAndStart(opts.BindAddr, opts.LogFormat, opts.WebReadTimeout, accessLogOut, handler, opts.WebConfigFile)
