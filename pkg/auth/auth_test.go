@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	config_util "github.com/prometheus/common/config"
@@ -117,6 +118,11 @@ func TestConfigValidation(t *testing.T) {
 			name: "route without an allow-list",
 			raw:  "authorization:\n  allowed_users: [alice]\n  routes:\n    - path_prefix: /mcp",
 			err:  `"/mcp": at least one of allowed_users or allowed_groups`,
+		},
+		{
+			name: "authorization without a provider",
+			raw:  "authorization:\n  allowed_users: [alice]",
+			err:  "at least one of basic, oidc or trusted_header",
 		},
 	}
 
@@ -381,6 +387,7 @@ authorization:
 		authz  string
 		path   string
 		basic  [2]string
+		user   string
 		groups string
 		status int
 	}{
@@ -465,6 +472,48 @@ authorization:
 			path:   "/-/healthy",
 			status: http.StatusOK,
 		},
+		{
+			name:   "user names are matched case-sensitively",
+			authz:  byUser,
+			path:   "/api/v1/query",
+			user:   "Alice",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "group names are matched case-sensitively",
+			authz:  byGroup,
+			path:   "/api/v1/query",
+			groups: "Admins",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "duplicate and empty group entries do not change the outcome",
+			authz:  byGroup,
+			path:   "/api/v1/query",
+			groups: "viewers, , admins, admins",
+			status: http.StatusOK,
+		},
+		{
+			name:   "a trailing slash still matches the route prefix",
+			authz:  withRoute,
+			path:   "/mcp/",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "a traversal cannot reach a route-guarded path without its policy",
+			authz:  withRoute,
+			path:   "/api/../mcp/messages",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "a traversal out of a route-guarded path only needs the top-level policy",
+			authz:  withRoute,
+			path:   "/mcp/../api/v1/query",
+			basic:  [2]string{"alice", "s3cret"},
+			status: http.StatusOK,
+		},
 	}
 
 	for _, test := range tests {
@@ -478,8 +527,12 @@ authorization:
 			if test.basic[0] != "" {
 				req.SetBasicAuth(test.basic[0], test.basic[1])
 			} else {
+				user := test.user
+				if user == "" {
+					user = "bob"
+				}
 				req.RemoteAddr = "192.0.2.1:4321"
-				req.Header.Set("X-Forwarded-User", "bob")
+				req.Header.Set("X-Forwarded-User", user)
 				req.Header.Set("X-Forwarded-Groups", test.groups)
 			}
 
@@ -501,6 +554,150 @@ authorization:
 			}
 		})
 	}
+}
+
+// Only the first route rule whose path_prefix matches a request is consulted,
+// even when a later rule names a longer, more specific prefix.
+func TestMiddlewareAuthorizationFirstRouteWins(t *testing.T) {
+	cfg := configFromYAML(t, `
+trusted_header:
+  user_header: X-Forwarded-User
+  groups_header: X-Forwarded-Groups
+  trusted_proxies: [192.0.2.1/32]
+authorization:
+  allowed_users: [alice]
+  allowed_groups: [api-users, admins]
+  routes:
+    - path_prefix: /api
+      allowed_groups: [api-users]
+    - path_prefix: /api/v1/admin
+      allowed_groups: [admins]
+`)
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		groups string
+		status int
+	}{
+		{
+			name:   "the earlier, broader rule decides the outcome",
+			groups: "api-users",
+			status: http.StatusOK,
+		},
+		{
+			name:   "the later, more specific rule is never reached",
+			groups: "admins",
+			status: http.StatusForbidden,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/admin", nil)
+			req.RemoteAddr = "192.0.2.1:4321"
+			req.Header.Set("X-Forwarded-User", "bob")
+			req.Header.Set("X-Forwarded-Groups", test.groups)
+
+			w := httptest.NewRecorder()
+			a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
+
+			if w.Code != test.status {
+				t.Fatalf("status = %d, want %d", w.Code, test.status)
+			}
+		})
+	}
+}
+
+// A route rule with a "/" path_prefix only matches the root itself, the same
+// way an exempt_paths entry of "/" would: matching on whole segments requires
+// the prefix plus a trailing "/", which "/" already ends with. This is a
+// corollary of the shared segment-matching logic, not something specific to
+// authorization; a rule meant to cover the whole API should simply be left
+// off, since the top-level policy already applies everywhere.
+func TestMiddlewareAuthorizationRootRoutePrefix(t *testing.T) {
+	cfg := configFromYAML(t, `
+basic:
+  users:
+    alice: `+hashFor(t, "s3cret")+`
+authorization:
+  allowed_users: [alice]
+  routes:
+    - path_prefix: /
+      allowed_groups: [admins]
+`)
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+	req.SetBasicAuth("alice", "s3cret")
+
+	w := httptest.NewRecorder()
+	a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
+
+	// alice satisfies the top-level policy; the "/" route rule does not cover
+	// "/api/v1/query" at all, so it never gets a say.
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+// Concurrent requests must not interfere with each other: the policy is built
+// once in New and never mutated afterwards.
+func TestMiddlewareAuthorizationConcurrent(t *testing.T) {
+	cfg := configFromYAML(t, `
+basic:
+  users:
+    alice: `+hashFor(t, "s3cret")+`
+    mallory: `+hashFor(t, "hunter2")+`
+authorization:
+  allowed_users: [alice]
+`)
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Unlike identityHandler, this does not write through a shared pointer, so
+	// concurrent requests cannot race on it -- only the middleware itself is
+	// under test here.
+	handler := a.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+			req.SetBasicAuth("alice", "s3cret")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("allowed user: status = %d, want %d", w.Code, http.StatusOK)
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/query", nil)
+			req.SetBasicAuth("mallory", "hunter2")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Errorf("denied user: status = %d, want %d", w.Code, http.StatusForbidden)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // Browsers do not send Authorization on a CORS preflight, so it must not be
