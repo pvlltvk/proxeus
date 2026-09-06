@@ -48,7 +48,8 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
 `cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,
 `partial_response`, `max_source_resolution`, `replica_labels`), `victoriametrics:` (`nocache`, `extra_filters`,
-`max_lookback`, `deny_partial_response`) and `mimir:` (`tenant`, sent as `X-Scope-OrgID`). Proxeus translates them into
+`max_lookback`, `deny_partial_response`) and `mimir:` (`tenant`, sent as `X-Scope-OrgID`, and
+`tenant_from_identity` — see [Per-request tenants](#per-request-mimircortex-tenants)). Proxeus translates them into
 the params and headers that backend expects, and rejects a mistyped duration or matcher at config load rather than on
 the wire. The thanos and victoriametrics knobs are HTTP-API query params, so they do not apply to `remote_read: true`
 requests; the mimir tenant is a header and applies to both. The generic `query_params` / `http_headers` maps still work and override the dialect on key conflict.
@@ -192,6 +193,50 @@ authentication and authorization alike.
 Groups are whatever the provider hands over: the OIDC `groups_claim`, the trusted-header `groups_header`, and nothing
 at all for basic auth. A policy that only lists `allowed_groups` therefore locks out every basic-auth user — name them
 in `allowed_users` if they should get through.
+
+> With an `auth` block, the internal reverse proxy in front of the embedded Prometheus handler stops pooling loopback
+> connections — the identity travels with the connection, so a pooled one would hand the next request the wrong
+> caller. That is one extra localhost connect per proxied API request.
+
+### Per-request Mimir/Cortex tenants
+
+A `mimir:` block normally names one tenant, and one `server_group` per (backend, tenant) pair. When the backend serves
+many tenants and the caller decides which, `tenant_from_identity` derives `X-Scope-OrgID` from the authenticated
+identity instead, per request:
+
+```yaml
+proxeus:
+  server_groups:
+    - backend_type: mimir
+      static_configs:
+        - targets: [mimir.example:8080]
+      mimir:
+        # Fallback for requests that resolve to no tenant. Optional here,
+        # required when tenant_from_identity is absent.
+        tenant: team-default
+        tenant_from_identity:
+          # user: the tenant is the identity's name.
+          # group: the tenant is the first of its groups map has an entry for.
+          source: group
+          # Required with source: group -- an identity has several groups and
+          # this is what picks one. With source: user it is an optional rename
+          # table, not an allow list: a name it has no entry for is the tenant
+          # verbatim.
+          map:
+            admins: tenant-a
+            devs: tenant-b
+```
+
+A resolved tenant wins over both `tenant` and an `X-Scope-OrgID` in `http_headers`. A request that resolves to none —
+anonymous, or a caller in no mapped group — falls back to `tenant`, and **fails** when there is no `tenant` to fall
+back to: proxeus will not ask a shared backend for whatever tenant it defaults to.
+
+Two limits worth knowing:
+
+- It applies to the HTTP API only. `remote_read: true` targets use Prometheus' own read client, which is built once
+  with the static headers, so they keep sending the static `tenant`.
+- The MCP tools call the API on the internal listener with their own client, which does not carry the caller's
+  identity, so they get the static `tenant` as well (and fail without one).
 
 ### Interaction with `--web.config.file`
 

@@ -210,6 +210,20 @@ proxeus:
       #   # NOTE: a server_group holds the *same* data, so this is a single tenant --
       #   # model each (backend, tenant) pair as its own server_group.
       #   tenant: tenant-A
+      #   # ...unless the tenant comes from the authenticated caller (see the
+      #   # `auth` block), which is derived per request. `tenant` above is then
+      #   # optional and used as the fallback; without it a request that
+      #   # resolves to no tenant fails rather than reaching the backend.
+      #   tenant_from_identity:
+      #     # user: the tenant is the identity's name
+      #     # group: the tenant is the first of its groups `map` has an entry for
+      #     source: group
+      #     # required with source: group, since an identity has several groups.
+      #     # with source: user it is an optional rename table -- a name it has
+      #     # no entry for is the tenant verbatim.
+      #     map:
+      #       admins: tenant-A
+      #       devs: tenant-B
 
       # query_params adds a map of query parameters to downstream requests -- the
       # escape hatch for anything the dialect blocks above don't model
