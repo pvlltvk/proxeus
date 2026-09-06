@@ -149,6 +149,10 @@ remaining providers still run.
 > The `auth` block is read at **startup only**: OIDC discovery and the provider chain are built once. A SIGHUP reload
 > picks up every other change but not this one — restart proxeus after editing it.
 
+> With an `auth` block, the internal reverse proxy in front of the embedded Prometheus handler stops pooling loopback
+> connections — the identity travels with the connection, so a pooled one would hand the next request the wrong
+> caller. That is one extra localhost connect per proxied API request.
+
 ### Authorization
 
 Authentication says who the caller is; the optional `authorization` block says which of those callers are served.
@@ -193,10 +197,6 @@ authentication and authorization alike.
 Groups are whatever the provider hands over: the OIDC `groups_claim`, the trusted-header `groups_header`, and nothing
 at all for basic auth. A policy that only lists `allowed_groups` therefore locks out every basic-auth user — name them
 in `allowed_users` if they should get through.
-
-> With an `auth` block, the internal reverse proxy in front of the embedded Prometheus handler stops pooling loopback
-> connections — the identity travels with the connection, so a pooled one would hand the next request the wrong
-> caller. That is one extra localhost connect per proxied API request.
 
 ### Per-request Mimir/Cortex tenants
 
