@@ -469,3 +469,86 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// exportLine is one line of the /api/v1/export NDJSON stream.
+type exportLine struct {
+	Metric     model.LabelSet `json:"metric"`
+	Values     []float64      `json:"values"`
+	Timestamps []int64        `json:"timestamps"`
+}
+
+func decodeExport(t *testing.T, rec *httptest.ResponseRecorder) []exportLine {
+	t.Helper()
+	if got := rec.Header().Get("Content-Type"); got != "application/stream+json; charset=utf-8" {
+		t.Fatalf("export content type: got %q", got)
+	}
+	var out []exportLine
+	for _, line := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var l exportLine
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("decode %.200s: %v", line, err)
+		}
+		if len(l.Values) != len(l.Timestamps) {
+			t.Fatalf("%v: %d values but %d timestamps", l.Metric, len(l.Values), len(l.Timestamps))
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// TestExport checks the VictoriaMetrics export endpoint serves the same samples
+// the raw-fetch query path does, as NDJSON with millisecond timestamps.
+func TestExport(t *testing.T) {
+	h := New(Config{Series: 3})
+	end := time.Unix(1600000000, 0)
+	start := end.Add(-60 * time.Second)
+
+	lines := decodeExport(t, do(t, h, "/api/v1/export", url.Values{
+		"match[]": {`{__name__="fake_metric"}`},
+		"start":   {formatTime(start)},
+		"end":     {formatTime(end)},
+	}))
+	if len(lines) != 3 {
+		t.Fatalf("export lines: got %d want 3", len(lines))
+	}
+
+	// The same window through /api/v1/query, which is what proxeus asks for
+	// when it can't push the query down.
+	m := decodeMatrix(t, do(t, h, "/api/v1/query", url.Values{
+		"query": {`{__name__="fake_metric"}[60s]`},
+		"time":  {formatTime(end)},
+	}))
+	if len(m) != len(lines) {
+		t.Fatalf("matrix series: got %d want %d", len(m), len(lines))
+	}
+	for i, l := range lines {
+		if want := m[i].Metric.String(); model.Metric(l.Metric).String() != want {
+			t.Fatalf("line %d: metric %s want %s", i, l.Metric, want)
+		}
+		if len(l.Values) != len(m[i].Values) {
+			t.Fatalf("line %d: %d samples want %d", i, len(l.Values), len(m[i].Values))
+		}
+		for j, p := range m[i].Values {
+			if l.Timestamps[j] != int64(p.Timestamp) {
+				t.Fatalf("line %d sample %d: ts %d want %d", i, j, l.Timestamps[j], int64(p.Timestamp))
+			}
+			if l.Values[j] != float64(p.Value) {
+				t.Fatalf("line %d sample %d: value %v want %v", i, j, l.Values[j], float64(p.Value))
+			}
+		}
+	}
+
+	// The sample cap applies here too, so a wide export stays bounded.
+	capped := decodeExport(t, do(t, New(Config{Series: 2, MaxSamplesPerSeries: 2}), "/api/v1/export", url.Values{
+		"start": {formatTime(start)},
+		"end":   {formatTime(end)},
+	}))
+	for _, l := range capped {
+		if len(l.Values) != 2 {
+			t.Fatalf("capped export: got %d samples want 2", len(l.Values))
+		}
+	}
+}

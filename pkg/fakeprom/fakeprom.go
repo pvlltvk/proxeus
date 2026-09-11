@@ -89,6 +89,7 @@ func New(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/query", h.query)
 	mux.HandleFunc("/api/v1/query_range", h.queryRange)
+	mux.HandleFunc("/api/v1/export", h.export)
 	mux.HandleFunc("/api/v1/series", h.series)
 	mux.HandleFunc("/api/v1/labels", h.labels)
 	mux.HandleFunc("/api/v1/label/{name}/values", h.labelValues)
@@ -176,6 +177,76 @@ func (h *handler) query(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	e.writeString(`]}}`)
+}
+
+// export answers VictoriaMetrics' /api/v1/export: NDJSON, one line per series,
+// millisecond timestamps and bare JSON numbers for values. The selector in
+// match[] is ignored, like every other matcher here, and each series is written
+// on a single line (the real thing may split one over several).
+func (h *handler) export(w http.ResponseWriter, r *http.Request) {
+	h.delay()
+	if err := r.ParseForm(); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	start, err := parseTimeParam(r, "start")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	end, err := parseTimeParam(r, "end")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	if r.FormValue("end") == "" {
+		end = time.Now().UnixMilli()
+	}
+	if end < start {
+		writeAPIError(w, http.StatusBadRequest, "bad_data", "end timestamp must not be before start time")
+		return
+	}
+
+	e := newEncoder(w, r)
+	defer e.close()
+	// Nothing is written yet, so the content type newEncoder set can still be
+	// corrected to the one VictoriaMetrics uses for this endpoint.
+	w.Header().Set("Content-Type", "application/stream+json; charset=utf-8")
+	for i := 0; i < h.cfg.Series; i++ {
+		h.writeExportLine(e, i, start, end, rawStep.Milliseconds())
+	}
+}
+
+// writeExportLine writes series i as one NDJSON export line.
+func (h *handler) writeExportLine(e *encoder, i int, start, end, step int64) {
+	e.writeString(`{"metric":`)
+	e.buf = h.appendMetric(e.buf, i)
+	e.writeString(`,"values":[`)
+	h.writeExportSamples(e, i, start, end, step, false)
+	e.writeString(`],"timestamps":[`)
+	h.writeExportSamples(e, i, start, end, step, true)
+	e.writeString("]}\n")
+}
+
+// writeExportSamples writes the comma-separated contents of the `timestamps`
+// array (when ts is true) or of the `values` array holding the same samples.
+func (h *handler) writeExportSamples(e *encoder, i int, start, end, step int64, ts bool) {
+	n := 0
+	for t := start; t <= end; t += step {
+		if h.cfg.MaxSamplesPerSeries > 0 && n >= h.cfg.MaxSamplesPerSeries {
+			return
+		}
+		if n > 0 {
+			e.buf = append(e.buf, ',')
+		}
+		if ts {
+			e.buf = strconv.AppendInt(e.buf, t, 10)
+		} else {
+			e.buf = strconv.AppendFloat(e.buf, sampleValue(i, t), 'f', -1, 64)
+		}
+		e.maybeFlush()
+		n++
+	}
 }
 
 func (h *handler) series(w http.ResponseWriter, r *http.Request) {
