@@ -3,6 +3,7 @@ package promclient
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,85 @@ func TestDecodeExportSeriesSet(t *testing.T) {
 			body:    `{"metric":{"__name__":"up"},"values":[1,2],"timestamps":[1]}`,
 			wantErr: "2 values but 1 timestamps",
 		},
+		{
+			name:    "fewer values than timestamps",
+			body:    `{"metric":{"__name__":"up"},"values":[1],"timestamps":[1,2]}`,
+			wantErr: "1 values but 2 timestamps",
+		},
+		{
+			name: "empty metric object",
+			body: `{"metric":{},"values":[1],"timestamps":[1]}` + "\n",
+			want: map[string]string{`{}`: "1=1 "},
+		},
+		{
+			name: "missing __name__",
+			body: `{"metric":{"job":"a"},"values":[1],"timestamps":[1]}` + "\n",
+			want: map[string]string{`{job="a"}`: "1=1 "},
+		},
+		{
+			name: "unicode and escaped label values",
+			body: `{"metric":{"__name__":"up","region":"日本\t\"quote\""},"values":[1],"timestamps":[1]}` + "\n",
+			want: map[string]string{`{__name__="up", region="日本\t\"quote\""}`: "1=1 "},
+		},
+		{
+			name: "negative and zero timestamps",
+			body: `{"metric":{"__name__":"up"},"values":[1,2],"timestamps":[-5,0]}` + "\n",
+			want: map[string]string{`{__name__="up"}`: "-5=1 0=2 "},
+		},
+		{
+			name: "series split across non-adjacent lines interleaved with other series",
+			body: `{"metric":{"__name__":"up","job":"a"},"values":[1],"timestamps":[1]}
+{"metric":{"__name__":"up","job":"b"},"values":[10],"timestamps":[1]}
+{"metric":{"__name__":"up","job":"a"},"values":[2],"timestamps":[2]}
+{"metric":{"__name__":"up","job":"b"},"values":[20],"timestamps":[2]}
+`,
+			want: map[string]string{
+				`{__name__="up", job="a"}`: "1=1 2=2 ",
+				`{__name__="up", job="b"}`: "1=10 2=20 ",
+			},
+		},
+		{
+			name: "overlapping timestamp ranges, out of order, last line wins",
+			body: `{"metric":{"__name__":"up"},"values":[1,2,3],"timestamps":[10,20,30]}
+{"metric":{"__name__":"up"},"values":[99,98],"timestamps":[20,30]}
+`,
+			want: map[string]string{`{__name__="up"}`: "10=1 20=99 30=98 "},
+		},
+		{
+			name: "huge float string overflows to infinity, not an error",
+			body: `{"metric":{"__name__":"up"},"values":["1e400","-1e400"],"timestamps":[1,2]}` + "\n",
+			want: map[string]string{`{__name__="up"}`: "1=+Inf 2=-Inf "},
+		},
+		{
+			name: "ordinary number quoted as a string",
+			body: `{"metric":{"__name__":"up"},"values":["3.5"],"timestamps":[1]}` + "\n",
+			want: map[string]string{`{__name__="up"}`: "1=3.5 "},
+		},
+		{
+			name:    "syntactically bad numeric string is still an error",
+			body:    `{"metric":{"__name__":"up"},"values":["not-a-number"],"timestamps":[1]}` + "\n",
+			wantErr: "malformed export line",
+		},
+		{
+			name: "no trailing newline on the last line",
+			body: `{"metric":{"__name__":"up"},"values":[1],"timestamps":[1]}`,
+			want: map[string]string{`{__name__="up"}`: "1=1 "},
+		},
+		{
+			name: "CRLF line endings",
+			body: "{\"metric\":{\"__name__\":\"up\"},\"values\":[1],\"timestamps\":[1]}\r\n",
+			want: map[string]string{`{__name__="up"}`: "1=1 "},
+		},
+		{
+			name:    "trailing garbage after a valid line",
+			body:    `{"metric":{"__name__":"up"},"values":[1],"timestamps":[1]}garbage`,
+			wantErr: "trailing data after the closing brace",
+		},
+		{
+			name:    "two objects concatenated on one line",
+			body:    `{"metric":{"__name__":"up"},"values":[1],"timestamps":[1]}{"metric":{"__name__":"down"},"values":[2],"timestamps":[2]}`,
+			wantErr: "trailing data after the closing brace",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ss := decodeExportSeriesSet(strings.NewReader(tc.body))
@@ -127,6 +207,52 @@ func TestDecodeExportSeriesSetLargeLine(t *testing.T) {
 	if ss.Next() {
 		t.Fatal("expected exactly one series")
 	}
+}
+
+// buildLineOfSize pads a valid one-sample export line's label value to make
+// the whole line exactly n bytes (excluding the trailing newline), to probe
+// the exportMaxLineBytes boundary precisely.
+func buildLineOfSize(n int) []byte {
+	const prefix = `{"metric":{"__name__":"up","pad":"`
+	const suffix = `"},"values":[1],"timestamps":[1]}`
+	padLen := n - len(prefix) - len(suffix)
+	if padLen < 0 {
+		panic(fmt.Sprintf("buildLineOfSize: %d is too small to hold the envelope (%d bytes)", n, len(prefix)+len(suffix)))
+	}
+	line := make([]byte, 0, n)
+	line = append(line, prefix...)
+	for i := 0; i < padLen; i++ {
+		line = append(line, 'x')
+	}
+	line = append(line, suffix...)
+	return line
+}
+
+// TestDecodeExportSeriesSetLineSizeLimit pins down exportMaxLineBytes's actual
+// boundary: bufio.Scanner needs one byte of headroom over the token itself, so
+// the largest line that decodes is exportMaxLineBytes-1, not
+// exportMaxLineBytes as the constant's name suggests.
+func TestDecodeExportSeriesSetLineSizeLimit(t *testing.T) {
+	t.Run("largest line that still decodes", func(t *testing.T) {
+		line := buildLineOfSize(exportMaxLineBytes - 1)
+		ss := decodeExportSeriesSet(bytes.NewReader(append(line, '\n')))
+		if !ss.Next() {
+			t.Fatalf("no series decoded: %v", ss.Err())
+		}
+		if ss.Next() {
+			t.Fatal("expected exactly one series")
+		}
+	})
+	t.Run("one byte over the limit errors instead of panicking", func(t *testing.T) {
+		line := buildLineOfSize(exportMaxLineBytes)
+		ss := decodeExportSeriesSet(bytes.NewReader(append(line, '\n')))
+		if ss.Next() {
+			t.Fatalf("expected no series, got one")
+		}
+		if err := ss.Err(); err == nil || !strings.Contains(err.Error(), "too long") {
+			t.Fatalf("expected a token-too-long error, got %v", err)
+		}
+	})
 }
 
 // TestVMExportGetValueRequest checks the export call: endpoint, selector, the
@@ -196,6 +322,96 @@ func TestVMExportGetValueError(t *testing.T) {
 	}
 }
 
+// TestVMExportGetValueErrorCases covers the ways the export call itself can
+// fail, beyond the VM-style {"status":"error"} body already covered by
+// TestVMExportGetValueError.
+func TestVMExportGetValueErrorCases(t *testing.T) {
+	newAPI := func(t *testing.T, handler http.HandlerFunc) *PromAPIVMExport {
+		t.Helper()
+		srv := httptest.NewServer(handler)
+		t.Cleanup(srv.Close)
+		client, err := api.NewClient(api.Config{Address: srv.URL})
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+		return &PromAPIVMExport{API: &PromAPIV1{API: v1.NewAPI(client), Client: client}, Client: client}
+	}
+
+	t.Run("5xx with a non-JSON body", func(t *testing.T) {
+		a := newAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html><body>502 Bad Gateway</body></html>"))
+		})
+		ss := a.GetValue(context.Background(), time.Unix(0, 0), time.Unix(60, 0), nil)
+		if err := ss.Err(); err == nil || !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "Bad Gateway") {
+			t.Fatalf("expected the status and body to surface, got %v", err)
+		}
+	})
+
+	t.Run("4xx with an empty body", func(t *testing.T) {
+		a := newAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		})
+		ss := a.GetValue(context.Background(), time.Unix(0, 0), time.Unix(60, 0), nil)
+		if err := ss.Err(); err == nil || !strings.Contains(err.Error(), "403") {
+			t.Fatalf("expected the status to surface, got %v", err)
+		}
+	})
+
+	t.Run("error body longer than 256 bytes is truncated", func(t *testing.T) {
+		long := strings.Repeat("x", 1000)
+		a := newAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(long))
+		})
+		ss := a.GetValue(context.Background(), time.Unix(0, 0), time.Unix(60, 0), nil)
+		err := ss.Err()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if len(err.Error()) > 350 {
+			t.Fatalf("error message not truncated: %d bytes: %.50s...", len(err.Error()), err.Error())
+		}
+	})
+
+	t.Run("empty 200 body decodes to no series", func(t *testing.T) {
+		a := newAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		ss := a.GetValue(context.Background(), time.Unix(0, 0), time.Unix(60, 0), nil)
+		if ss.Next() {
+			t.Fatalf("expected no series")
+		}
+		if err := ss.Err(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("context canceled mid-response", func(t *testing.T) {
+		started := make(chan struct{})
+		unblock := make(chan struct{})
+		a := newAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"metric":{"__name__":"up"},"values":[1],"timestamps":[1]}` + "\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			close(started)
+			<-unblock
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-started
+			cancel()
+			close(unblock)
+		}()
+		ss := a.GetValue(ctx, time.Unix(0, 0), time.Unix(60, 0), nil)
+		if err := ss.Err(); err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+}
+
 // TestVMExportMatchesQueryPath is the correctness contract: for the same data,
 // the export path must hand back exactly what the /api/v1/query range-selector
 // path does -- even though export splits series over blocks, emits them in no
@@ -224,6 +440,51 @@ func TestVMExportMatchesQueryPath(t *testing.T) {
 	got := dumpSS(t, exportAPI.GetValue(context.Background(), start, end, matchers))
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("export/query mismatch\nquery =%v\nexport=%v", want, got)
+	}
+}
+
+// TestVMExportGetValueConcurrent runs GetValue calls against a shared
+// PromAPIVMExport concurrently, so -race can catch any state the decoder or
+// the client wrap share across goroutines (the iterator/builder reuse in
+// decodeExportLine is per-call, but the shared exportJSON config and Client
+// are not).
+func TestVMExportGetValueConcurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == epVMExport {
+			_, _ = w.Write([]byte(exportBody))
+			return
+		}
+		_, _ = w.Write([]byte(matrixBody))
+	}))
+	// Not defer: a deferred call runs when this function returns, which
+	// happens as soon as the loop below has *scheduled* the t.Parallel
+	// subtests, well before they actually run -- closing the server out from
+	// under them. t.Cleanup waits for subtests too.
+	t.Cleanup(srv.Close)
+
+	client, err := api.NewClient(api.Config{Address: srv.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	a := &PromAPIVMExport{API: &PromAPIV1{API: v1.NewAPI(client), Client: client}, Client: client}
+
+	start, end := time.Unix(1725000000, 0), time.Unix(1725000030, 0)
+	matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "up")}
+
+	// One reference call, outside the race, so a mistake here doesn't hide a
+	// real bug in the concurrent calls below.
+	want := dumpSS(t, a.GetValue(context.Background(), start, end, matchers))
+
+	const workers = 8
+	for i := 0; i < workers; i++ {
+		t.Run(fmt.Sprintf("worker-%d", i), func(t *testing.T) {
+			t.Parallel()
+			ss := a.GetValue(context.Background(), start, end, matchers)
+			got := dumpSS(t, ss)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("series mismatch\nexpected=%v\nactual=%v", want, got)
+			}
+		})
 	}
 }
 

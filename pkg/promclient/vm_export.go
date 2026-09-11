@@ -192,6 +192,17 @@ func decodeExportLine(line []byte, builder *labels.ScratchBuilder) (labels.Label
 	if iter.Error != nil && !errors.Is(iter.Error, io.EOF) {
 		return labels.EmptyLabels(), nil, fmt.Errorf("malformed export line: %w", iter.Error)
 	}
+	// ReadObject stops at the closing brace without consuming what follows, so
+	// a line holding more than one JSON value (concatenated objects, or plain
+	// trailing garbage) would otherwise decode its first object and silently
+	// drop the rest. WhatIsNext reports io.EOF once the line is genuinely
+	// exhausted; anything else means there was more to read.
+	if iter.Error == nil {
+		iter.WhatIsNext()
+		if iter.Error == nil {
+			return labels.EmptyLabels(), nil, errors.New("malformed export line: trailing data after the closing brace")
+		}
+	}
 	if len(values) != len(timestamps) {
 		return labels.EmptyLabels(), nil, fmt.Errorf("malformed export line: %d values but %d timestamps", len(values), len(timestamps))
 	}
@@ -218,7 +229,9 @@ func readExportValue(iter *jsoniter.Iterator) float64 {
 	case jsoniter.StringValue:
 		s := iter.ReadString()
 		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
+		if err != nil && !errors.Is(err, strconv.ErrRange) {
+			// A magnitude ParseFloat can't represent still resolves to the
+			// correct ±Inf; only a syntactically bad string is fatal.
 			iter.ReportError("readExportValue", err.Error())
 		}
 		return f
