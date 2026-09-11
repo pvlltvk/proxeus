@@ -297,6 +297,24 @@ victoriametrics:
 			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got ""`,
 		},
 		{
+			// Regression: validateDialect used to return as soon as it found
+			// the first non-nil dialect block, so a valid thanos: block hid a
+			// mismatched victoriametrics: block sitting alongside it -- the
+			// config loaded, and vmExport() (which only looks at
+			// VictoriaMetrics, not backend_type) would have wrapped a Thanos
+			// group's client to call /api/v1/export against it.
+			name: "victoriametrics block alongside a valid thanos block, same backend_type: thanos",
+			config: `
+backend_type: thanos
+thanos:
+  dedup: true
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got "thanos"`,
+		},
+		{
 			name: "mimir block",
 			config: `
 backend_type: mimir

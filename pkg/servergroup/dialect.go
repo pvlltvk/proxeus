@@ -191,8 +191,12 @@ func (c *MimirConfig) validate() error {
 	return nil
 }
 
-// validateDialect checks that backend_type is a known value and that any typed
-// dialect block matches it.
+// validateDialect checks that backend_type is a known value and that every
+// typed dialect block present matches it. Each block is checked
+// unconditionally (not else-if'd on the others) so that, say, a stray
+// victoriametrics: block on a backend_type: thanos group is caught even
+// though its own thanos: block is fine -- returning after the first match
+// would silently let the mismatched extra block through.
 func (c *Config) validateDialect() error {
 	if c.BackendType != "" && !slices.Contains(backendTypes, c.BackendType) {
 		return fmt.Errorf("invalid backend_type %q: must be one of %v (or empty)", c.BackendType, backendTypes)
@@ -202,7 +206,9 @@ func (c *Config) validateDialect() error {
 		if c.BackendType != BackendThanos {
 			return fmt.Errorf("thanos block requires backend_type: thanos, got %q", c.BackendType)
 		}
-		return c.Thanos.validate()
+		if err := c.Thanos.validate(); err != nil {
+			return err
+		}
 	}
 	if c.VictoriaMetrics != nil {
 		if c.BackendType != BackendVictoriaMetrics {
@@ -214,13 +220,14 @@ func (c *Config) validateDialect() error {
 		if c.RemoteRead && c.vmExport() {
 			return fmt.Errorf("victoriametrics raw_fetch: export is mutually exclusive with remote_read: true")
 		}
-		return nil
 	}
 	if c.Mimir != nil {
 		if c.BackendType != BackendMimir && c.BackendType != BackendCortex {
 			return fmt.Errorf("mimir block requires backend_type: mimir or cortex, got %q", c.BackendType)
 		}
-		return c.Mimir.validate()
+		if err := c.Mimir.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
