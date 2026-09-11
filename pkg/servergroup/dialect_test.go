@@ -248,6 +248,26 @@ victoriametrics:
 			wantHeaders: map[string]string{},
 		},
 		{
+			name: "victoriametrics raw_fetch is case-sensitive",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: EXPORT
+`,
+			wantErr: true,
+			errMsg:  `invalid victoriametrics raw_fetch "EXPORT"`,
+		},
+		{
+			name: "victoriametrics raw_fetch explicitly empty is the default",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: ""
+`,
+			wantParams:  url.Values{},
+			wantHeaders: map[string]string{},
+		},
+		{
 			name: "victoriametrics block without matching backend_type",
 			config: `
 backend_type: prometheus
@@ -256,6 +276,25 @@ victoriametrics:
 `,
 			wantErr: true,
 			errMsg:  "victoriametrics block requires backend_type: victoriametrics",
+		},
+		{
+			name: "victoriametrics block with backend_type: thanos",
+			config: `
+backend_type: thanos
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got "thanos"`,
+		},
+		{
+			name: "victoriametrics block with no backend_type at all",
+			config: `
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got ""`,
 		},
 		{
 			name: "mimir block",
