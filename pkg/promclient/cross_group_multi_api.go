@@ -2,6 +2,7 @@ package promclient
 
 import (
 	"context"
+	"sort"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
@@ -9,14 +10,6 @@ import (
 
 	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
-
-// drainToMatrix materializes ss into a model.Matrix, one *model.SampleStream
-// per series (labels + all samples). This is the boundary between the
-// SeriesSet world and promhttputil's tested model.Value dedup core
-// (MergeValuesDeterministic), which cross-group dedup reuses unchanged.
-func drainToMatrix(ss storage.SeriesSet) (model.Matrix, error) {
-	return SeriesSetToMatrix(ss)
-}
 
 // CrossGroupBackend is one server_group's API client plus the identity
 // (name and external labels) used for cross-group dedup and collision
@@ -68,6 +61,14 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 		}
 	}
 
+	// Same set as a sorted []string, the form labels.Labels.BytesWithoutLabels
+	// (and so the query-path dedup) wants.
+	ignoreNames := make([]string, 0, len(ignoreLabels))
+	for k := range ignoreLabels {
+		ignoreNames = append(ignoreNames, string(k))
+	}
+	sort.Strings(ignoreNames)
+
 	// requiredCount=1: each server_group has unique labels, so it occupies its
 	// own fingerprint bucket of size 1. With PartialResponse=false this means
 	// EVERY backend must respond (any one error fails the whole query — see
@@ -101,33 +102,21 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	// the per-group external labels), which a label-sorted streaming merge
 	// can't bucket without a re-sort, and the lowest-ordinal winner for any
 	// bucket may arrive in any input -- so this is a pipeline barrier
-	// regardless. We materialize each group's SeriesSet into a model.Matrix
-	// and reuse the tested promhttputil.MergeValuesDeterministic core
-	// (always via its ValMatrix branch: instant queries become single-sample
-	// streams, the same shape PromAPIV1.Query already produces via
-	// ModelValueToSeriesSet).
+	// regardless. dedupSeriesSets does it over labels.Labels directly: only
+	// labels are read to arbitrate, and the winning series (samples included)
+	// is handed on as it arrived.
 	m.seriesSetMergeFn = func(ctx context.Context, sets []ordinalSeriesSet) storage.SeriesSet {
 		if IsAggregatePushdown(ctx) {
 			return defaultMerge(ctx, sets)
 		}
-		inputs := make([]promhttputil.OrdinalValue, len(sets))
-		for i, s := range sets {
-			matrix, err := drainToMatrix(s.ss)
-			if err != nil {
-				return ModelValueToSeriesSet(nil, nil, err)
-			}
-			inputs[i] = promhttputil.OrdinalValue{Ordinal: s.ordinal, Value: matrix}
-		}
-		merged, stats, err := promhttputil.MergeValuesDeterministic(inputs, ignoreLabels)
-		if err != nil {
-			return ModelValueToSeriesSet(nil, nil, err)
-		}
+		stats := &promhttputil.DedupStats{}
+		merged := dedupSeriesSets(sets, ignoreNames, stats)
 		if opts.Collisions != nil {
 			for pair, count := range stats.Pairs {
 				opts.Collisions.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
 			}
 		}
-		return ModelValueToSeriesSet(merged, nil, nil)
+		return merged
 	}
 
 	if opts.DedupMetadata {
