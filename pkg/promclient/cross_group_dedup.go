@@ -35,6 +35,12 @@ func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttput
 		lbls    labels.Labels
 		ordinal int
 		idx     int
+		// losers holds the ordinals that lost this bucket. Attribution is
+		// deferred to the end because the winner is only known once every set
+		// has been seen: recording against the winner of the moment would
+		// attribute a collision to a backend that a later, lower ordinal goes
+		// on to beat. nil unless the bucket actually collided.
+		losers []int
 	}
 
 	// Buckets are keyed on the exact reduced labelset (the encoded labels minus
@@ -64,16 +70,24 @@ func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttput
 
 			// Genuine cross-group collision: lower ordinal wins.
 			if set.ordinal < existing.ordinal {
-				stats.Record(set.ordinal, existing.ordinal)
+				existing.losers = append(existing.losers, existing.ordinal)
 				result[existing.idx] = series
 				existing.lbls = lbls
 				existing.ordinal = set.ordinal
 			} else {
-				stats.Record(existing.ordinal, set.ordinal)
+				existing.losers = append(existing.losers, set.ordinal)
 			}
 		}
 		if err := set.ss.Err(); err != nil {
 			return promapi.NewSeriesSet(nil, nil, err)
+		}
+	}
+
+	// Attribute every collision to the bucket's final winner. Map iteration
+	// order does not matter: Record only increments counters.
+	for _, e := range buckets {
+		for _, loser := range e.losers {
+			stats.Record(e.ordinal, loser)
 		}
 	}
 

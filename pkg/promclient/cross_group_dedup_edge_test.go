@@ -179,33 +179,49 @@ func TestDedupSeriesSets_DuplicateWithinOneGroup(t *testing.T) {
 // must beat a later one and lose to an earlier one, however the sets slice
 // itself is ordered, and Pairs must attribute the true {winner,loser}
 // ordinals rather than something derived from iteration position.
+//
+// Every permutation is checked, not one sample: a descending slice (2,1,0)
+// walks the winner down one ordinal at a time and is the case that catches
+// attribution against the winner of the moment rather than the final one.
 func TestDedupSeriesSets_OrdinalOrderIndependence(t *testing.T) {
 	cpu := func(backend string) storage.Series {
 		return series(oneFloat(0, 1), "__name__", "cpu", "backend", backend)
 	}
 
-	// Deliberately NOT sorted by ordinal: 2, 0, 1.
-	sets := []ordinalSeriesSet{
-		setOf(2, cpu("sg2")),
-		setOf(0, cpu("sg0")),
-		setOf(1, cpu("sg1")),
-	}
-	stats := &promhttputil.DedupStats{}
-	ss := dedupSeriesSets(sets, []string{"backend"}, stats)
-
-	if !ss.Next() {
-		t.Fatal("expected one surviving series")
-	}
-	got := ss.At()
-	if ss.Next() {
-		t.Fatal("expected all three to collide into one")
-	}
-	if got.Labels().Get("backend") != "sg0" {
-		t.Fatalf("winner backend = %q, want sg0 (lowest ordinal), independent of arrival order", got.Labels().Get("backend"))
+	permutations := [][3]int{
+		{0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+		{1, 2, 0}, {2, 0, 1}, {2, 1, 0},
 	}
 	wantPairs := map[[2]int]int{{0, 1}: 1, {0, 2}: 1}
-	if fmt.Sprint(stats.Pairs) != fmt.Sprint(wantPairs) {
-		t.Fatalf("Pairs = %v, want %v", stats.Pairs, wantPairs)
+
+	for _, perm := range permutations {
+		t.Run(fmt.Sprintf("%d%d%d", perm[0], perm[1], perm[2]), func(t *testing.T) {
+			sets := make([]ordinalSeriesSet, 0, len(perm))
+			for _, ordinal := range perm {
+				sets = append(sets, setOf(ordinal, cpu(fmt.Sprintf("sg%d", ordinal))))
+			}
+			stats := &promhttputil.DedupStats{}
+			ss := dedupSeriesSets(sets, []string{"backend"}, stats)
+
+			if !ss.Next() {
+				t.Fatal("expected one surviving series")
+			}
+			got := ss.At()
+			if ss.Next() {
+				t.Fatal("expected all three to collide into one")
+			}
+			if got.Labels().Get("backend") != "sg0" {
+				t.Fatalf("winner backend = %q, want sg0 (lowest ordinal), independent of arrival order",
+					got.Labels().Get("backend"))
+			}
+			if stats.Collisions != 2 {
+				t.Fatalf("Collisions = %d, want 2", stats.Collisions)
+			}
+			if fmt.Sprint(stats.Pairs) != fmt.Sprint(wantPairs) {
+				t.Fatalf("Pairs = %v, want %v (every loser attributed to the final winner)",
+					stats.Pairs, wantPairs)
+			}
+		})
 	}
 }
 
