@@ -45,6 +45,14 @@ imports:
 test:
 	GO111MODULE=on $(GO) test -race ./...
 
+# The upstream promql suite: every .test fixture of the embedded prometheus
+# fork, against both server-group configs. It takes ~15m and needs more memory
+# than the race detector leaves us, so it stays out of `make test` and runs
+# here (and in its own CI job) instead.
+.PHONY: test-upstream
+test-upstream:
+	GO111MODULE=on PROXEUS_UPSTREAM_PROMQL=1 $(GO) test -timeout 40m ./test/ -run '^TestUpstreamEvaluations$$'
+
 # Synthetic Prometheus backend used to load-test proxeus without a real
 # Thanos/VictoriaMetrics behind it. Deliberately not part of `release`: it is a
 # test tool, not a published artifact.
