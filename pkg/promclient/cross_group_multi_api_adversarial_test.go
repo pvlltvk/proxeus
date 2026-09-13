@@ -25,6 +25,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/storage"
+
+	"github.com/pvlltvk/proxeus/pkg/promhttputil"
 )
 
 // TestB1E2E_TwoBackendsLowerOrdinalWins is the primary end-to-end integration
@@ -465,16 +467,22 @@ func TestB1E2E_DuplicateFullLabelSeriesAcrossGroups(t *testing.T) {
 	}
 }
 
-// regressionEmptySeriesSet is a sanity check that storage.EmptySeriesSet()
-// (used as stubAPI's zero value) round-trips through drainToMatrix as a
-// non-nil, zero-length model.Matrix with no error -- the shape
-// mergeMatricesDeterministic must tolerate when one input is empty.
-func TestDrainToMatrix_EmptySeriesSet(t *testing.T) {
-	mat, err := drainToMatrix(storage.EmptySeriesSet())
-	if err != nil {
-		t.Fatalf("drainToMatrix: %v", err)
+// A sanity check that storage.EmptySeriesSet() (used as stubAPI's zero value)
+// merges as a no-op -- the shape dedupSeriesSets must tolerate when one input
+// is empty.
+func TestDedupSeriesSets_EmptySeriesSetInput(t *testing.T) {
+	stats := &promhttputil.DedupStats{}
+	ss := dedupSeriesSets([]ordinalSeriesSet{
+		{ordinal: 0, ss: storage.EmptySeriesSet()},
+		{ordinal: 1, ss: storage.EmptySeriesSet()},
+	}, []string{"backend"}, stats)
+	if err := ss.Err(); err != nil {
+		t.Fatalf("dedupSeriesSets: %v", err)
 	}
-	if len(mat) != 0 {
-		t.Fatalf("expected empty matrix, got %d streams: %v", len(mat), mat)
+	if ss.Next() {
+		t.Fatalf("expected no series, got %v", ss.At().Labels())
+	}
+	if stats.Collisions != 0 {
+		t.Fatalf("expected no collisions, got %d", stats.Collisions)
 	}
 }
