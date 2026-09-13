@@ -39,7 +39,7 @@ jobs:
         go install golang.org/x/vuln/cmd/govulncheck@latest
         govulncheck ./...
 
-  # The upstream promql fixture sweep runs ~15m, so it gets its own job rather
+  # The upstream promql fixture sweep runs ~16m, so it gets its own job rather
   # than slowing every `make test`.
   upstream-promql:
     name: Upstream PromQL fixtures

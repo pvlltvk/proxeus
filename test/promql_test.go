@@ -277,8 +277,9 @@ var excludedEvals = map[string][]string{
 }
 
 func TestUpstreamEvaluations(t *testing.T) {
-	// ~15m for the two configs, and more memory than `go test -race ./...`
-	// leaves us: `make test-upstream` (and the CI job that calls it) set this.
+	// ~16m for the two configs, which blows go test's 10m default timeout:
+	// `make test-upstream` (and the CI job that calls it) set this and pass a
+	// timeout of its own.
 	if os.Getenv("PROXEUS_UPSTREAM_PROMQL") == "" {
 		t.Skip("set PROXEUS_UPSTREAM_PROMQL=1 (or run make test-upstream) to run the upstream promql fixtures")
 	}
