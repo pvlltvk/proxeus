@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -910,6 +911,17 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// To aggregate count_values we simply sum(count_values(key, metric)) by (key)
 		case parser.COUNT_VALUES:
 
+			// The value label is the aggregation's parameter; it may be
+			// parenthesized (count_values((("v")), metric)). Anything else
+			// isn't ours to rewrite.
+			valueLabel, ok := unwrapParens(n.Param).(*parser.StringLiteral)
+			if !ok {
+				reason = reasonNonLiteralParam
+				return nil, nil
+			}
+
+			_ = removeOffsetFn()
+
 			// First we must fetch the data into a vectorselector
 			if s.Interval > 0 {
 				result = client.QueryRange(ctx, n.String(), v1.Range{
@@ -933,11 +945,19 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			}
 			ret.UnexpandedSeriesSet = result
 
-			// Replace with sum(count_values()) BY (label)
+			// Replace with sum(count_values()) BY (label). With `by` the
+			// value label has to join the grouping or the sum would collapse
+			// the distinct values back together; with `without` the grouping
+			// is an exclusion list -- the downstream already dropped those
+			// labels, and adding the value label there would drop it too.
+			grouping := slices.Clone(n.Grouping)
+			if !n.Without {
+				grouping = append(grouping, valueLabel.Val)
+			}
 			return &parser.AggregateExpr{
 				Op:       parser.SUM,
 				Expr:     ret,
-				Grouping: append(n.Grouping, n.Param.(*parser.StringLiteral).Val),
+				Grouping: grouping,
 				Without:  n.Without,
 			}, nil
 
@@ -1307,6 +1327,18 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 	}
 	return nil, nil
+}
+
+// unwrapParens strips the ParenExpr layers the parser keeps around an
+// expression, e.g. the `(("v"))` of count_values((("v")), metric).
+func unwrapParens(e parser.Expr) parser.Expr {
+	for {
+		p, ok := e.(*parser.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.Expr
+	}
 }
 
 func durationMilliseconds(d time.Duration) int64 {
