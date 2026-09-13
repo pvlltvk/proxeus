@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -310,10 +312,35 @@ func TestUpstreamEvaluations(t *testing.T) {
 	}
 }
 
+// patEvalInstant and patEvalRange mirror promqltest's own eval-command
+// patterns so evalExpr splits a command line the same way the fixture parser
+// does: the last submatch is the query expression.
+var (
+	patEvalInstant = regexp.MustCompile(`^eval(?:_(?:fail|warn|ordered|info))?\s+instant\s+(?:at\s+(?:.+?))?\s+(.+)$`)
+	patEvalRange   = regexp.MustCompile(`^eval(?:_(?:fail|warn|info))?\s+range\s+from\s+(?:.+)\s+to\s+(?:.+)\s+step\s+(?:.+?)\s+(.+)$`)
+)
+
+// evalExpr returns the query expression of an eval command line, or false if
+// the line isn't one.
+func evalExpr(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "eval") {
+		return "", false
+	}
+	for _, pat := range []*regexp.Regexp{patEvalInstant, patEvalRange} {
+		if m := pat.FindStringSubmatch(line); m != nil {
+			return m[len(m)-1], true
+		}
+	}
+	return "", false
+}
+
 // excludeEvals blanks out the eval commands of content whose expression is in
 // exprs, together with the expectation lines that follow them. Blanking rather
 // than deleting keeps the line numbering -- and so the line numbers promqltest
-// reports -- intact. An entry that matches nothing is an error: a fixture
+// reports -- intact. Matching is on the command's whole expression, not a
+// suffix of the line, so excluding `sum(x)` doesn't also swallow a
+// `2 * sum(x)` eval. An entry that matches nothing is an error: a fixture
 // change must not turn an exclusion into a silent no-op.
 func excludeEvals(content string, exprs []string) (string, error) {
 	if len(exprs) == 0 {
@@ -327,20 +354,14 @@ func excludeEvals(content string, exprs []string) (string, error) {
 	matched := make(map[string]bool, len(exprs))
 	lines := strings.Split(content, "\n")
 	for i := 0; i < len(lines); i++ {
-		if !strings.HasPrefix(lines[i], "eval") {
+		expr, ok := evalExpr(lines[i])
+		if !ok {
 			continue
 		}
-		found := false
-		for _, expr := range exprs {
-			if strings.HasSuffix(lines[i], expr) {
-				matched[expr] = true
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(exprs, expr) {
 			continue
 		}
+		matched[expr] = true
 		// The command owns every indented line below it.
 		lines[i] = ""
 		for i+1 < len(lines) && indented(lines[i+1]) {
@@ -382,6 +403,43 @@ eval_fail instant at 5m bad(metric)
 	if _, err := excludeEvals(content, []string{"gone(metric)"}); err == nil {
 		t.Error("expected an error for an exclusion that matches nothing")
 	}
+
+	// The expression is matched whole, not as a line suffix: excluding
+	// sum(metric) must leave the 2 * sum(metric) eval alone.
+	const shadowed = `eval instant at 5m 2 * sum(metric)
+	{} 4
+
+eval instant at 5m sum(metric)
+	{} 2
+`
+	got, err = excludeEvals(shadowed, []string{"sum(metric)"})
+	if err != nil {
+		t.Fatalf("excludeEvals: %s", err)
+	}
+	want = "eval instant at 5m 2 * sum(metric)\n\t{} 4\n\n\n\n"
+	if got != want {
+		t.Errorf("got:\n%q\nwant:\n%q", got, want)
+	}
+
+	// The eval_* variants and range commands are commands too, and trailing
+	// whitespace on the line doesn't hide the expression.
+	for _, cmd := range []string{
+		"eval_ordered instant at 5m sum(metric)",
+		"eval_info instant at 5m sum(metric)",
+		"eval_warn instant at 5m sum(metric)",
+		"eval_fail instant at 5m sum(metric)",
+		"eval range from 0 to 5m step 1m sum(metric)",
+		"eval instant at 5m sum(metric) ",
+	} {
+		got, err := excludeEvals(cmd+"\n\t{} 2\n", []string{"sum(metric)"})
+		if err != nil {
+			t.Errorf("%q: %s", cmd, err)
+			continue
+		}
+		if got != "\n\n" {
+			t.Errorf("%q: got %q, want everything blanked", cmd, got)
+		}
+	}
 }
 
 // upstreamTestdataDir returns the promqltest fixture directory of the
@@ -390,9 +448,14 @@ eval_fail instant at 5m bad(metric)
 func upstreamTestdataDir(t *testing.T) string {
 	t.Helper()
 
-	out, err := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/prometheus/prometheus/promql/promqltest").Output()
+	cmd := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/prometheus/prometheus/promql/promqltest")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("locating the promqltest package: %v", err)
+		// Without stderr this is just "exit status 1", which says nothing
+		// about a cold module cache, a bad GOFLAGS, or a missing toolchain.
+		t.Fatalf("locating the promqltest package: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return filepath.Join(strings.TrimSpace(string(out)), "testdata")
 }
