@@ -295,7 +295,6 @@ func TestVMExportGetValueRequest(t *testing.T) {
 		"match[]":           {`{__name__="up",job=~"a.*"}`},
 		"start":             {"1724999999"}, // end - (3600s + 1s of rounding slack)
 		"end":               {"1725003600"},
-		"reduce_mem_usage":  {"1"},
 		"max_rows_per_line": {"1000"},
 	}
 	if !reflect.DeepEqual(got, want) {

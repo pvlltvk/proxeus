@@ -26,10 +26,10 @@ import (
 
 const epVMExport = "/api/v1/export"
 
-// exportMaxLineBytes caps a single NDJSON line. Lines are one *block* of one
-// series (we always ask for reduce_mem_usage=1), so this is far above what
-// VictoriaMetrics emits; hitting it means the downstream ignored the parameter,
-// and `export_max_rows_per_line` is the way out.
+// exportMaxLineBytes caps a single NDJSON line. One line carries one series
+// over the queried range, so a long range at a short scrape interval is what
+// drives the size; `export_max_rows_per_line` splits such a series across
+// several lines and is the way out if one ever exceeds this.
 const exportMaxLineBytes = 16 << 20
 
 var exportJSON = jsoniter.ConfigCompatibleWithStandardLibrary
@@ -73,11 +73,13 @@ func (p *PromAPIVMExport) GetValue(ctx context.Context, start, end time.Time, ma
 	seconds := int64(end.Sub(start).Seconds()) + 1
 	args.Set("start", formatAPITime(end.Add(-time.Duration(seconds)*time.Second)))
 	args.Set("end", formatAPITime(end))
-	// Bounds the memory VictoriaMetrics needs to answer: it streams blocks as
-	// it finds them rather than collecting each series first. The response is
-	// then unordered and may repeat a series, which decodeExportSeriesSet
-	// merges.
-	args.Set("reduce_mem_usage", "1")
+	// reduce_mem_usage=1 is deliberately NOT sent. It switches VictoriaMetrics
+	// to streaming raw blocks straight from storage, which skips the
+	// deduplication its select path applies (-dedup.minScrapeInterval): under HA
+	// ingestion that returns every replica's samples, so count_over_time, rate
+	// and friends would disagree with the /api/v1/query this fetch stands in
+	// for. Leaving it off keeps export on the same select path as a query, for
+	// the same vmselect memory a query over that range already costs.
 	if p.MaxRowsPerLine > 0 {
 		args.Set("max_rows_per_line", strconv.Itoa(p.MaxRowsPerLine))
 	}
@@ -116,10 +118,9 @@ type exportSeries struct {
 //
 //	{"metric":{...},"values":[1,2],"timestamps":[1725000000000,1725000015000]}
 //
-// One line is one *block* of a series, so the same labelset can appear many
-// times (and does, with reduce_mem_usage=1 or max_rows_per_line); lines are
-// grouped by labelset and their samples merged. The result is ordered by
-// labels, since the export order is unspecified.
+// One labelset spans several lines when max_rows_per_line splits it, so lines
+// are grouped by labelset and their samples merged. The result is ordered by
+// labels, since the order series come back in is unspecified.
 func decodeExportSeriesSet(r io.Reader) storage.SeriesSet {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64<<10), exportMaxLineBytes)
@@ -240,11 +241,11 @@ func readExportValue(iter *jsoniter.Iterator) float64 {
 	}
 }
 
-// sortExportSamples orders a series' samples by timestamp (the export order is
-// unspecified) and collapses duplicate timestamps to the last one exported --
-// the v1 API decode path never sees duplicates, but export with
-// reduce_mem_usage=1 skips VictoriaMetrics' dedup of recently written samples,
-// and the storage iterators require strictly increasing timestamps. The sort is
+// sortExportSamples orders a series' samples by timestamp and collapses
+// duplicate timestamps to the last one exported. VictoriaMetrics returns a
+// series in time order, but max_rows_per_line splits one across lines whose
+// relative order is unspecified, and the storage iterators require strictly
+// increasing timestamps, so neither property is assumed here. The sort is
 // stable so "last exported" is well defined.
 func sortExportSamples(samples []chunks.Sample) []chunks.Sample {
 	sort.SliceStable(samples, func(i, j int) bool { return samples[i].T() < samples[j].T() })
