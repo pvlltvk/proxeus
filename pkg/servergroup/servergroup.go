@@ -306,6 +306,16 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 				var apiClient promclient.API
 				apiClient = &promclient.PromAPIV1{API: v1.NewAPI(client), Client: client}
 
+				// Raw fetches through VictoriaMetrics' export endpoint; every
+				// other call stays on the v1 API above.
+				if s.Cfg.vmExport() {
+					apiClient = &promclient.PromAPIVMExport{
+						API:            apiClient,
+						Client:         client,
+						MaxRowsPerLine: s.Cfg.VictoriaMetrics.ExportMaxRowsPerLine,
+					}
+				}
+
 				// If debug logging is enabled, wrap the client with a debugAPI client
 				// Since these are called in the reverse order of what we add, we want
 				// to make sure that this is the first wrap of the client

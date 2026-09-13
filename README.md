@@ -48,11 +48,20 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
 `cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,
 `partial_response`, `max_source_resolution`, `replica_labels`), `victoriametrics:` (`nocache`, `extra_filters`,
-`max_lookback`, `deny_partial_response`) and `mimir:` (`tenant`, sent as `X-Scope-OrgID`). Proxeus translates them into
+`max_lookback`, `deny_partial_response`, `raw_fetch`) and `mimir:` (`tenant`, sent as `X-Scope-OrgID`). Proxeus translates them into
 the params and headers that backend expects, and rejects a mistyped duration or matcher at config load rather than on
 the wire. The thanos and victoriametrics knobs are HTTP-API query params, so they do not apply to `remote_read: true`
 requests; the mimir tenant is a header and applies to both. The generic `query_params` / `http_headers` maps still work and override the dialect on key conflict.
 `backend_type` is also what the inventory UI displays per target.
+
+**VictoriaMetrics raw fetches.** VictoriaMetrics implements no remote_read, so raw samples (what a query that can't be
+pushed down needs) normally come back as matrix JSON from `/api/v1/query` — quoted strings, one array per sample, which
+is what dominates a wide 1y range. `victoriametrics: {raw_fetch: export}` fetches them from VictoriaMetrics'
+`/api/v1/export` NDJSON endpoint instead: bare numbers, millisecond timestamps, roughly half the decode cost.
+Opt-in, and only the raw path changes — instant and range queries, series and labels stay on the v1 API. Two caveats:
+export applies neither the lookback-delta nor `-search.latencyOffset`, so the freshest ~30s can include samples
+VictoriaMetrics' own `/api/v1/query` would hide; and it is mutually exclusive with `remote_read: true` (rejected at
+config load). `export_max_rows_per_line` caps the samples one exported line carries.
 
 **Partial response.** `cross_group_partial_response: true` lets a query succeed when only some groups answer, attaching
 a warning per failed backend. Correct for federating disjoint data, where a Thanos outage should not blank out

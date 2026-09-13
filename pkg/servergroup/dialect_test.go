@@ -1,14 +1,19 @@
 package servergroup
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/discovery/targetgroup"
+	"github.com/prometheus/prometheus/model/labels"
 	"gopkg.in/yaml.v2"
 
 	"github.com/pvlltvk/proxeus/pkg/promclient"
@@ -179,6 +184,90 @@ victoriametrics:
 			errMsg:  `invalid victoriametrics max_lookback "10 minutes"`,
 		},
 		{
+			name: "victoriametrics raw_fetch export is not a query param",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: export
+  export_max_rows_per_line: 10000
+`,
+			wantParams:  url.Values{},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name: "victoriametrics raw_fetch is not a known mode",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: remote_read
+`,
+			wantErr: true,
+			errMsg:  `invalid victoriametrics raw_fetch "remote_read"`,
+		},
+		{
+			name: "victoriametrics export_max_rows_per_line without export",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  export_max_rows_per_line: 10000
+`,
+			wantErr: true,
+			errMsg:  "export_max_rows_per_line requires raw_fetch: export",
+		},
+		{
+			name: "victoriametrics export_max_rows_per_line is negative",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: export
+  export_max_rows_per_line: -1
+`,
+			wantErr: true,
+			errMsg:  "invalid victoriametrics export_max_rows_per_line -1",
+		},
+		{
+			name: "victoriametrics raw_fetch export with remote_read",
+			config: `
+backend_type: victoriametrics
+remote_read: true
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  "raw_fetch: export is mutually exclusive with remote_read: true",
+		},
+		{
+			name: "victoriametrics raw_fetch query with remote_read",
+			config: `
+backend_type: victoriametrics
+remote_read: true
+victoriametrics:
+  raw_fetch: query
+`,
+			wantParams:  url.Values{},
+			wantHeaders: map[string]string{},
+		},
+		{
+			name: "victoriametrics raw_fetch is case-sensitive",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: EXPORT
+`,
+			wantErr: true,
+			errMsg:  `invalid victoriametrics raw_fetch "EXPORT"`,
+		},
+		{
+			name: "victoriametrics raw_fetch explicitly empty is the default",
+			config: `
+backend_type: victoriametrics
+victoriametrics:
+  raw_fetch: ""
+`,
+			wantParams:  url.Values{},
+			wantHeaders: map[string]string{},
+		},
+		{
 			name: "victoriametrics block without matching backend_type",
 			config: `
 backend_type: prometheus
@@ -187,6 +276,43 @@ victoriametrics:
 `,
 			wantErr: true,
 			errMsg:  "victoriametrics block requires backend_type: victoriametrics",
+		},
+		{
+			name: "victoriametrics block with backend_type: thanos",
+			config: `
+backend_type: thanos
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got "thanos"`,
+		},
+		{
+			name: "victoriametrics block with no backend_type at all",
+			config: `
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got ""`,
+		},
+		{
+			// Regression: validateDialect used to return as soon as it found
+			// the first non-nil dialect block, so a valid thanos: block hid a
+			// mismatched victoriametrics: block sitting alongside it -- the
+			// config loaded, and vmExport() (which only looks at
+			// VictoriaMetrics, not backend_type) would have wrapped a Thanos
+			// group's client to call /api/v1/export against it.
+			name: "victoriametrics block alongside a valid thanos block, same backend_type: thanos",
+			config: `
+backend_type: thanos
+thanos:
+  dedup: true
+victoriametrics:
+  raw_fetch: export
+`,
+			wantErr: true,
+			errMsg:  `victoriametrics block requires backend_type: victoriametrics, got "thanos"`,
 		},
 		{
 			name: "mimir block",
@@ -399,6 +525,68 @@ func TestDialectHeadersOnRequest(t *testing.T) {
 
 			if gotTenant != tt.wantTenant {
 				t.Fatalf("expected X-Scope-OrgID %q, got %q", tt.wantTenant, gotTenant)
+			}
+		})
+	}
+}
+
+// TestDialectVMRawFetch checks which endpoint a raw fetch lands on: the
+// portable /api/v1/query range selector by default, VictoriaMetrics'
+// /api/v1/export when the dialect asks for it.
+func TestDialectVMRawFetch(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		rawFetch VMRawFetch
+		wantPath string
+	}{
+		{name: "default", wantPath: "/api/v1/query"},
+		{name: "query", rawFetch: VMRawFetchQuery, wantPath: "/api/v1/query"},
+		{name: "export", rawFetch: VMRawFetchExport, wantPath: "/api/v1/export"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				if r.URL.Path == "/api/v1/export" {
+					_, _ = w.Write([]byte(`{"metric":{"__name__":"up"},"values":[1],"timestamps":[1000]}` + "\n"))
+					return
+				}
+				_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[` +
+					`{"metric":{"__name__":"up"},"values":[[1,"1"]]}]}}`))
+			}))
+			defer server.Close()
+
+			sg, err := NewServerGroup()
+			if err != nil {
+				t.Fatalf("failed to create servergroup: %v", err)
+			}
+			defer sg.Cancel()
+
+			cfg := &Config{
+				Scheme:      "http",
+				BackendType: BackendVictoriaMetrics,
+				VictoriaMetrics: &VictoriaMetricsConfig{
+					RawFetch: tt.rawFetch,
+				},
+				HTTPConfig: HTTPClientConfig{DialTimeout: 200 * time.Millisecond},
+			}
+			if err := sg.ApplyConfig(cfg); err != nil {
+				t.Fatalf("failed to apply config: %v", err)
+			}
+			host := strings.TrimPrefix(server.URL, "http://")
+			if err := sg.loadTargetGroupMap(map[string][]*targetgroup.Group{
+				"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(host)}}}},
+			}); err != nil {
+				t.Fatalf("loadTargetGroupMap: %v", err)
+			}
+
+			matchers := []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "up")}
+			ss := sg.GetValue(context.Background(), time.Unix(0, 0), time.Unix(60, 0), matchers)
+			if !ss.Next() {
+				t.Fatalf("no series returned: %v", ss.Err())
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("raw fetch hit %q, want %q", gotPath, tt.wantPath)
 			}
 		})
 	}

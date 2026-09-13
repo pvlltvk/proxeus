@@ -85,8 +85,9 @@ func (c *ThanosConfig) validate() error {
 // VictoriaMetricsConfig configures the VictoriaMetrics-specific query options of
 // a server group. Only valid with `backend_type: victoriametrics`.
 //
-// These become query params on the HTTP API calls, so they do not apply to
-// requests made with `remote_read: true`.
+// All but RawFetch (and the ExportMaxRowsPerLine that goes with it) become query
+// params on the HTTP API calls, so they do not apply to requests made with
+// `remote_read: true`.
 type VictoriaMetricsConfig struct {
 	// NoCache disables VictoriaMetrics' response cache (`nocache`).
 	NoCache *bool `yaml:"nocache,omitempty"`
@@ -100,7 +101,28 @@ type VictoriaMetricsConfig struct {
 	// partial results when some of its storage nodes are unavailable
 	// (`deny_partial_response`).
 	DenyPartialResponse *bool `yaml:"deny_partial_response,omitempty"`
+	// RawFetch selects the endpoint raw samples are fetched from when proxeus
+	// can't push a query down. Unset (or "query") keeps the portable
+	// /api/v1/query range-selector path; "export" uses VictoriaMetrics'
+	// /api/v1/export, which is cheaper to decode. Opt-in.
+	RawFetch VMRawFetch `yaml:"raw_fetch,omitempty"`
+	// ExportMaxRowsPerLine caps how many samples one exported JSON line
+	// carries (`max_rows_per_line`); 0 leaves it to the downstream. Only
+	// meaningful with `raw_fetch: export`.
+	ExportMaxRowsPerLine int `yaml:"export_max_rows_per_line,omitempty"`
 }
+
+// VMRawFetch is how raw samples are fetched from VictoriaMetrics.
+type VMRawFetch string
+
+const (
+	// VMRawFetchQuery fetches raw samples through /api/v1/query with a range
+	// selector, as for any Prometheus-compatible backend. The default.
+	VMRawFetchQuery VMRawFetch = "query"
+	// VMRawFetchExport fetches raw samples through VictoriaMetrics'
+	// /api/v1/export NDJSON endpoint. See promclient.PromAPIVMExport.
+	VMRawFetchExport VMRawFetch = "export"
+)
 
 func (c *VictoriaMetricsConfig) queryParams() url.Values {
 	v := url.Values{}
@@ -130,7 +152,24 @@ func (c *VictoriaMetricsConfig) validate() error {
 			return fmt.Errorf("invalid victoriametrics max_lookback %q: %w", c.MaxLookback, err)
 		}
 	}
+	switch c.RawFetch {
+	case "", VMRawFetchQuery, VMRawFetchExport:
+	default:
+		return fmt.Errorf("invalid victoriametrics raw_fetch %q: must be %q or %q", c.RawFetch, VMRawFetchQuery, VMRawFetchExport)
+	}
+	if c.ExportMaxRowsPerLine < 0 {
+		return fmt.Errorf("invalid victoriametrics export_max_rows_per_line %d: must not be negative", c.ExportMaxRowsPerLine)
+	}
+	if c.ExportMaxRowsPerLine > 0 && c.RawFetch != VMRawFetchExport {
+		return fmt.Errorf("victoriametrics export_max_rows_per_line requires raw_fetch: export")
+	}
 	return nil
+}
+
+// vmExport reports whether raw fetches for this server group go to
+// VictoriaMetrics' /api/v1/export endpoint.
+func (c *Config) vmExport() bool {
+	return c.VictoriaMetrics != nil && c.VictoriaMetrics.RawFetch == VMRawFetchExport
 }
 
 // MimirConfig configures the Mimir/Cortex-specific options of a server group.
@@ -152,8 +191,12 @@ func (c *MimirConfig) validate() error {
 	return nil
 }
 
-// validateDialect checks that backend_type is a known value and that any typed
-// dialect block matches it.
+// validateDialect checks that backend_type is a known value and that every
+// typed dialect block present matches it. Each block is checked
+// unconditionally (not else-if'd on the others) so that, say, a stray
+// victoriametrics: block on a backend_type: thanos group is caught even
+// though its own thanos: block is fine -- returning after the first match
+// would silently let the mismatched extra block through.
 func (c *Config) validateDialect() error {
 	if c.BackendType != "" && !slices.Contains(backendTypes, c.BackendType) {
 		return fmt.Errorf("invalid backend_type %q: must be one of %v (or empty)", c.BackendType, backendTypes)
@@ -163,19 +206,28 @@ func (c *Config) validateDialect() error {
 		if c.BackendType != BackendThanos {
 			return fmt.Errorf("thanos block requires backend_type: thanos, got %q", c.BackendType)
 		}
-		return c.Thanos.validate()
+		if err := c.Thanos.validate(); err != nil {
+			return err
+		}
 	}
 	if c.VictoriaMetrics != nil {
 		if c.BackendType != BackendVictoriaMetrics {
 			return fmt.Errorf("victoriametrics block requires backend_type: victoriametrics, got %q", c.BackendType)
 		}
-		return c.VictoriaMetrics.validate()
+		if err := c.VictoriaMetrics.validate(); err != nil {
+			return err
+		}
+		if c.RemoteRead && c.vmExport() {
+			return fmt.Errorf("victoriametrics raw_fetch: export is mutually exclusive with remote_read: true")
+		}
 	}
 	if c.Mimir != nil {
 		if c.BackendType != BackendMimir && c.BackendType != BackendCortex {
 			return fmt.Errorf("mimir block requires backend_type: mimir or cortex, got %q", c.BackendType)
 		}
-		return c.Mimir.validate()
+		if err := c.Mimir.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

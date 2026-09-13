@@ -203,6 +203,17 @@ proxeus:
       #   max_lookback: 5m
       #   # error out instead of returning partial results when storage nodes are down
       #   deny_partial_response: true
+      #   # where raw samples come from when a query can't be pushed down:
+      #   # "query" (default) uses /api/v1/query with a range selector, as for any
+      #   # prometheus-compatible backend; "export" uses VictoriaMetrics'
+      #   # /api/v1/export NDJSON endpoint, which is about half the decode cost.
+      #   # NOTE: export applies neither the lookback-delta nor
+      #   # -search.latencyOffset, so the freshest ~30s may include samples
+      #   # VictoriaMetrics' own /api/v1/query would hide. Mutually exclusive with
+      #   # remote_read: true (which VictoriaMetrics doesn't implement anyway).
+      #   raw_fetch: export
+      #   # cap the samples one exported JSON line carries; only with raw_fetch: export
+      #   export_max_rows_per_line: 10000
 
       # with `backend_type: mimir` or `backend_type: cortex`
       # mimir:
