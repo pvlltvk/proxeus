@@ -204,6 +204,16 @@ func (m *MultiAPI) missingRequired(outstanding, success map[model.Fingerprint]in
 	return false
 }
 
+// fetchError frames a fan-out that came back empty, except when the reason is
+// a backend rejecting the query itself: that error is the caller's answer, and
+// "unable to fetch" would misdescribe it as a backend being unreachable.
+func fetchError(err error) error {
+	if isBackendQueryError(err) {
+		return err
+	}
+	return errors.Wrap(err, "Unable to fetch from downstream servers")
+}
+
 // partialResponseErr formats the degradation warning attached when a backend
 // fails in partial-response mode.
 func partialResponseErr(i int, err error) error {
@@ -317,7 +327,7 @@ func scatterGather[T any](
 	}
 
 	if m.missingRequired(outstanding, successMap) {
-		return nil, warnings, errors.Wrap(lastError, "Unable to fetch from downstream servers")
+		return nil, warnings, fetchError(lastError)
 	}
 
 	sortGathered(results)
@@ -453,7 +463,7 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 	}
 
 	if m.missingRequired(outstandingRequests, successMap) {
-		return promapi.NewSeriesSet(nil, warnings, errors.Wrap(lastError, "Unable to fetch from downstream servers"))
+		return promapi.NewSeriesSet(nil, warnings, fetchError(lastError))
 	}
 
 	sortOrdinalSeriesSets(sets)
@@ -604,7 +614,7 @@ func (m *MultiAPI) QueryExemplars(ctx context.Context, query string, startTime, 
 
 	for k := range outstandingRequests {
 		if successMap[k] < m.requiredCount {
-			return nil, errors.Wrap(lastError, "Unable to fetch from downstream servers")
+			return nil, fetchError(lastError)
 		}
 	}
 
