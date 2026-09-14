@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 var MaxFormPrefix = 256
@@ -192,8 +193,12 @@ func (h *ApacheLoggingHandler) runHandler(rw http.ResponseWriter, r *http.Reques
 			if e, ok := rec.(error); ok && errors.Is(e, http.ErrAbortHandler) {
 				panic(rec)
 			}
-			// Just return a stack trace always
-			err = errors.Wrap(errors.New(string(debug.Stack())), "Error running handler")
+			// The stack goes to the log, never to the client: it carries
+			// absolute build paths and the internal package layout, and
+			// anything able to trigger a panic could otherwise read it back
+			// out of the 500 body.
+			logrus.Errorf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+			err = errors.New("internal server error")
 		}
 	}()
 	h.handler.ServeHTTP(rw, r)

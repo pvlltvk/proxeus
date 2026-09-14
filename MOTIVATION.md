@@ -26,9 +26,11 @@ most to you are exactly the ones that span both:
 
 > What is the global error rate?
 
-You cannot ask it. Not in one query, not in one panel, not in one alert. `sum(rate(errors[5m]))` runs against *one*
-datasource. Grafana's mixed-datasource mode will draw two series next to each other, but it will not add them together,
-and it will not let you alert on the sum.
+You cannot ask it in PromQL. `sum(rate(errors[5m]))` runs against *one* datasource, and no query you can write spans
+both. Grafana can get you an answer: mixed-datasource mode plus a server-side expression will add the two queries
+together, in a panel and in an alert rule. But the arithmetic now lives in Grafana, wired up per panel and per rule,
+and it is not a query any more — you cannot wrap it in another PromQL function, a recording rule cannot evaluate it,
+and nothing outside Grafana can ask the same question.
 
 ### The usual workarounds, and why they hurt
 
@@ -36,8 +38,11 @@ and it will not let you alert on the sum.
 the majority of load on everything it scrapes, and gives you a second set of alerting rules to maintain, subtly
 different from the first.
 
-**Federating in Grafana** — duplicate every panel per datasource and eyeball the sum. Works until someone needs an
-alert, which is precisely when arithmetic matters.
+**Expressions in Grafana** — combine the datasources per panel with a server-side expression. This genuinely works,
+including for alerting, and for a handful of panels it is the right answer. It stops scaling when the combination is
+something you need everywhere: every panel and every alert rule carries its own copy of the arithmetic, the PromQL you
+review is no longer the PromQL that runs, and none of it is reachable from a recording rule or from anything that
+speaks PromQL but is not Grafana.
 
 **Pick one system and migrate** — reasonable, and you should, eventually. But migration is not a weekend. You need both
 systems serving queries for months, and during that window every dashboard is wrong.

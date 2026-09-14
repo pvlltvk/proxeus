@@ -130,8 +130,17 @@ func TestApacheLoggingHandlerPanicHandling(t *testing.T) {
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", w.Code)
 		}
-		if !strings.Contains(w.Body.String(), "Error running handler") {
-			t.Errorf("body = %q, want it to carry the handler error", w.Body.String())
+		body := w.Body.String()
+		if !strings.Contains(body, "internal server error") {
+			t.Errorf("body = %q, want an opaque error", body)
+		}
+		// The stack belongs in the log. Leaking it here handed absolute build
+		// paths and the internal package layout to anyone who could trigger a
+		// panic -- and a panic on a valid PromQL query was reachable.
+		for _, leak := range []string{"goroutine ", "runtime/debug", ".go:", "pkg/logging"} {
+			if strings.Contains(body, leak) {
+				t.Errorf("body leaks %q from the stack trace: %q", leak, body)
+			}
 		}
 	})
 }
