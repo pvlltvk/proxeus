@@ -215,8 +215,16 @@ func fetchError(err error) error {
 }
 
 // partialResponseErr formats the degradation warning attached when a backend
-// fails in partial-response mode.
+// fails in partial-response mode. A backend that rejected the query answered
+// the request -- calling it unavailable would send an operator after a healthy
+// backend, so it gets its own wording. The cause is flattened rather than
+// wrapped on purpose: annotations.AsStrings replaces a warning with the inner
+// error whenever the chain holds one of prometheus' annotation types, which
+// would drop the backend ordinal from the message.
 func partialResponseErr(i int, err error) error {
+	if isBackendQueryError(err) {
+		return fmt.Errorf("partial_response: backend[%d] rejected the query: %s", i, err.Error())
+	}
 	return fmt.Errorf("partial_response: backend[%d] unavailable: %s", i, err.Error())
 }
 
