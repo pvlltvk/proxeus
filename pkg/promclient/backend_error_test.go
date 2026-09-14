@@ -116,17 +116,30 @@ func TestIsBackendQueryError(t *testing.T) {
 	}
 }
 
-func TestErrorWrapPassesBackendQueryErrorsThrough(t *testing.T) {
+// wrapLikeServerGroup builds the pair of wraps a real request passes through,
+// the same way ApplyConfig does: the target first, then the server group.
+func wrapLikeServerGroup(api API) *ErrorWrap {
+	target := &ErrorWrap{A: api, Msg: "error in target=" + testTargetURL, OmitOnQueryError: true}
+	return &ErrorWrap{A: target, Msg: testServerGroupMsg}
+}
+
+const (
+	testTargetURL      = "http://127.0.0.1:9090"
+	testServerGroupMsg = "error in servergroup ord=0"
+)
+
+// A rejected query keeps the server group that rejected it -- with mixed
+// backends that is the useful half -- and loses the target address.
+func TestErrorWrapDropsTheTargetFromQueryErrors(t *testing.T) {
 	const msg = `invalid label name "a\xc5z"`
 	queryErr := &promapi.ResponseError{Type: "execution", Msg: msg}
-	// Both wraps a real request passes through: the target and then the
-	// server group it belongs to.
-	wrapped := &ErrorWrap{&ErrorWrap{&failAPI{err: queryErr}, "error in target=http://127.0.0.1:9090"}, "error in servergroup ord=0"}
+	want := testServerGroupMsg + ": " + queryErr.Error()
+	wrapped := wrapLikeServerGroup(&failAPI{err: queryErr})
 
 	t.Run("SeriesSet path", func(t *testing.T) {
 		err := wrapped.Query(context.Background(), "up", time.Now()).Err()
-		if err == nil || err.Error() != queryErr.Error() {
-			t.Fatalf("got %v, want %v", err, queryErr)
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %v", err, want)
 		}
 		if !errors.Is(err, queryErr) {
 			t.Fatalf("error identity lost: %v", err)
@@ -135,21 +148,21 @@ func TestErrorWrapPassesBackendQueryErrorsThrough(t *testing.T) {
 
 	t.Run("returned error path", func(t *testing.T) {
 		_, _, err := wrapped.LabelNames(context.Background(), nil, time.Time{}, time.Time{})
-		if err == nil || err.Error() != queryErr.Error() {
-			t.Fatalf("got %v, want %v", err, queryErr)
+		if err == nil || err.Error() != want {
+			t.Fatalf("got %v, want %v", err, want)
 		}
 	})
 }
 
 func TestErrorWrapStillFramesOtherFailures(t *testing.T) {
 	boom := errors.New("connection refused")
-	wrapped := &ErrorWrap{&ErrorWrap{&failAPI{err: boom}, "error in target=http://127.0.0.1:9090"}, "error in servergroup ord=0"}
+	wrapped := wrapLikeServerGroup(&failAPI{err: boom})
 
 	err := wrapped.Query(context.Background(), "up", time.Now()).Err()
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"error in servergroup ord=0", "error in target=http://127.0.0.1:9090", boom.Error()} {
+	for _, want := range []string{testServerGroupMsg, "error in target=" + testTargetURL, boom.Error()} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q is missing %q", err, want)
 		}
@@ -164,17 +177,18 @@ func TestErrorWrapEveryMethod(t *testing.T) {
 
 	for name, call := range apiCalls {
 		t.Run(name, func(t *testing.T) {
-			wrapped := &ErrorWrap{&ErrorWrap{&failAPI{err: queryErr}, "error in target=http://127.0.0.1:9090"}, "error in servergroup ord=0"}
-			if err := call(wrapped); err == nil || err.Error() != queryErr.Error() {
-				t.Fatalf("got %v, want %v", err, queryErr)
+			wrapped := wrapLikeServerGroup(&failAPI{err: queryErr})
+			want := testServerGroupMsg + ": " + queryErr.Error()
+			if err := call(wrapped); err == nil || err.Error() != want {
+				t.Fatalf("got %v, want %v", err, want)
 			}
 
-			wrapped = &ErrorWrap{&ErrorWrap{&failAPI{err: boom}, "error in target=http://127.0.0.1:9090"}, "error in servergroup ord=0"}
+			wrapped = wrapLikeServerGroup(&failAPI{err: boom})
 			err := call(wrapped)
 			if err == nil {
 				t.Fatal("expected an error")
 			}
-			for _, want := range []string{"error in servergroup ord=0", "error in target=http://127.0.0.1:9090", boom.Error()} {
+			for _, want := range []string{testServerGroupMsg, "error in target=" + testTargetURL, boom.Error()} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("error %q is missing %q", err, want)
 				}

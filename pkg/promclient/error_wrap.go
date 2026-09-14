@@ -12,7 +12,7 @@ import (
 )
 
 func (e *ErrorWrap) wrap(err error) error {
-	if err == nil || isBackendQueryError(err) {
+	if err == nil || (e.OmitOnQueryError && isBackendQueryError(err)) {
 		return err
 	}
 	return errors.Wrap(err, e.Msg)
@@ -21,6 +21,13 @@ func (e *ErrorWrap) wrap(err error) error {
 type ErrorWrap struct {
 	A   API
 	Msg string
+	// OmitOnQueryError keeps Msg out of errors the backend raised against the
+	// query itself, so a user reading them isn't handed an internal address to
+	// puzzle over. Set it only where Msg names a target: the API returns
+	// errorType "execution" as its catch-all, so a downstream that is itself a
+	// proxy reports its own plumbing failures under the same type, and the
+	// server-group frame is the only thing left saying where the trouble was.
+	OmitOnQueryError bool
 }
 
 func (e *ErrorWrap) LabelNames(ctx context.Context, matchers []string, startTime time.Time, endTime time.Time) (v []string, w v1.Warnings, err error) {

@@ -114,7 +114,10 @@ func TestBackendQueryError_HTTP(t *testing.T) {
 			if errorType != "execution" {
 				t.Errorf("errorType = %q, want execution", errorType)
 			}
-			want := "execution: " + msg
+			// The server group survives -- it names a config concept, not
+			// an address, and with mixed backends it says which one
+			// disagreed. Only the target=<url> frame is dropped.
+			want := "error in servergroup ord=0: execution: " + msg
 			if name == "query" {
 				want = "expanding series: " + want
 			}
@@ -164,7 +167,7 @@ proxeus:
         az: b
 `)
 
-	want := `partial_response: backend[1] rejected the query: execution: ` + msg
+	want := `partial_response: backend[1] rejected the query: error in servergroup ord=1: execution: ` + msg
 	for _, ep := range []string{errorEndpoints["query"], errorEndpoints["labels"]} {
 		var env struct {
 			Status   string   `json:"status"`
