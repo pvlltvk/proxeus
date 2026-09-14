@@ -118,6 +118,7 @@ const (
 	reasonNoLiteralOperand    = "no_literal_operand"    // binary expr with no literal side
 	reasonUnsupportedOperand  = "unsupported_operand"   // binary expr whose non-literal side isn't pushable
 	reasonNoInnerPushdown     = "no_inner_pushdown"     // subquery whose inner expression yielded no replacement
+	reasonNonLiteralParam     = "non_literal_param"     // count_values whose value label isn't a string literal
 	reasonUnsupported         = "unsupported"           // catch-all: nothing better to ask the backends for (e.g. MatrixSelector)
 )
 

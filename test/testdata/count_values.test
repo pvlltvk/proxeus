@@ -1,0 +1,23 @@
+# count_values pushdown. Both server groups serve the same backend data, so
+# counts come back doubled and `without` keeps the `az` label (see
+# selectors.test). The series is flat around the evaluation window on purpose:
+# a value that changes from step to step bleeds across steps in range mode
+# (a separate, pre-existing pushdown gap).
+load 1m
+	metric{job="a", instance="one"} 1 1 1 1 1 1 1 2 2 2 2
+	metric{job="a", instance="two"} 1 1 1 1 1 1 1 2 2 2 2
+
+# A parenthesized value-label parameter is still a value label.
+eval instant at 10m count_values(((("value"))), metric)
+	{value="2"} 4
+
+# `without` must not drop the generated value label.
+eval instant at 10m count_values without (instance) ("value", metric)
+	{az="a", job="a", value="2"} 2
+	{az="b", job="a", value="2"} 2
+
+# The offset must be applied once: the request time is shifted by it, so it
+# must not also be part of the query sent downstream. Applying it twice reads
+# 6m (value 1) instead of 8m (value 2).
+eval instant at 10m count_values("value", metric offset 2m)
+	{value="2"} 4

@@ -8,7 +8,10 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -216,142 +219,246 @@ func newAPIHandler(s storage.Storage, eng *promql.Engine, addr string) http.Hand
 	return apiRouter
 }
 
+// upstreamSkippedFiles are the upstream fixtures proxeus can't run at all yet,
+// each with the gap it waits on.
+var upstreamSkippedFiles = map[string]string{
+	// Upstream uses StaleNaN to mark a series gone; the v1 API filters stale
+	// samples out of range vectors, and even on remote_read the range-eval
+	// fan-out emits an extra {__name__="metric"} sample at the boundary that
+	// proxeus's merge can't dedupe.
+	"staleness.test": "staleness handling: no way to get a raw dump of stale samples through the proxy",
+	// 3.x's EnableDelayedNameRemoval interacts with proxeus's
+	// metricNameWorkaroundLabel rewrite in ways the rewrite doesn't model.
+	"name_label_dropping.test": "__name__ propagation through aggregations isn't modeled by the avg rewrite",
+	"duration_expression.test": "3.x duration-expression syntax isn't handled by the pushdown rewrites",
+	"type_and_unit.test":       "__type__/__unit__ labels aren't preserved through the rewrite paths",
+	// cmd.start = 4s makes the upstream atModifierTestCases sweep issue a
+	// range query starting at -59.2s; prometheus/common's
+	// model.Time.UnmarshalJSON mis-decodes pre-epoch sub-second timestamps,
+	// and proxeus now errors on those rather than returning shifted data. No
+	// production query (non-negative timestamps) is affected.
+	"collision.test": "the @-modifier sweep generates pre-epoch sub-second range starts, which pushdown rejects",
+}
+
+// upstreamRemoteReadOnlyFiles are the fixtures that only pass on the
+// remote_read config. Their remaining failures on the HTTP-only config are all
+// the same native-histogram fidelity loss: the JSON API encodes a histogram as
+// SampleHistogram (flat bucket list, schema collapsed to custom buckets), so
+// what comes back can't match the original FloatHistogram. NodeReplacer opts
+// out of pushdown for histogram-bearing subtrees, but the GetValue fallback
+// still goes over JSON unless the server group has remote_read configured.
+var upstreamRemoteReadOnlyFiles = map[string]string{
+	"histograms.test":        "histogram samples lose schema fidelity over the JSON API",
+	"native_histograms.test": "histogram samples lose schema fidelity over the JSON API",
+	"functions.test":         "evals returning native histograms lose schema fidelity over the JSON API",
+	"operators.test":         "evals returning native histograms lose schema fidelity over the JSON API",
+	"subquery.test":          "evals returning native histograms lose schema fidelity over the JSON API",
+	"limit.test":             "evals returning native histograms lose schema fidelity over the JSON API",
+}
+
+// excludedEvals lists, per fixture file, the individual eval expressions we
+// blank out before running it -- the rest of the file still runs. Keyed by the
+// file's base name; fixtures with no entry run whole.
+var excludedEvals = map[string][]string{
+	"aggregators.test": {
+		// eval_fail compares the message verbatim, and proxeus wraps the
+		// downstream error ("expanding series: error in servergroup ord=0:
+		// ...") around it. Needs the fan-out to unwrap backend query errors.
+		`count_values("a\xc5z", version)`,
+		// The avg -> sum/count rewrite overflows to +/-Inf on values near
+		// MaxFloat64; upstream's avg keeps an incremental mean. Needs a
+		// rewrite that doesn't sum first. bigzero sums to 0 or -Inf
+		// depending on the order the fan-out returns the series in, so it
+		// also fails intermittently.
+		`avg(data{test="big"})`,
+		`avg(data{test="-big"})`,
+		`avg(data{test="bigzero"})`,
+	},
+}
+
 func TestUpstreamEvaluations(t *testing.T) {
-	files, err := filepath.Glob("../vendor/github.com/prometheus/prometheus/promql/promqltest/testdata/*.test")
+	// ~16m for the two configs, which blows go test's 10m default timeout:
+	// `make test-upstream` (and the CI job that calls it) set this and pass a
+	// timeout of its own.
+	if os.Getenv("PROXEUS_UPSTREAM_PROMQL") == "" {
+		t.Skip("set PROXEUS_UPSTREAM_PROMQL=1 (or run make test-upstream) to run the upstream promql fixtures")
+	}
+
+	dir := upstreamTestdataDir(t)
+	files, err := filepath.Glob(filepath.Join(dir, "*.test"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A silently empty suite is worse than a failing one: the glob used to
+	// point at ../vendor, which stopped existing when the fork de-vendored.
+	if len(files) == 0 {
+		t.Fatalf("no upstream .test fixtures found in %s", dir)
+	}
+
 	for i, psConfig := range []string{rawPSConfig, rawPSRemoteReadConfig} {
 		for _, fn := range files {
-
-			// Upstream prom is using a StaleNan to determine if a given timeseries has gone
-			// NaN -- the problem being that for range vectors they filter out all "stale" samples
-			// meaning that it isn't possible to get a "raw" dump of data through the v1 API
-			// The only option that exists in reality is the "remote read" API -- which suffers
-			// from the same memory-balooning problems that the HTTP+JSON API originally had.
-			// It has **less** of a problem (its 2x memory instead of 14x) so it is a viable option.
-			// Even on remote_read mode, the range-eval fan-out emits an extra
-			// {__name__="metric"} sample at the boundary that proxeus's merge
-			// can't dedupe; revisit when working through staleness handling.
-			if strings.Contains(fn, "staleness.test") {
-				continue
-			}
-
-			// histograms.test and native_histograms.test require feeding
-			// histogram samples back into the embedded engine. Even with
-			// NodeReplacer's histogram opt-out, when remote_read isn't
-			// configured the GetValue fallback still hits the lossy JSON
-			// path, so we restrict these suites to the remote_read config.
+			// Name the subtest after the file, not its module-cache path,
+			// so the names stay stable (and -run-able) across version bumps.
 			base := filepath.Base(fn)
-			if (base == "histograms.test" || base == "native_histograms.test") && psConfig != rawPSRemoteReadConfig {
-				continue
-			}
-
-			// Skip test files that exercise upstream prom features proxeus
-			// doesn't yet support proxying. Re-enable these once the
-			// corresponding proxeus gaps are filled.
-			switch base {
-			case
-				// __name__-label propagation through aggregations: 3.x's
-				// EnableDelayedNameRemoval behavior interacts with proxeus's
-				// metricNameWorkaroundLabel rewrite in ways the rewrite
-				// doesn't currently model.
-				"name_label_dropping.test",
-				// New 3.x experimental duration-expression syntax.
-				"duration_expression.test",
-				// 3.x __type__ / __unit__ labels from OTLP — proxeus's
-				// rewrite paths don't preserve them yet.
-				"type_and_unit.test",
-				// aggregators.test: count_values with parenthesised string
-				// param panics in proxystorage's COUNT_VALUES handler;
-				// also includes histogram rows.
-				"aggregators.test",
-				// operators.test exercises a few edge cases (e.g. NaN
-				// comparison ordering after delayed name removal) that the
-				// proxy rewrite doesn't yet handle.
-				"operators.test",
-				// subquery.test: proxeus disables the rewrite for
-				// subquery descendants, so the proxy path falls back on raw
-				// Querier-based eval; some cases miss data.
-				"subquery.test",
-				// collision.test: cmd.start = 4s makes the upstream
-				// atModifierTestCases sweep generate a range query at
-				// [iq.evalTime - 1m, iq.evalTime + 1m] starting at -59.2s,
-				// which trips the upstream prometheus/common
-				// model.Time.UnmarshalJSON bug: "-59.200" decodes to
-				// Time(-58800) instead of Time(-59200). Proxeus now
-				// returns an explicit error for pre-epoch sub-second
-				// timestamps in pushdown rather than silently producing
-				// shifted data; the test framework propagates that error
-				// as a query failure, so the file is skipped here. None
-				// of the actual test cases (which have non-negative
-				// timestamps) are affected in production.
-				"collision.test",
-				// functions.test and limit.test: these files contain
-				// experimental PromQL functions (sort_by_label, limitk,
-				// limit_ratio) that we enable via
-				// parser.EnableExperimentalFunctions in init(). Enabling
-				// the flag also lets the rest of these files parse, which
-				// reveals ~80 pre-existing proxeus bugs in proxying
-				// non-histogram functions (resets, changes, irate,
-				// label_join, delta, clamp, sum_over_time, etc.) that are
-				// unrelated to native histogram support. Tracked
-				// separately from #637; until those are fixed, skip the
-				// whole files so we can keep parser.EnableExperimentalFunctions
-				// on for native_histograms.test.
-				//
-				// limit.test additionally fails on the HTTP-only config
-				// (but passes on remote_read) at lines 45/48/52/57/162/165:
-				// these six evals return a raw native-histogram series in
-				// their result, and the engine's fallback path after the
-				// VectorSelector pushdown's lossy-histogram bail-out still
-				// fetches via Client.GetValue -> HTTP /api/v1/query, which
-				// JSON-encodes histograms as SampleHistogram (flat bucket
-				// list, schema collapsed to CustomBuckets/-53). limitk and
-				// limit_ratio themselves are non-reentrant and correctly
-				// fall through to non-pushdown in NodeReplacer; the
-				// fidelity loss is in the JSON round-trip, fixed only by
-				// configuring remote_read on the server group.
-				//
-				// functions.test lines 1131, 1134, 1137, 1140, 1143, 1146,
-				// 1149, 1152, 1155, 1158, 1161, 1164 (sum_over_time(metric
-				// [N{,001,002,003}ms]) at evalTime 4s) are now fixed by the
-				// queryRangeAt instant-query optimization in proxystorage
-				// NodeReplacer; keeping the file in the skip set until the
-				// other clusters land too.
-				//
-				// Also fixed (still skipped because other clusters here
-				// remain broken — leave the skip alone until those land):
-				//   * absent() label propagation under the test
-				//     framework's @-timestamp sweep: lines 1544, 1547,
-				//     1550, 1553 (preserve Name/LabelMatchers when
-				//     synthesizing the @-modified VectorSelector
-				//     replacement so createLabelsForAbsentFunction still
-				//     sees them).
-				//   * present_over_time and other sparse range-mode
-				//     outputs bleeding forward via engine lookback:
-				//     lines 1705, 1707, 1713, 1719 (fill StaleNaN at
-				//     missing step timestamps on the substituted Call
-				//     result so vectorSelectorSingle bails per-step).
-				//   * label_join eval_fail expects the engine-emitted
-				//     "vector cannot contain metrics with the same
-				//     labelset" verbatim: line 543 (skip pushdown for
-				//     label_join / label_replace / info so the engine
-				//     evaluates them locally rather than round-tripping
-				//     through ErrorWrap chains).
-				// Same fix flips the range-mode "_" expected-empty
-				// assertions on lines 11, 58, 90, 612, 615, 618, 1837
-				// (resets/changes/clamp*/round over sparse data) that
-				// shared the same lookback-bleed pattern.
-				"functions.test",
-				"limit.test":
-				continue
-			}
-			t.Run(strconv.Itoa(i)+fn, func(t *testing.T) {
+			t.Run(strconv.Itoa(i)+base, func(t *testing.T) {
+				if reason, ok := upstreamSkippedFiles[base]; ok {
+					t.Skip(reason)
+				}
+				if reason, ok := upstreamRemoteReadOnlyFiles[base]; ok && psConfig != rawPSRemoteReadConfig {
+					t.Skip(reason + " (remote_read config only)")
+				}
 				runProxyTest(t, fn, psConfig, 1)
 			})
 		}
 	}
+}
+
+// patEvalInstant and patEvalRange mirror promqltest's own eval-command
+// patterns so evalExpr splits a command line the same way the fixture parser
+// does: the last submatch is the query expression.
+var (
+	patEvalInstant = regexp.MustCompile(`^eval(?:_(?:fail|warn|ordered|info))?\s+instant\s+(?:at\s+(?:.+?))?\s+(.+)$`)
+	patEvalRange   = regexp.MustCompile(`^eval(?:_(?:fail|warn|info))?\s+range\s+from\s+(?:.+)\s+to\s+(?:.+)\s+step\s+(?:.+?)\s+(.+)$`)
+)
+
+// evalExpr returns the query expression of an eval command line, or false if
+// the line isn't one.
+func evalExpr(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "eval") {
+		return "", false
+	}
+	for _, pat := range []*regexp.Regexp{patEvalInstant, patEvalRange} {
+		if m := pat.FindStringSubmatch(line); m != nil {
+			return m[len(m)-1], true
+		}
+	}
+	return "", false
+}
+
+// excludeEvals blanks out the eval commands of content whose expression is in
+// exprs, together with the expectation lines that follow them. Blanking rather
+// than deleting keeps the line numbering -- and so the line numbers promqltest
+// reports -- intact. Matching is on the command's whole expression, not a
+// suffix of the line, so excluding `sum(x)` doesn't also swallow a
+// `2 * sum(x)` eval. An entry that matches nothing is an error: a fixture
+// change must not turn an exclusion into a silent no-op.
+func excludeEvals(content string, exprs []string) (string, error) {
+	if len(exprs) == 0 {
+		return content, nil
+	}
+
+	indented := func(line string) bool {
+		return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+	}
+
+	matched := make(map[string]bool, len(exprs))
+	lines := strings.Split(content, "\n")
+	for i := 0; i < len(lines); i++ {
+		expr, ok := evalExpr(lines[i])
+		if !ok {
+			continue
+		}
+		if !slices.Contains(exprs, expr) {
+			continue
+		}
+		matched[expr] = true
+		// The command owns every indented line below it.
+		lines[i] = ""
+		for i+1 < len(lines) && indented(lines[i+1]) {
+			i++
+			lines[i] = ""
+		}
+	}
+
+	for _, expr := range exprs {
+		if !matched[expr] {
+			return "", fmt.Errorf("excluded eval %q is not in the fixture anymore", expr)
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func TestExcludeEvals(t *testing.T) {
+	const content = `load 5m
+	metric 1 2 3
+
+eval instant at 5m sum(metric)
+	{} 2
+
+eval_fail instant at 5m bad(metric)
+  expected_fail_message nope
+`
+
+	got, err := excludeEvals(content, []string{"bad(metric)"})
+	if err != nil {
+		t.Fatalf("excludeEvals: %s", err)
+	}
+	// The excluded command and its message line are blanked, not removed: the
+	// line count -- and so every line number promqltest reports -- is the same.
+	want := "load 5m\n\tmetric 1 2 3\n\neval instant at 5m sum(metric)\n\t{} 2\n\n\n\n"
+	if got != want {
+		t.Errorf("got:\n%q\nwant:\n%q", got, want)
+	}
+
+	if _, err := excludeEvals(content, []string{"gone(metric)"}); err == nil {
+		t.Error("expected an error for an exclusion that matches nothing")
+	}
+
+	// The expression is matched whole, not as a line suffix: excluding
+	// sum(metric) must leave the 2 * sum(metric) eval alone.
+	const shadowed = `eval instant at 5m 2 * sum(metric)
+	{} 4
+
+eval instant at 5m sum(metric)
+	{} 2
+`
+	got, err = excludeEvals(shadowed, []string{"sum(metric)"})
+	if err != nil {
+		t.Fatalf("excludeEvals: %s", err)
+	}
+	want = "eval instant at 5m 2 * sum(metric)\n\t{} 4\n\n\n\n"
+	if got != want {
+		t.Errorf("got:\n%q\nwant:\n%q", got, want)
+	}
+
+	// The eval_* variants and range commands are commands too, and trailing
+	// whitespace on the line doesn't hide the expression.
+	for _, cmd := range []string{
+		"eval_ordered instant at 5m sum(metric)",
+		"eval_info instant at 5m sum(metric)",
+		"eval_warn instant at 5m sum(metric)",
+		"eval_fail instant at 5m sum(metric)",
+		"eval range from 0 to 5m step 1m sum(metric)",
+		"eval instant at 5m sum(metric) ",
+	} {
+		got, err := excludeEvals(cmd+"\n\t{} 2\n", []string{"sum(metric)"})
+		if err != nil {
+			t.Errorf("%q: %s", cmd, err)
+			continue
+		}
+		if got != "\n\n" {
+			t.Errorf("%q: got %q, want everything blanked", cmd, got)
+		}
+	}
+}
+
+// upstreamTestdataDir returns the promqltest fixture directory of the
+// prometheus module this build links against -- the proxeus-prometheus fork,
+// via the replace directive -- so the suite keeps working across version bumps.
+func upstreamTestdataDir(t *testing.T) string {
+	t.Helper()
+
+	cmd := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/prometheus/prometheus/promql/promqltest")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		// Without stderr this is just "exit status 1", which says nothing
+		// about a cold module cache, a bad GOFLAGS, or a missing toolchain.
+		t.Fatalf("locating the promqltest package: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return filepath.Join(strings.TrimSpace(string(out)), "testdata")
 }
 
 func TestEvaluations(t *testing.T) {
@@ -385,9 +492,13 @@ func TestEvaluations(t *testing.T) {
 // hook: load commands append through LayeredStorage to the backend, eval queries
 // read back through the proxy.
 func runProxyTest(t *testing.T, fn, psConfig string, nServers int) {
-	content, err := os.ReadFile(fn)
+	raw, err := os.ReadFile(fn)
 	if err != nil {
 		t.Skipf("error reading test %s: %s (likely uses syntax not supported by proxeus)", fn, err)
+	}
+	content, err := excludeEvals(string(raw), excludedEvals[filepath.Base(fn)])
+	if err != nil {
+		t.Fatalf("excluding evals from %s: %s", fn, err)
 	}
 
 	eng := promqltest.NewTestEngine(t, false, 0, 50000000)
@@ -408,7 +519,7 @@ func runProxyTest(t *testing.T, fn, psConfig string, nServers int) {
 		return &LayeredStorage{ps, backend}
 	}
 
-	promqltest.RunTestWithStorage(t, string(content), eng, newStorage)
+	promqltest.RunTestWithStorage(t, content, eng, newStorage)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

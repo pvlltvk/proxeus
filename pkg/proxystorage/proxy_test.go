@@ -130,6 +130,34 @@ func TestNodeReplacer(t *testing.T) {
 				"count_values(\"label\", foo) @ 10000",
 			},
 		},
+		// The value-label parameter may be parenthesized; unwrap it instead of
+		// assuming a bare StringLiteral.
+		{
+			in:  "count_values(((\"label\")), foo)",
+			out: "sum by (label) ()",
+			queries: []string{
+				"count_values(((\"label\")), foo) @ 10000",
+			},
+		},
+		// With `without` the grouping is an exclusion list: the value label
+		// must NOT be added to it, or the outer sum would drop it.
+		{
+			in:  "count_values without (instance) (\"label\", foo)",
+			out: "sum without (instance) ()",
+			queries: []string{
+				"count_values without (instance) (\"label\", foo) @ 10000",
+			},
+		},
+		// The offset is re-applied by the synthesized VectorSelector, so it has
+		// to be stripped from the query we send downstream (which is already
+		// time-shifted by the offset).
+		{
+			in:  "count_values(\"label\", foo offset 2m)",
+			out: "sum by (label) ( offset 2m)",
+			queries: []string{
+				"count_values(\"label\", foo) @ 9880",
+			},
+		},
 
 		// Call
 		// basic call; we expect a full replacement
