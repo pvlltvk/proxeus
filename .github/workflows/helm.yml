@@ -35,8 +35,11 @@ jobs:
       with:
         version: v3.22.0
 
-    - name: install
-      run: go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+    - name: Set up kubeconform
+      run: |
+        go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+        # go install lands in GOPATH/bin, which is not on the runner's PATH.
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
     - name: Lint
       run: |
