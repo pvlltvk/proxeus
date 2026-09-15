@@ -1,0 +1,8 @@
+storage:
+  path: /data
+  persistence:
+    enabled: true
+    storageClassName: fast
+    size: 20Gi
+    annotations:
+      everest.io/disk-volume-type: SSD

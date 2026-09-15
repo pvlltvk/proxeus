@@ -1,0 +1,41 @@
+# Config managed outside Helm, so the reload sidecar earns its keep and the
+# lifecycle endpoint has to be on for it.
+configMap: proxeus-config-external
+
+webLifecycle: true
+
+configmapReloader:
+  enabled: true
+
+configCheck:
+  enabled: false
+
+extraArgs:
+  log-level: debug
+  http.shutdown-delay: 30s
+  http.shutdown-timeout: 2m
+
+env:
+  - name: HTTP_PROXY
+    value: http://egress-proxy:3128
+
+initContainers:
+  - name: wait-for-thanos
+    image: busybox:1.36
+    command: ['sh', '-c', 'until nc -z thanos-query 9090; do sleep 2; done']
+
+extraContainers:
+  - name: oauth2-proxy
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    args: ['--upstream=http://127.0.0.1:8082', '--http-address=0.0.0.0:4180']
+    ports:
+      - containerPort: 4180
+        name: oauth2
+
+extraVolumes:
+  - name: tmp
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp

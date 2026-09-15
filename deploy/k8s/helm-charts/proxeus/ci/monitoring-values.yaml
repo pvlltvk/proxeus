@@ -1,0 +1,23 @@
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  scrapeTimeout: 10s
+  labels:
+    release: kube-prometheus-stack
+  metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'go_gc_duration_seconds.*'
+      action: drop
+
+podMonitor:
+  enabled: true
+
+networkPolicy:
+  enabled: true
+  ingress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: grafana

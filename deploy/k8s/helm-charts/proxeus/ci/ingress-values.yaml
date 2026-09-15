@@ -1,0 +1,10 @@
+ingress:
+  enabled: true
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+  hosts:
+    - proxeus.example.com
+  tls:
+    - secretName: proxeus-tls
+      hosts:
+        - proxeus.example.com
