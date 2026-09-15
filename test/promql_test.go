@@ -241,19 +241,18 @@ var upstreamSkippedFiles = map[string]string{
 }
 
 // upstreamRemoteReadOnlyFiles are the fixtures that only pass on the
-// remote_read config. Their remaining failures on the HTTP-only config are all
-// the same native-histogram fidelity loss: the JSON API encodes a histogram as
+// remote_read config. Their failures on the HTTP-only config are all the same
+// native-histogram fidelity loss: the JSON API encodes a histogram as
 // SampleHistogram (flat bucket list, schema collapsed to custom buckets), so
 // what comes back can't match the original FloatHistogram. NodeReplacer opts
 // out of pushdown for histogram-bearing subtrees, but the GetValue fallback
 // still goes over JSON unless the server group has remote_read configured.
+// Where that costs a fixture only a handful of evals those evals are excluded
+// instead (see httpAPIExcludedEvals); native_histograms.test is histograms end
+// to end -- 226 of its 320 evals fail on the HTTP config -- so it stays a
+// whole-file skip.
 var upstreamRemoteReadOnlyFiles = map[string]string{
-	"histograms.test":        "histogram samples lose schema fidelity over the JSON API",
 	"native_histograms.test": "histogram samples lose schema fidelity over the JSON API",
-	"functions.test":         "evals returning native histograms lose schema fidelity over the JSON API",
-	"operators.test":         "evals returning native histograms lose schema fidelity over the JSON API",
-	"subquery.test":          "evals returning native histograms lose schema fidelity over the JSON API",
-	"limit.test":             "evals returning native histograms lose schema fidelity over the JSON API",
 }
 
 // excludedEvals lists, per fixture file, the individual eval expressions we
@@ -273,6 +272,101 @@ var excludedEvals = map[string][]string{
 		`avg(data{test="big"})`,
 		`avg(data{test="-big"})`,
 		`avg(data{test="bigzero"})`,
+	},
+}
+
+// httpAPIExcludedEvals are the evals blanked out on top of excludedEvals when a
+// fixture runs against the HTTP API config. All of them lose to the same
+// encoding: a JSON SampleHistogram is a flat bucket list, so the schema
+// collapses to custom buckets (-53), empty buckets -- and the boundaries they
+// imply -- disappear, and the counter-reset hint is gone. The remote_read
+// config carries all of that through, so these evals keep running there.
+var httpAPIExcludedEvals = map[string][]string{
+	"functions.test": {
+		// The exponential schema of the result collapses to -53; /f and
+		// /g additionally lose the trailing custom-bucket boundary, which
+		// JSON only carries when a further bucket follows it.
+		`irate(http_requests_histogram{path="/a"}[20m])`,
+		`irate(http_requests_histogram{path="/b"}[20m])`,
+		`irate(http_requests_histogram{path="/f"}[20m])`,
+		`irate(http_requests_histogram{path="/g"}[20m])`,
+		// /c and /d mix gauge and counter histograms, and the warning
+		// they expect needs the counter-reset hint JSON drops, so no
+		// annotation is raised at all.
+		`irate(http_requests_histogram{path="/c"}[20m])`,
+		`irate(http_requests_histogram{path="/d"}[20m])`,
+		// The same schema collapse reached through delta/idelta and
+		// through the *_over_time aggregations of a histogram series.
+		`delta(http_requests_gauge[20m])`,
+		`delta(http_requests_counter[20m])`,
+		`idelta(http_requests_histogram{path="/a"}[20m])`,
+		`idelta(http_requests_histogram{path="/b"}[20m])`,
+		`idelta(http_requests_histogram{path="/c"}[20m])`,
+		`idelta(http_requests_histogram{path="/d"}[20m])`,
+		`sum_over_time(metric13[1m])`,
+		`avg_over_time(metric13[1m])`,
+		`sum_over_time(metric13[1m])/count_over_time(metric13[1m])`,
+		`last_over_time({__name__=~"data(_histogram)?"}[2m])`,
+	},
+	"operators.test": {
+		// Comparison operators pass the left-hand histogram through, so
+		// the collapsed schema is what reaches the expectation.
+		`http_requests_histogram == http_requests_histogram`,
+		`left_histograms == right_histograms`,
+		`left_histograms != right_histograms`,
+		// The first step of the range eval is an all-zero histogram, and
+		// with no buckets left there is nothing to carry its custom
+		// boundaries. This also costs the instant eval of the same
+		// expression four lines above, which does pass.
+		`(testhistogram) and on() (vector(1) == 1)`,
+	},
+	"subquery.test": {
+		// increase() over a native-histogram subquery: the result is a
+		// histogram, so its schema collapses.
+		`increase(native_histogram[10m:3m])`,
+		`increase(native_histogram[10m:15s])`,
+	},
+	"limit.test": {
+		// limitk/limit_ratio hand the selected histogram samples straight
+		// back. Each expression covers both the instant and the range
+		// eval of that query.
+		`limitk(1, http_requests{instance="histogram_1"})`,
+		`limitk(8, http_requests{instance=~"(histogram_2|0)"})`,
+		`limit_ratio(1, http_requests{instance="histogram_1"})`,
+	},
+	"histograms.test": {
+		// A histogram-only function makes the whole query
+		// histogram-bearing, and without remote_read on the group
+		// NodeReplacer refuses it rather than serve degraded data --
+		// including for the classic _bucket arguments, which the AST walk
+		// can't tell apart from a native histogram.
+		`histogram_count(testhistogram3)`,
+		`histogram_sum(testhistogram3)`,
+		`histogram_avg(testhistogram3)`,
+		`histogram_stddev(testhistogram3)`,
+		`histogram_stdvar(testhistogram3)`,
+		`histogram_fraction(0, 4, testhistogram2)`,
+		`histogram_fraction(0, 4, testhistogram2_bucket)`,
+		`histogram_fraction(0, 6, testhistogram2)`,
+		`histogram_fraction(0, 6, testhistogram2_bucket)`,
+		`histogram_fraction(0, 3.5, testhistogram2)`,
+		`histogram_fraction(0, 3.5, testhistogram2_bucket)`,
+		`histogram_fraction(0, 0.2, testhistogram3)`,
+		`histogram_fraction(0, 0.2, testhistogram3_bucket)`,
+		`histogram_fraction(0, 0.2, rate(testhistogram3[10m]))`,
+		`histogram_fraction(0, 0.2, rate(testhistogram3_bucket[10m]))`,
+		`histogram_count(increase(histogram_with_reset[15m]))`,
+		`histogram_sum(increase(histogram_with_reset[15m]))`,
+		`histogram_fraction(-Inf, 1, series)`,
+		// An empty bucket comes back missing and takes its boundary with
+		// it, so a custom-bucket layout doesn't survive the round trip.
+		`rate(const_histogram[5m])`,
+		`increase(histogram_with_reset[15m])`,
+		// And where the layout differs between the samples of one range
+		// -- the first sample here is all-zero -- the aggregation finds
+		// the buckets incompatible and drops the series entirely.
+		`sum_over_time(histogram_over_time[4m:1m])`,
+		`avg_over_time(histogram_over_time[4m:1m])`,
 	},
 }
 
@@ -307,7 +401,11 @@ func TestUpstreamEvaluations(t *testing.T) {
 				if reason, ok := upstreamRemoteReadOnlyFiles[base]; ok && psConfig != rawPSRemoteReadConfig {
 					t.Skip(reason + " (remote_read config only)")
 				}
-				runProxyTest(t, fn, psConfig, 1)
+				exclusions := excludedEvals[base]
+				if psConfig != rawPSRemoteReadConfig {
+					exclusions = slices.Concat(exclusions, httpAPIExcludedEvals[base])
+				}
+				runProxyTest(t, fn, psConfig, 1, exclusions)
 			})
 		}
 	}
@@ -476,7 +574,7 @@ func TestEvaluations(t *testing.T) {
 				continue
 			}
 			t.Run(strconv.Itoa(i)+fn, func(t *testing.T) {
-				runProxyTest(t, fn, psConfig, 2)
+				runProxyTest(t, fn, psConfig, 2, excludedEvals[filepath.Base(fn)])
 			})
 		}
 	}
@@ -484,19 +582,19 @@ func TestEvaluations(t *testing.T) {
 
 // runProxyTest loads a .test file, stands up nServers backend API servers over
 // a shared test storage, wires a proxeus ProxyStorage in front (psConfig takes
-// nServers address args), and runs the file's eval assertions through the proxy
-// engine with pushdown (NodeReplacer) enabled.
+// nServers address args), and runs the file's eval assertions -- minus the
+// exclusions -- through the proxy engine with pushdown (NodeReplacer) enabled.
 //
 // v3.5.0 removed the old promqltest.Test struct (SetStorage/QueryEngine/Run), so
 // the storage interposition now happens via RunTestWithStorage's newStorage
 // hook: load commands append through LayeredStorage to the backend, eval queries
 // read back through the proxy.
-func runProxyTest(t *testing.T, fn, psConfig string, nServers int) {
+func runProxyTest(t *testing.T, fn, psConfig string, nServers int, exclusions []string) {
 	raw, err := os.ReadFile(fn)
 	if err != nil {
 		t.Skipf("error reading test %s: %s (likely uses syntax not supported by proxeus)", fn, err)
 	}
-	content, err := excludeEvals(string(raw), excludedEvals[filepath.Base(fn)])
+	content, err := excludeEvals(string(raw), exclusions)
 	if err != nil {
 		t.Fatalf("excluding evals from %s: %s", fn, err)
 	}
