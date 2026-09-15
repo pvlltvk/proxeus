@@ -1,6 +1,19 @@
+apiVersion: v2
 name: proxeus
-version: 0.0.1
-appVersion: 0.0.1
+version: 0.1.0
+appVersion: v0.2.0
 description: A single PromQL endpoint over many Prometheus-compatible backends
+home: https://github.com/pvlltvk/proxeus
+icon: https://raw.githubusercontent.com/pvlltvk/proxeus/main/logo.svg
+sources:
+  - https://github.com/pvlltvk/proxeus
+keywords:
+  - prometheus
+  - promql
+  - thanos
+  - victoriametrics
 maintainers: []
+# autoscaling/v2 (1.23), policy/v1 PodDisruptionBudget (1.21) and
+# seccompProfile (1.19) are all used unconditionally.
+kubeVersion: ">=1.23.0-0"
 engine: gotpl

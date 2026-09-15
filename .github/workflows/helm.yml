@@ -1,0 +1,81 @@
+name: Helm chart
+
+# Its own workflow rather than a job in go.yml: nothing here needs the Go
+# toolchain or the module cache, and a chart change should not queue behind the
+# test matrix (nor a Go change behind helm).
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'deploy/k8s/helm-charts/**'
+      - '.github/workflows/helm.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'deploy/k8s/helm-charts/**'
+      - '.github/workflows/helm.yml'
+
+env:
+  CHART: deploy/k8s/helm-charts/proxeus
+  # Schemas for the CRDs the chart can emit (ServiceMonitor, PodMonitor,
+  # VerticalPodAutoscaler), which are not part of the Kubernetes API.
+  CRD_SCHEMAS: 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+  KUBE_VERSION: '1.31.0'
+
+jobs:
+
+  chart:
+    name: Lint and render
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.22.0
+
+    - name: Set up kubeconform
+      run: |
+        go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+        # go install lands in GOPATH/bin, which is not on the runner's PATH.
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    - name: Lint
+      run: |
+        helm lint "$CHART"
+        for f in "$CHART"/ci/*-values.yaml; do
+          echo "== $f"
+          helm lint "$CHART" -f "$f"
+        done
+
+    # Rendering is as far as CI can go without a cluster: every combination
+    # under ci/ must produce Kubernetes objects that pass schema validation.
+    - name: Render
+      run: |
+        render() {
+          helm template proxeus "$CHART" --api-versions monitoring.coreos.com/v1 "$@" \
+            | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" \
+                -schema-location default -schema-location "$CRD_SCHEMAS"
+        }
+        echo "== defaults"
+        render
+        for f in "$CHART"/ci/*-values.yaml; do
+          echo "== $f"
+          render -f "$f"
+        done
+
+    # The combinations the chart is supposed to refuse.
+    - name: Reject unsafe values
+      run: |
+        refuses() {
+          if helm template proxeus "$CHART" "$@" >/dev/null 2>&1; then
+            echo "expected 'helm template $*' to fail"
+            exit 1
+          fi
+        }
+        refuses --set mcp.enabled=true
+        refuses --set configmapReloader.enabled=true
+        refuses --set storage.persistence.enabled=true --set replicaCount=3
+        refuses --set hpa.enabled=true --set verticalAutoscaler.enabled=true --set verticalAutoscaler.updateMode=Auto
+        refuses --set shutdownDelay=bogus

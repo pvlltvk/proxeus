@@ -1,0 +1,36 @@
+replicaCount: 3
+
+hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+verticalAutoscaler:
+  enabled: true
+  updateMode: "Off"
+  containerPolicies:
+    - containerName: proxeus
+      minAllowed:
+        cpu: 500m
+        memory: 1Gi
+      maxAllowed:
+        cpu: "4"
+        memory: 8Gi
+    - containerName: proxeus-server-configmap-reload
+      mode: "Off"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: proxeus
+
+priorityClassName: system-cluster-critical

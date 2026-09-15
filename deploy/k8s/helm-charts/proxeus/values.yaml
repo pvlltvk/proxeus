@@ -12,14 +12,35 @@ deployment:
 
 image:
   repository: ghcr.io/pvlltvk/proxeus
-  tag: "master" # rewrites Chart.AppVersion
+  # empty means Chart.AppVersion; set it to pin a different release
+  tag: ""
+  # takes precedence over tag when set, e.g. sha256:abc...
+  digest: ""
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+
 configmapReloader:
+  # The pod template carries a checksum of the rendered config, so `helm
+  # upgrade` already rolls the Deployment when the config changes. The sidecar
+  # is only worth running when something outside Helm edits the ConfigMap
+  # (i.e. together with configMap: <name>), and it needs webLifecycle: true.
+  enabled: false
   image:
     repository: jimmidyson/configmap-reload
     tag: "v0.5.0"
     pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 20m
+      memory: 20Mi
+    limits:
+      memory: 20Mi
+
+# --web.enable-lifecycle serves /-/reload and /-/quit, which proxeus does not
+# authenticate separately: anything that can reach the pod can reload or stop
+# it. Off unless you run the reloader sidecar or reload out of band.
+webLifecycle: false
 
 podDisruptionBudget:
   enabled: false
@@ -36,8 +57,20 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name:
 
+# Read access to pods/services/endpoints, which kubernetes_sd_configs in the
+# config needs -- including the server_groups default below. Turn it off when
+# the config only uses static_configs or non-kubernetes discovery.
+rbac:
+  create: true
+  extraRules: []
+
 hpa:
   enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 50
+  targetMemoryUtilizationPercentage:
+  behavior: {}
 
 verticalAutoscaler:
   enabled: false
@@ -75,16 +108,168 @@ ingress:
     - example.com
   tls: []
 
+# ref: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+networkPolicy:
+  enabled: false
+  # Peers allowed to reach the http port. An empty list allows every peer in
+  # the cluster, which is the same exposure as no policy at all on that port.
+  ingress: []
+    # - namespaceSelector:
+    #     matchLabels:
+    #       kubernetes.io/metadata.name: monitoring
+  # Egress stays unrestricted by default: proxeus talks to every backend in its
+  # config plus the apiserver for kubernetes_sd, and none of that is knowable
+  # from here. Set egress rules to lock it down.
+  egress: []
+
+serviceMonitor:
+  # Requires the Prometheus Operator CRDs; the template is skipped when
+  # monitoring.coreos.com/v1 is not registered in the cluster.
+  enabled: false
+  interval: 30s
+  scrapeTimeout: ""
+  labels: {}
+  annotations: {}
+  honorLabels: false
+  relabelings: []
+  metricRelabelings: []
+
+podMonitor:
+  # Alternative to serviceMonitor when the Service is disabled or scraping
+  # should bypass it. Enabling both scrapes proxeus twice.
+  enabled: false
+  interval: 30s
+  scrapeTimeout: ""
+  labels: {}
+  annotations: {}
+  honorLabels: false
+  relabelings: []
+  metricRelabelings: []
+
+# ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+# The image is FROM scratch and runs as nobody (65534); nothing in it needs a
+# writable root filesystem once storage.path is a volume.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+# Applied to proxeus, the config-check init container and the reloader sidecar.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+storage:
+  # --storage.path. proxeus keeps its remote_write WAL and the active query
+  # tracker here; it is not a TSDB. Mandatory in practice: the image has no
+  # writable directory at all, not even /tmp, so remote_write and
+  # --query.max-concurrency both fail without it.
+  path: /var/lib/proxeus
+  # Used unless persistence.enabled; sizeLimit and medium are optional.
+  emptyDir: {}
+    # medium: Memory
+    # sizeLimit: 1Gi
+  persistence:
+    # Only worth it to keep the remote_write WAL across restarts. A
+    # ReadWriteOnce claim is shared by every replica of the Deployment, so
+    # replicaCount > 1 needs a ReadWriteMany class or no persistence.
+    enabled: false
+    existingClaim: ""
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+    annotations: {}
+
+# proxeus stops advertising itself as ready, waits shutdownDelay so upstream
+# load balancers notice, then drains in-flight requests for up to
+# shutdownTimeout. terminationGracePeriodSeconds below is derived from these
+# two -- Kubernetes' own 30s default would SIGKILL the pod mid-drain.
+shutdownDelay: 10s
+shutdownTimeout: 60s
+# Empty derives it from shutdownDelay + shutdownTimeout (plus a small margin),
+# honoring any override of the matching flag in extraArgs.
+terminationGracePeriodSeconds: ""
+
+# A fan-out proxy pays for merging and deduplicating series from every backend
+# it queries, so these are a floor for a single low-traffic replica rather than
+# a recommendation: size them against your own fan-out width and query range.
+# No CPU limit by default, because throttling a merge shows up as tail latency
+# rather than as a clean failure.
 resources:
   requests:
-    cpu: 100m
-    memory: 128Mi
+    cpu: 500m
+    memory: 1Gi
   limits:
-    cpu: 100m
-    memory: 128Mi
+    memory: 2Gi
+
+mcp:
+  # --mcp.enable serves the MCP endpoint at <route-prefix>/mcp. It is read-only
+  # but unauthenticated on its own, so the chart refuses to enable it unless
+  # config.proxeus.auth or webConfig is set, or the ack below says something in
+  # front of proxeus authenticates.
+  enabled: false
+  maxSeries: 100
+  maxSamples: 5000
+  queryTimeout: 60s
+  authenticatedByProxy: false
+
+# --web.config.file: TLS server config and/or basic_auth_users, from a Secret
+# you create. See https://prometheus.io/docs/prometheus/latest/configuration/https/
+webConfig:
+  existingSecret: ""
+  key: web-config.yaml
+
+# Secrets mounted into the proxeus container, for the *_file options of the
+# server groups' http_client (bearer_token_file, basic_auth.password_file,
+# tls_config.{ca,cert,key}_file) and anything else that reads from disk. The
+# config file itself is not env-expanded by proxeus, so credentials have to
+# reach it as files, not as ${VARS}. Keep mountPath outside /etc/proxeus: the
+# ConfigMap mounted there is read-only, so kubelet cannot create a nested
+# mount point inside it.
+extraSecretMounts: []
+  # - name: thanos-client-tls
+  #   secretName: proxeus-thanos-client-tls
+  #   mountPath: /etc/proxeus-secrets/thanos
+  #   defaultMode: 0400
+
+extraVolumes: []
+extraVolumeMounts: []
+extraContainers: []
+initContainers: []
+
+configCheck:
+  # Init container running `--check-config`, so a broken config fails the
+  # rollout instead of the first query.
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+env: []
+envFrom: []
 
 extraArgs:
   log-level: "info"
+
+podAnnotations: {}
+extraLabels: {}
+annotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
 
 # use existing configmap if specified
 # otherwise .config values will be used

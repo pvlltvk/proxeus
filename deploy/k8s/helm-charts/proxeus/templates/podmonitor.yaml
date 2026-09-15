@@ -1,0 +1,42 @@
+{{- if and .Values.podMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "chart.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+    {{- if .Values.extraLabels}}
+    {{ toYaml .Values.extraLabels | nindent 4 }}
+    {{- end}}
+    {{- if .Values.podMonitor.labels}}
+    {{ toYaml .Values.podMonitor.labels | nindent 4 }}
+    {{- end}}
+  {{- with .Values.podMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "chart.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  podMetricsEndpoints:
+    - port: http
+      path: {{ include "chart.flag" (list . "metrics-path" "/metrics") }}
+      interval: {{ .Values.podMonitor.interval }}
+      {{- with .Values.podMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      honorLabels: {{ .Values.podMonitor.honorLabels }}
+      {{- with .Values.podMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,17 @@
+mcp:
+  enabled: true
+  maxSeries: 200
+  queryTimeout: 30s
+
+config:
+  global:
+    evaluation_interval: 5s
+  proxeus:
+    auth:
+      basic:
+        # bcrypt hash, as produced by `htpasswd -nBC 10 alice`
+        users:
+          alice: $2y$10$3kAEbISHvHIFhb8RkNQgu.JbQZfHekIkQbLZDrPQ3bJkYcQ6/T2Xy
+    server_groups:
+      - static_configs:
+          - targets: ['thanos-query:9090']
