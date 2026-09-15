@@ -1,3 +1,4 @@
+{{- include "chart.validate" . -}}
 {{- if .Values.deployment.enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -29,16 +30,31 @@ spec:
         {{- if .Values.extraLabels}}
         {{ toYaml .Values.extraLabels | nindent 8 }}
         {{- end}}
+      {{- if or (eq .Values.configMap "") .Values.podAnnotations }}
       annotations:
+        {{- if eq .Values.configMap "" }}
+        # rolls the pods when the config changes, which is what makes the
+        # reloader sidecar optional
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
         {{- range $key, $value := .Values.podAnnotations }}
         {{ $key }}: {{ $value | quote }}
         {{- end }}
+      {{- end }}
     spec:
     {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
     {{- end }}
       serviceAccountName: {{ include "chart.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ include "chart.terminationGracePeriodSeconds" . }}
+    {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+    {{- end }}
+    {{- if .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+    {{- end }}
     {{- if .Values.nodeSelector }}
       nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 8 }}
@@ -51,22 +67,57 @@ spec:
       affinity:
 {{ toYaml .Values.affinity | indent 8 }}
     {{- end }}
+    {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- if or .Values.configCheck.enabled .Values.initContainers }}
+      initContainers:
+      {{- if .Values.configCheck.enabled }}
+      # fail the rollout on a bad config instead of the first query
+      - name: config-check
+        args:
+        - "--config=/etc/proxeus/config.yaml"
+        - "--check-config"
+        command:
+        - "/bin/proxeus"
+        image: {{ include "chart.image" . | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if .Values.securityContext }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+        - mountPath: "/etc/proxeus/"
+          name: config
+          readOnly: true
+        resources:
+          {{- toYaml .Values.configCheck.resources | nindent 10 }}
+      {{- end }}
+      {{- with .Values.initContainers }}
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+    {{- end }}
       containers:
       - args:
-        - "--config=/etc/proxeus/config.yaml"
-        - "--web.enable-lifecycle"
-        {{- range $key, $value := .Values.extraArgs }}
-        - "--{{ $key }}={{ $value }}"
-        {{- end }}
-          {{- if .Values.env }}
+        {{- include "chart.args" . | nindent 8 }}
+        {{- with .Values.env }}
         env:
-{{ toYaml .Values.env | indent 10}}
+{{ toYaml . | indent 10}}
+        {{- end }}
+        {{- with .Values.envFrom }}
+        envFrom:
+          {{- toYaml . | nindent 8 }}
         {{- end }}
         command:
         - "/bin/proxeus"
-        image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+        image: {{ include "chart.image" . | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         name: proxeus
+        {{- if .Values.securityContext }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- end }}
         livenessProbe:
           failureThreshold: 6
           httpGet:
@@ -89,11 +140,10 @@ spec:
         - containerPort: 8082
           name: http
         volumeMounts:
-        - mountPath: "/etc/proxeus/"
-          name: config
-          readOnly: true
+          {{- include "chart.volumeMounts" . | nindent 8 }}
         resources:
           {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.configmapReloader.enabled }}
       # container to reload configs on configmap change
       - name: proxeus-server-configmap-reload
         args:
@@ -101,19 +151,20 @@ spec:
         - "--webhook-url=http://localhost:8082/-/reload"
         image: "{{ .Values.configmapReloader.image.repository }}:{{ .Values.configmapReloader.image.tag }}"
         imagePullPolicy: {{ .Values.configmapReloader.image.pullPolicy }}
+        {{- if .Values.securityContext }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- end }}
         volumeMounts:
         - mountPath: "/etc/proxeus/"
           name: config
           readOnly: true
         resources:
-          requests:
-            cpu: 0.02
-            memory: 20Mi
-          limits:
-            cpu: 0.02
-            memory: 20Mi
+          {{- toYaml .Values.configmapReloader.resources | nindent 10 }}
+      {{- end }}
+      {{- with .Values.extraContainers }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       volumes:
-      - name: config
-        configMap:
-          name: {{ include "chart.configname" .}}
+        {{- include "chart.volumes" . | nindent 6 }}
 {{- end }}
