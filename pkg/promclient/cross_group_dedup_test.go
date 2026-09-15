@@ -281,15 +281,15 @@ func TestDedupSeriesSets_NativeHistogramsPassThrough(t *testing.T) {
 // back. Kept here as the reference implementation the native merge is checked
 // and benchmarked against.
 func mergeViaModelValue(sets []ordinalSeriesSet, ignore map[model.LabelName]struct{}) (storage.SeriesSet, *promhttputil.DedupStats) {
-	inputs := make([]promhttputil.OrdinalValue, len(sets))
+	inputs := make([]ordinalValue, len(sets))
 	for i, s := range sets {
 		matrix, err := SeriesSetToMatrix(s.ss)
 		if err != nil {
 			return ModelValueToSeriesSet(nil, nil, err), nil
 		}
-		inputs[i] = promhttputil.OrdinalValue{Ordinal: s.ordinal, Value: matrix}
+		inputs[i] = ordinalValue{Ordinal: s.ordinal, Value: matrix}
 	}
-	merged, stats, err := promhttputil.MergeValuesDeterministic(inputs, ignore)
+	merged, stats, err := mergeValuesDeterministic(inputs, ignore)
 	if err != nil {
 		return ModelValueToSeriesSet(nil, nil, err), nil
 	}
