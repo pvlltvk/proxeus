@@ -335,29 +335,19 @@ var httpAPIExcludedEvals = map[string][]string{
 		`limit_ratio(1, http_requests{instance="histogram_1"})`,
 	},
 	"histograms.test": {
-		// A histogram-only function makes the whole query
+		// A genuinely histogram-only function makes the whole query
 		// histogram-bearing, and without remote_read on the group
-		// NodeReplacer refuses it rather than serve degraded data --
-		// including for the classic _bucket arguments, which the AST walk
-		// can't tell apart from a native histogram.
+		// NodeReplacer refuses it rather than serve degraded data. These
+		// take no classic-bucket form, so refusing by function name is
+		// right here -- unlike histogram_fraction, which does and used to
+		// be refused with them.
 		`histogram_count(testhistogram3)`,
 		`histogram_sum(testhistogram3)`,
 		`histogram_avg(testhistogram3)`,
 		`histogram_stddev(testhistogram3)`,
 		`histogram_stdvar(testhistogram3)`,
-		`histogram_fraction(0, 4, testhistogram2)`,
-		`histogram_fraction(0, 4, testhistogram2_bucket)`,
-		`histogram_fraction(0, 6, testhistogram2)`,
-		`histogram_fraction(0, 6, testhistogram2_bucket)`,
-		`histogram_fraction(0, 3.5, testhistogram2)`,
-		`histogram_fraction(0, 3.5, testhistogram2_bucket)`,
-		`histogram_fraction(0, 0.2, testhistogram3)`,
-		`histogram_fraction(0, 0.2, testhistogram3_bucket)`,
-		`histogram_fraction(0, 0.2, rate(testhistogram3[10m]))`,
-		`histogram_fraction(0, 0.2, rate(testhistogram3_bucket[10m]))`,
 		`histogram_count(increase(histogram_with_reset[15m]))`,
 		`histogram_sum(increase(histogram_with_reset[15m]))`,
-		`histogram_fraction(-Inf, 1, series)`,
 		// An empty bucket comes back missing and takes its boundary with
 		// it, so a custom-bucket layout doesn't survive the round trip.
 		`rate(const_histogram[5m])`,

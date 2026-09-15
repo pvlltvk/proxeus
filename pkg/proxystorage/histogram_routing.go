@@ -67,16 +67,22 @@ func pathHasHistogramOnlyCall(path []parser.Node) bool {
 // isn't a histogram. A subtree containing a Call to one of these is
 // unambiguously histogram-bearing, no metadata required.
 //
-// histogram_quantile is intentionally NOT in this set: it accepts both
-// classic _bucket float series AND native histograms, so it doesn't on
-// its own signal a histogram-bearing query.
+// histogram_quantile and histogram_fraction are intentionally NOT in this
+// set: both accept classic _bucket float series as well as native
+// histograms (see funcHistogramFraction's classic-histogram branch), so
+// neither on its own signals a histogram-bearing query. Listing
+// histogram_fraction here refused queries over plain float buckets that
+// the JSON API carries exactly. The cost of leaving it out is that a
+// native-histogram argument is no longer caught by name alone -- that
+// falls to the isHistogramName signal, which needs
+// histogram_metadata_refresh, exactly as it already does for
+// histogram_quantile.
 var histogramOnlyFuncs = map[string]struct{}{
-	"histogram_avg":      {},
-	"histogram_count":    {},
-	"histogram_sum":      {},
-	"histogram_stddev":   {},
-	"histogram_stdvar":   {},
-	"histogram_fraction": {},
+	"histogram_avg":    {},
+	"histogram_count":  {},
+	"histogram_sum":    {},
+	"histogram_stddev": {},
+	"histogram_stdvar": {},
 }
 
 // isHistogramExpr reports whether node — taken together with the path of
