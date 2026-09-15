@@ -23,12 +23,15 @@ func TestIsHistogramExpr(t *testing.T) {
 		{name: "histogram_avg", query: `histogram_avg(foo)`, want: true},
 		{name: "histogram_stddev", query: `histogram_stddev(foo)`, want: true},
 		{name: "histogram_stdvar", query: `histogram_stdvar(foo)`, want: true},
-		{name: "histogram_fraction", query: `histogram_fraction(0, 1, foo)`, want: true},
 
-		// histogram_quantile is intentionally dual-mode (classic + native).
-		// Without the metadata cache we must NOT flag it, or every classic
-		// histogram query would be diverted to remote_read.
+		// histogram_quantile and histogram_fraction are intentionally
+		// dual-mode (classic + native). Without the metadata cache we must
+		// NOT flag them, or every classic histogram query would be diverted
+		// to remote_read -- or, with strict mode, refused outright.
 		{name: "histogram_quantile alone", query: `histogram_quantile(0.95, foo)`, want: false},
+		{name: "histogram_fraction alone", query: `histogram_fraction(0, 1, foo)`, want: false},
+		// Both still flag once the metadata cache knows the metric.
+		{name: "histogram_fraction on a known histogram", query: `histogram_fraction(0, 1, foo)`, histograms: map[string]struct{}{"foo": {}}, want: true},
 
 		// Nested under an aggregation — should still flag.
 		{name: "sum over histogram_count", query: `sum(histogram_count(foo))`, want: true},
