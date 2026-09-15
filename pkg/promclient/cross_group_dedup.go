@@ -15,7 +15,7 @@ import (
 // iterator is never consumed.
 //
 // This is the storage.SeriesSet-native form of
-// promhttputil.MergeValuesDeterministic's matrix branch, which the query path
+// the pre-SeriesSet model.Value merge's matrix branch, which the query path
 // used to reach via a model.Matrix round trip. Callers should pass the sets in
 // ascending-ordinal order for a deterministic result ordering, but correctness
 // (which series wins, and collision attribution) does not depend on the order.
@@ -25,7 +25,7 @@ import (
 func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttputil.DedupStats) storage.SeriesSet {
 	// A single backend is passed through whole. With nothing to collide
 	// against, two series of one group that share a reduced fingerprint are
-	// not duplicates of each other -- same as MergeValuesDeterministic's
+	// not duplicates of each other -- same as the old model.Value merge's
 	// single-input case.
 	if len(sets) == 1 {
 		return sets[0].ss
