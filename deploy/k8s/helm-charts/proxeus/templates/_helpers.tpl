@@ -108,9 +108,8 @@ Call as: include "chart.flag" (list . "http.shutdown-delay" .Values.shutdownDela
 
 {{/*
 Seconds in a go-duration string, for the arithmetic behind
-terminationGracePeriodSeconds. Only the integer+unit forms the shutdown flags
-are given in practice parse; anything else is a hard error rather than a
-silently wrong grace period.
+terminationGracePeriodSeconds. Only a single integer plus unit parses; a
+compound duration is an error rather than a silently wrong grace period.
 */}}
 {{- define "chart.durationSeconds" -}}
 {{- $d := toString . -}}
@@ -118,7 +117,7 @@ silently wrong grace period.
 {{- $unit := trimPrefix $n $d -}}
 {{- $units := dict "s" 1 "m" 60 "h" 3600 -}}
 {{- if or (not $n) (not (hasKey $units $unit)) -}}
-{{- fail (printf "cannot parse duration %q: expected an integer followed by s, m or h" $d) -}}
+{{- fail (printf "cannot parse duration %q: expected an integer followed by s, m or h, or set terminationGracePeriodSeconds yourself" $d) -}}
 {{- end -}}
 {{- mul (atoi $n) (get $units $unit) -}}
 {{- end -}}
