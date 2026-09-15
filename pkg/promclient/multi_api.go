@@ -215,6 +215,18 @@ func (m *MultiAPI) recordMetric(i int, api, status string, took float64) {
 	}
 }
 
+// isolateFingerprints puts every api in a bucket of its own, so requiredCount
+// applies per api instead of per group-of-identical-apis. Callers that fan out
+// across distinct backends -- rather than across HA replicas of one -- use it
+// instead of relying on the apis to advertise an APILabels.Key().
+func (m *MultiAPI) isolateFingerprints() {
+	for i := range m.apiFingerprints {
+		// Offset by one: the zero fingerprint is what an api without a Key()
+		// gets, and reusing it here would blur the two cases.
+		m.apiFingerprints[i] = model.Fingerprint(i + 1)
+	}
+}
+
 // abortOnError reports whether an error from one backend should abort the whole
 // fan-out immediately. In partial-response mode a single failure is tolerated,
 // so we never abort early; otherwise we abort as soon as a fingerprint bucket
