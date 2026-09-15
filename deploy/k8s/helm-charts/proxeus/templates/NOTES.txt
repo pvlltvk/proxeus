@@ -1,0 +1,30 @@
+proxeus {{ default .Chart.AppVersion .Values.image.tag }} is rolling out as {{ include "chart.fullname" . }}.
+
+{{- if .Values.service.enabled }}
+
+PromQL endpoint (point Grafana at it):
+
+    http://{{ include "chart.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.servicePort }}
+
+    kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "chart.fullname" . }} {{ .Values.service.servicePort }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress:
+{{- range .Values.ingress.hosts }}
+    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ . }}{{ $.Values.ingress.path }}
+{{- end }}
+{{- end }}
+
+{{- $auth := or .Values.webConfig.existingSecret (dig "proxeus" "auth" false (default dict .Values.config)) }}
+{{- if and .Values.ingress.enabled (not $auth) }}
+
+WARNING: the ingress is enabled but neither config.proxeus.auth nor webConfig
+is set, so every route -- including the whole read API -- is anonymous unless
+something in front of proxeus authenticates.
+{{- end }}
+{{- if .Values.webLifecycle }}
+
+WARNING: --web.enable-lifecycle is on, so /-/reload and /-/quit are served to
+anything that can reach the pod. Restrict it with networkPolicy.ingress.
+{{- end }}
