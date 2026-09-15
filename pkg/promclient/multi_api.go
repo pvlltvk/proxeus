@@ -36,29 +36,66 @@ func NormalizePromError(err error) error {
 		Error     string                 `json:"error,omitempty"`
 	}
 
-	if typedErr, ok := err.(*v1.Error); ok {
+	// errors.As rather than a type assertion: every error reaching here has
+	// already been wrapped by the target and server-group ErrorWraps, so an
+	// assertion never matched and the normalization below never ran.
+	var typedErr *v1.Error
+	if errors.As(err, &typedErr) {
 		res := &result{}
 		// The prometheus client does a terrible job of handling and returning errors
 		// so we need to do the work ourselves.
 		// The `Detail` is actually just the body of the response so we need
 		// to unmarshal that so we can see what happened
-		if err := json.Unmarshal([]byte(typedErr.Detail), res); err != nil {
+		if jsonErr := json.Unmarshal([]byte(typedErr.Detail), res); jsonErr != nil {
 			// If the body can't be unmarshaled, return the original error
-			return typedErr
+			return err
 		}
 
-		// Now we want to switch for any errors that the API server will handle differently
-		switch res.ErrorType {
-		case promhttputil.ErrorTimeout:
-			return promql.ErrQueryTimeout(strings.TrimPrefix(res.Error, timeoutPrefix))
-		case promhttputil.ErrorCanceled:
-			return promql.ErrQueryCanceled(strings.TrimPrefix(res.Error, canceledPrefix))
+		if typed := promErrorForType(res.ErrorType, res.Error); typed != nil {
+			return downstreamError{err, typed}
+		}
+		return err
+	}
+
+	// The SeriesSet decoder doesn't go through client_golang at all, so a
+	// downstream error arrives as a ResponseError carrying the errorType
+	// directly.
+	var respErr *promapi.ResponseError
+	if errors.As(err, &respErr) {
+		if typed := promErrorForType(promhttputil.ErrorType(respErr.Type), respErr.Msg); typed != nil {
+			return downstreamError{err, typed}
 		}
 	}
 
 	// If all else fails, return the original error
 	return err
 }
+
+// promErrorForType returns the promql error the v1 API recognizes for a
+// downstream errorType, or nil when the API would classify it the same way
+// without help. Only timeout and canceled need translating: everything else
+// already lands on the type the API would have picked.
+func promErrorForType(t promhttputil.ErrorType, msg string) error {
+	switch t {
+	case promhttputil.ErrorTimeout:
+		return promql.ErrQueryTimeout(strings.TrimPrefix(msg, timeoutPrefix))
+	case promhttputil.ErrorCanceled:
+		return promql.ErrQueryCanceled(strings.TrimPrefix(msg, canceledPrefix))
+	}
+	return nil
+}
+
+// downstreamError pairs a downstream error with the promql error that makes the
+// v1 API classify it correctly. Returning the promql error on its own would
+// classify it right but throw away which backend it came from, since the API
+// renders the message it is handed; carrying both keeps the context in the text
+// and puts the type where returnAPIError's errors.As will find it.
+type downstreamError struct {
+	error
+	typed error
+}
+
+func (e downstreamError) Unwrap() []error { return []error{e.error, e.typed} }
 
 // MultiAPIMetricFunc defines a method where a client can record metrics about
 // the specific API calls made through this multi client
