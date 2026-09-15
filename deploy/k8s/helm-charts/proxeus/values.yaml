@@ -230,11 +230,13 @@ webConfig:
 # server groups' http_client (bearer_token_file, basic_auth.password_file,
 # tls_config.{ca,cert,key}_file) and anything else that reads from disk. The
 # config file itself is not env-expanded by proxeus, so credentials have to
-# reach it as files, not as ${VARS}.
+# reach it as files, not as ${VARS}. Keep mountPath outside /etc/proxeus: the
+# ConfigMap mounted there is read-only, so kubelet cannot create a nested
+# mount point inside it.
 extraSecretMounts: []
   # - name: thanos-client-tls
   #   secretName: proxeus-thanos-client-tls
-  #   mountPath: /etc/proxeus/secrets/thanos
+  #   mountPath: /etc/proxeus-secrets/thanos
   #   defaultMode: 0400
 
 extraVolumes: []

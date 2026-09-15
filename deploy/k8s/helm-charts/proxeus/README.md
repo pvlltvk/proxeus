@@ -97,7 +97,7 @@ proxeus does **not** expand environment variables in its config file, so credent
   (`bearer_token_file`, `basic_auth.password_file`, `tls_config.{ca,cert,key}_file`) and mount the Secret with
   `extraSecretMounts`. See [`ci/secrets-values.yaml`](ci/secrets-values.yaml).
 - TLS for proxeus' own listener, or `basic_auth_users` for `--web.config.file`: put the file in a Secret and set
-  `webConfig.existingSecret`; the chart mounts it at `/etc/proxeus/web/` and passes the flag.
+  `webConfig.existingSecret`; the chart mounts it at `/etc/proxeus-web/` and passes the flag.
 - `config.proxeus.auth.basic.users` holds bcrypt hashes inline. Those go through the ConfigMap like the rest of
   the config; if you would rather not have them in a ConfigMap at all, render the whole config into a Secret
   yourself — but note that `configMap: <name>` expects a ConfigMap, so this needs `extraVolumes`/

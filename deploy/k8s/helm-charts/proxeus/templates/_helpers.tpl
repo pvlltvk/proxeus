@@ -197,7 +197,7 @@ Mounts matching chart.volumes
 - mountPath: {{ .Values.storage.path | quote }}
   name: storage
 {{- if .Values.webConfig.existingSecret }}
-- mountPath: "/etc/proxeus/web/"
+- mountPath: "/etc/proxeus-web/"
   name: web-config
   readOnly: true
 {{- end }}
@@ -231,7 +231,7 @@ already sets them, so a user override replaces them instead of duplicating.
 - "--web.enable-lifecycle"
 {{- end }}
 {{- if .Values.webConfig.existingSecret }}
-- "--web.config.file=/etc/proxeus/web/{{ .Values.webConfig.key }}"
+- "--web.config.file=/etc/proxeus-web/{{ .Values.webConfig.key }}"
 {{- end }}
 {{- if .Values.mcp.enabled }}
 - "--mcp.enable"
