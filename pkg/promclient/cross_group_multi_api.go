@@ -69,16 +69,22 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	}
 	sort.Strings(ignoreNames)
 
-	// requiredCount=1: each server_group has unique labels, so it occupies its
-	// own fingerprint bucket of size 1. With PartialResponse=false this means
-	// EVERY backend must respond (any one error fails the whole query — see
-	// MultiAPI.missingRequired); PartialResponse=true relaxes that to "at least
-	// one backend responded", returning partial results with a warning.
+	// requiredCount=1, one bucket per server_group: with PartialResponse=false
+	// that means EVERY group must respond (any one error fails the whole query
+	// — see MultiAPI.missingRequired); PartialResponse=true relaxes it to "at
+	// least one group responded", returning partial results with a warning.
 	// antiAffinity/preferMax disabled — those are within-group HA concerns.
 	m, err := NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, 1, false)
 	if err != nil {
 		return nil, err
 	}
+	// NewMultiAPI derives its buckets from APILabels.Key(), which a server
+	// group does not implement (and the ErrorWrap around it would hide one
+	// anyway), so every group would share the zero bucket and a single success
+	// would satisfy requiredCount -- PartialResponse=false silently behaving
+	// like partial response, minus the warning. Here one group IS one bucket,
+	// by position, so say that outright rather than inferring it from labels.
+	m.isolateFingerprints()
 	m.partialResponse = opts.PartialResponse
 
 	// Keep the default (non-dedup) merge around: pushed-down aggregation
