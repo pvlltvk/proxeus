@@ -178,6 +178,18 @@ func (m *MultiAPI) recordMetric(i int, api, status string, took float64) {
 	}
 }
 
+// isolateFingerprints puts every api in a bucket of its own, so requiredCount
+// applies per api instead of per group-of-identical-apis. Callers that fan out
+// across distinct backends -- rather than across HA replicas of one -- use it
+// instead of relying on the apis to advertise an APILabels.Key().
+func (m *MultiAPI) isolateFingerprints() {
+	for i := range m.apiFingerprints {
+		// Offset by one: the zero fingerprint is what an api without a Key()
+		// gets, and reusing it here would blur the two cases.
+		m.apiFingerprints[i] = model.Fingerprint(i + 1)
+	}
+}
+
 // abortOnError reports whether an error from one backend should abort the whole
 // fan-out immediately. In partial-response mode a single failure is tolerated,
 // so we never abort early; otherwise we abort as soon as a fingerprint bucket
@@ -204,9 +216,27 @@ func (m *MultiAPI) missingRequired(outstanding, success map[model.Fingerprint]in
 	return false
 }
 
+// fetchError frames a fan-out that came back empty, except when the reason is
+// a backend rejecting the query itself: that error is the caller's answer, and
+// "unable to fetch" would misdescribe it as a backend being unreachable.
+func fetchError(err error) error {
+	if isBackendQueryError(err) {
+		return err
+	}
+	return errors.Wrap(err, "Unable to fetch from downstream servers")
+}
+
 // partialResponseErr formats the degradation warning attached when a backend
-// fails in partial-response mode.
+// fails in partial-response mode. A backend that rejected the query answered
+// the request -- calling it unavailable would send an operator after a healthy
+// backend, so it gets its own wording. The cause is flattened rather than
+// wrapped on purpose: annotations.AsStrings replaces a warning with the inner
+// error whenever the chain holds one of prometheus' annotation types, which
+// would drop the backend ordinal from the message.
 func partialResponseErr(i int, err error) error {
+	if isBackendQueryError(err) {
+		return fmt.Errorf("partial_response: backend[%d] rejected the query: %s", i, err.Error())
+	}
 	return fmt.Errorf("partial_response: backend[%d] unavailable: %s", i, err.Error())
 }
 
@@ -317,7 +347,7 @@ func scatterGather[T any](
 	}
 
 	if m.missingRequired(outstanding, successMap) {
-		return nil, warnings, errors.Wrap(lastError, "Unable to fetch from downstream servers")
+		return nil, warnings, fetchError(lastError)
 	}
 
 	sortGathered(results)
@@ -453,7 +483,7 @@ func (m *MultiAPI) scatterMerge(ctx context.Context, op string, call func(contex
 	}
 
 	if m.missingRequired(outstandingRequests, successMap) {
-		return promapi.NewSeriesSet(nil, warnings, errors.Wrap(lastError, "Unable to fetch from downstream servers"))
+		return promapi.NewSeriesSet(nil, warnings, fetchError(lastError))
 	}
 
 	sortOrdinalSeriesSets(sets)
@@ -604,7 +634,7 @@ func (m *MultiAPI) QueryExemplars(ctx context.Context, query string, startTime, 
 
 	for k := range outstandingRequests {
 		if successMap[k] < m.requiredCount {
-			return nil, errors.Wrap(lastError, "Unable to fetch from downstream servers")
+			return nil, fetchError(lastError)
 		}
 	}
 

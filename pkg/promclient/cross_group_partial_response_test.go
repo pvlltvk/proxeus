@@ -23,10 +23,12 @@ func warningStrings(a annotations.Annotations) []string {
 	return out
 }
 
-// keyedStub is an API whose Key() returns a distinct labelset, so each instance
-// occupies its own fingerprint bucket — exactly how real server_groups behave
-// (and the condition under which the fail-hard / partial-response distinction
-// matters; shared-bucket stubs would mask it). It returns a fixed value or err.
+// keyedStub is an API whose Key() returns a distinct labelset. Real
+// server_groups do NOT do this -- *servergroup.ServerGroup has no Key(), and
+// the ErrorWrap around it would hide one anyway -- so the bucketing these
+// stubs get is the cross-group constructor's doing, not Key()'s. See
+// unkeyedStub, which reproduces the production shape. It returns a fixed value
+// or err.
 type keyedStub struct {
 	API
 	key model.LabelSet
@@ -63,6 +65,21 @@ func (s *blockingStub) Query(ctx context.Context, _ string, _ time.Time) storage
 	return ModelValueToSeriesSet(s.val, nil, nil)
 }
 
+// unkeyedStub is keyedStub without the Key(), which is the shape a real
+// server_group arrives in.
+type unkeyedStub struct {
+	API
+	val model.Value
+	err error
+}
+
+func (s *unkeyedStub) Query(_ context.Context, _ string, _ time.Time) storage.SeriesSet {
+	if s.err != nil {
+		return storage.ErrSeriesSet(s.err)
+	}
+	return ModelValueToSeriesSet(s.val, nil, nil)
+}
+
 func crossGroupPartial(t *testing.T, apis []API, partial bool) *MultiAPI {
 	t.Helper()
 	backends := make([]CrossGroupBackend, len(apis))
@@ -89,6 +106,24 @@ func TestCrossGroupPartialResponse_DisabledFailsHard(t *testing.T) {
 	ss := m.Query(context.Background(), "cpu", time.Now())
 	if err := ss.Err(); err == nil {
 		t.Fatal("expected error when a backend fails and partial_response is disabled")
+	}
+}
+
+// The same, with the APIs shaped the way ApplyConfig really builds them: no
+// Key(), so every group would land in the same fingerprint bucket and one
+// success would satisfy requiredCount, quietly turning partial_response=false
+// into partial results with no warning at all.
+func TestCrossGroupPartialResponse_DisabledFailsHardWithoutKey(t *testing.T) {
+	apis := []API{
+		&unkeyedStub{val: vec("cpu", "sg0")},
+		&unkeyedStub{err: errors.New("backend down")},
+	}
+	m := crossGroupPartial(t, apis, false)
+
+	ss := m.Query(context.Background(), "cpu", time.Now())
+	if err := ss.Err(); err == nil {
+		mat, _ := SeriesSetToMatrix(ss)
+		t.Fatalf("expected error when a backend fails and partial_response is disabled, got %v", mat)
 	}
 }
 
