@@ -20,6 +20,7 @@ import (
 
 	"github.com/pvlltvk/proxeus/pkg/promapi"
 	"github.com/pvlltvk/proxeus/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
 type stubAPI struct {
@@ -104,7 +105,8 @@ func TestNodeReplacer(t *testing.T) {
 				"sum(foo) @ 6400",
 			},
 		},
-		// test that average is converted to sum / count
+		// test that average is converted to sum / count. Only with more than
+		// one server_group -- see TestNodeReplacerAvgSingleServerGroup.
 		{
 			in:  "avg(foo)",
 			out: "sum(foo) / count(foo)",
@@ -394,6 +396,7 @@ func TestNodeReplacer(t *testing.T) {
 	ps := &ProxyStorage{}
 	ps.state.Store(&proxyStorageState{
 		client: api,
+		sgs:    newServerGroups(2),
 	})
 
 	now := time.Unix(10000, 0)
@@ -439,6 +442,80 @@ func TestNodeReplacer(t *testing.T) {
 
 	//func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, node parser.Node, path []parser.Node) (parser.Node, error) {
 
+}
+
+func newServerGroups(n int) []*servergroup.ServerGroup {
+	sgs := make([]*servergroup.ServerGroup, n)
+	for i := range sgs {
+		sgs[i] = &servergroup.ServerGroup{}
+	}
+	return sgs
+}
+
+// TestNodeReplacerAvgSingleServerGroup pins the avg pushdown for the
+// single-server_group case: the aggregation goes down whole instead of being
+// split into sum() / count(). The split is what makes avg overflow to +/-Inf
+// near MaxFloat64 -- and, since the partial sum overflows only for some
+// orderings of the backend's series, it makes the answer depend on the order
+// the backend happens to aggregate in.
+func TestNodeReplacerAvgSingleServerGroup(t *testing.T) {
+	tests := []struct {
+		in      string
+		out     string
+		queries []string
+	}{
+		{
+			in:      "avg(foo)",
+			out:     "avg()",
+			queries: []string{"avg(foo) @ 10000"},
+		},
+		{
+			in:      "avg by (job) (foo)",
+			out:     "avg by (job) ()",
+			queries: []string{"avg by (job) (foo) @ 10000"},
+		},
+		// The __name__ grouping workaround exists because the sum / count
+		// rewrite drops the metric name across the division; pushing avg
+		// whole keeps it, so no workaround is needed.
+		{
+			in:      "avg by (__name__) (foo)",
+			out:     "avg by (__name__) ()",
+			queries: []string{"avg by (__name__) (foo) @ 10000"},
+		},
+	}
+
+	api := &stubAPI{}
+	ps := &ProxyStorage{}
+	ps.state.Store(&proxyStorageState{
+		client: api,
+		sgs:    newServerGroups(1),
+	})
+
+	now := time.Unix(10000, 0)
+
+	for _, test := range tests {
+		t.Run(test.in, func(t *testing.T) {
+			expr, err := parser.ParseExpr(test.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			node, err := ps.NodeReplacer(context.TODO(), &parser.EvalStmt{Expr: expr, Start: now, End: now}, expr, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if node == nil {
+				t.Fatalf("no replacement for %s", test.in)
+			}
+
+			if queries := api.getQueries(); !cmp.Equal(test.queries, queries) {
+				t.Fatalf("mismatch in queries: \n%s", cmp.Diff(test.queries, queries))
+			}
+			if node.String() != test.out {
+				t.Fatalf("mismatch expected=%s actual=%s", test.out, node.String())
+			}
+		})
+	}
 }
 
 func TestVectorToStepMatrix(t *testing.T) {
