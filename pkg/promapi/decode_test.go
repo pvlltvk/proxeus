@@ -175,6 +175,97 @@ func TestDecodeSeriesSetError(t *testing.T) {
 	}
 }
 
+// bucket layouts as the API writes them: [boundaries, lower, upper, count].
+func hist(ts string, uppers ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `[%s,{"count":"1","sum":"1","buckets":[`, ts)
+	for i, u := range uppers {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `[0,"0","%s","1"]`, u)
+	}
+	b.WriteString(`]}]`)
+	return b.String()
+}
+
+func matrixBody(series ...string) []byte {
+	return []byte(`{"status":"success","data":{"resultType":"matrix","result":[` +
+		strings.Join(series, ",") + `]}}`)
+}
+
+// TestDecodeBucketLayoutDrift covers the warning raised when the custom-bucket
+// layout of a series changes between its samples -- the shape that makes PromQL
+// drop the series from an aggregation, and which the JSON encoding can produce
+// out of a downstream series whose layout never changed.
+func TestDecodeBucketLayoutDrift(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+		want bool
+	}{
+		{
+			name: "layout_changes_between_samples",
+			body: matrixBody(`{"metric":{"__name__":"h"},"histograms":[` +
+				hist("100.000", "1", "2") + `,` + hist("160.000", "0", "1", "2", "4") + `]}`),
+			want: true,
+		},
+		{
+			name: "same_layout",
+			body: matrixBody(`{"metric":{"__name__":"h"},"histograms":[` +
+				hist("100.000", "1", "2") + `,` + hist("160.000", "1", "2") + `]}`),
+			want: false,
+		},
+		{
+			name: "single_histogram_sample",
+			body: matrixBody(`{"metric":{"__name__":"h"},"histograms":[` + hist("100.000", "1", "2") + `]}`),
+			want: false,
+		},
+		{
+			name: "floats_only",
+			body: matrixBody(`{"metric":{"__name__":"m"},"values":[[100.000,"1"],[160.000,"2"]]}`),
+			want: false,
+		},
+		{
+			name: "float_samples_around_one_histogram",
+			body: matrixBody(`{"metric":{"__name__":"m"},"values":[[100.000,"1"]],"histograms":[` +
+				hist("160.000", "1", "2") + `]}`),
+			want: false,
+		},
+		{
+			name: "only_the_drifting_series_warns",
+			body: matrixBody(
+				`{"metric":{"__name__":"stable"},"histograms":[`+hist("100.000", "1")+`,`+hist("160.000", "1")+`]}`,
+				`{"metric":{"__name__":"drifting"},"histograms":[`+hist("100.000", "1")+`,`+hist("160.000", "1", "2")+`]}`),
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ss := DecodeSeriesSet(tc.body)
+			if ss.Err() != nil {
+				t.Fatalf("unexpected error: %v", ss.Err())
+			}
+			errs := ss.Warnings().AsErrors()
+			if !tc.want {
+				if len(errs) != 0 {
+					t.Fatalf("expected no annotations, got %v", errs)
+				}
+				return
+			}
+			if len(errs) != 1 {
+				t.Fatalf("expected 1 annotation, got %d: %v", len(errs), errs)
+			}
+			if !errors.Is(errs[0], annotations.PromQLWarning) {
+				t.Errorf("annotation is not a PromQL warning: %v", errs[0])
+			}
+			if !strings.Contains(errs[0].Error(), "bucket layout") {
+				t.Errorf("unexpected warning text: %v", errs[0])
+			}
+		})
+	}
+}
+
 func buildMatrixBody(n int) []byte {
 	var b strings.Builder
 	b.WriteString(`{"status":"success","data":{"resultType":"matrix","result":[`)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -195,33 +196,34 @@ func DecodeSeriesSet(body []byte) storage.SeriesSet {
 		return NewSeriesSet(nil, anns, &ResponseError{Type: errType, Msg: errMsg})
 	}
 
-	series, err := decodeResult(resultType, resultBytes)
+	series, seriesAnns, err := decodeResult(resultType, resultBytes)
 	if err != nil {
 		return NewSeriesSet(nil, anns, err)
 	}
-	return NewSeriesSet(series, anns, nil)
+	return NewSeriesSet(series, anns.Merge(seriesAnns), nil)
 }
 
-func decodeResult(resultType string, body []byte) ([]storage.Series, error) {
+func decodeResult(resultType string, body []byte) ([]storage.Series, annotations.Annotations, error) {
 	if len(body) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	iter := jsonCfg.BorrowIterator(body)
 	defer jsonCfg.ReturnIterator(iter)
 
 	switch resultType {
 	case "vector":
-		return decodeVector(iter), iter.Error
+		return decodeVector(iter), nil, iter.Error
 	case "matrix":
-		return decodeMatrix(iter), iter.Error
+		series, anns := decodeMatrix(iter)
+		return series, anns, iter.Error
 	case "scalar":
 		t, f := decodeSamplePair(iter)
-		return []storage.Series{NewSeries(labels.EmptyLabels(), []chunks.Sample{floatSample{t, f}})}, iter.Error
+		return []storage.Series{NewSeries(labels.EmptyLabels(), []chunks.Sample{floatSample{t, f}})}, nil, iter.Error
 	case "string":
 		// strings carry no series; the model.Value path didn't support them either.
-		return nil, nil
+		return nil, nil, nil
 	default:
-		return nil, fmt.Errorf("unknown result type %q", resultType)
+		return nil, nil, fmt.Errorf("unknown result type %q", resultType)
 	}
 }
 
@@ -251,8 +253,9 @@ func decodeVector(iter *jsoniter.Iterator) []storage.Series {
 	return out
 }
 
-func decodeMatrix(iter *jsoniter.Iterator) []storage.Series {
+func decodeMatrix(iter *jsoniter.Iterator) ([]storage.Series, annotations.Annotations) {
 	var out []storage.Series
+	var anns annotations.Annotations
 	var b labels.ScratchBuilder
 	for iter.ReadArray() {
 		b.Reset()
@@ -283,9 +286,46 @@ func decodeMatrix(iter *jsoniter.Iterator) []storage.Series {
 			sort.SliceStable(samples, func(i, j int) bool { return samples[i].T() < samples[j].T() })
 		}
 		b.Sort()
-		out = append(out, NewSeries(b.Labels(), samples))
+		lbls := b.Labels()
+		if customBucketsDrift(samples) {
+			anns = anns.Add(newBucketLayoutDriftWarning(lbls.Get(labels.MetricName)))
+		}
+		out = append(out, NewSeries(lbls, samples))
 	}
-	return out
+	return out, anns
+}
+
+// customBucketsDrift reports whether the native-histogram samples of one series
+// disagree on their custom-bucket layout. The JSON API encodes a histogram as a
+// flat list of its non-empty buckets, so a bucket that is empty in one sample
+// takes the boundary it implied with it: the layout the decoder can rebuild
+// depends on which buckets happened to be populated. PromQL treats two
+// custom-bucket layouts as incompatible, so an aggregation over such a range
+// drops the series rather than returning a value for it.
+func customBucketsDrift(samples []chunks.Sample) bool {
+	var layout []float64
+	seen := false
+	for _, s := range samples {
+		fh := s.FH()
+		if fh == nil {
+			continue
+		}
+		if !seen {
+			layout, seen = fh.CustomValues, true
+			continue
+		}
+		if !slices.Equal(layout, fh.CustomValues) {
+			return true
+		}
+	}
+	return false
+}
+
+func newBucketLayoutDriftWarning(metricName string) error {
+	return fmt.Errorf("%w: native histogram bucket layout of metric %q differs between samples, "+
+		"because the JSON API omits empty buckets; results over this range may be incomplete "+
+		"(set remote_read on the server group to keep the original layout)",
+		annotations.PromQLWarning, metricName)
 }
 
 // readMetric reads a {"name":"value",...} object straight into the builder.

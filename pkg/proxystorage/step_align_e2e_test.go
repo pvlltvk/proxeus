@@ -2,6 +2,7 @@ package proxystorage
 
 import (
 	"context"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -113,10 +114,18 @@ func TestStepAlign_E2E_Pushdown(t *testing.T) {
 		}
 	}
 
-	// Control: same backend, NOT wrapped -> the bug (no data).
+	// Control: same backend, NOT wrapped. The engine honors the selector's
+	// LookbackDelta (a hair under one step), so each step still finds the
+	// off-grid sample it owns -- and only that one, since the sample a further
+	// step back falls outside the window. Issue #787 needed the re-stamp only
+	// while the engine ignored that field.
 	psRaw, engRaw := newProxyStorage(t, &stepAlignStub{})
-	if got := countPoints(runRange(t, psRaw, engRaw, "foo", startSec, endSec)); got != 0 {
-		t.Fatalf("control (no wrapper) expected 0 points (the bug), got %d", got)
+	raw := runRange(t, psRaw, engRaw, "foo", startSec, endSec)
+	if got := countPoints(raw); got != e2eN {
+		t.Fatalf("control (no wrapper): expected %d points, got %d", e2eN, got)
+	}
+	if !reflect.DeepEqual(raw, m) {
+		t.Fatalf("control (no wrapper) differs from the re-stamped result:\n got %v\nwant %v", raw, m)
 	}
 }
 
@@ -134,8 +143,12 @@ func TestStepAlign_E2E_Offset(t *testing.T) {
 	}
 
 	psRaw, engRaw := newProxyStorage(t, &stepAlignStub{})
-	if got := countPoints(runRange(t, psRaw, engRaw, "foo offset 1h", startSec, endSec)); got != 0 {
-		t.Fatalf("control (no wrapper) + offset expected 0 points, got %d", got)
+	raw := runRange(t, psRaw, engRaw, "foo offset 1h", startSec, endSec)
+	if got := countPoints(raw); got != e2eN {
+		t.Fatalf("control (no wrapper) + offset: expected %d points, got %d", e2eN, got)
+	}
+	if !reflect.DeepEqual(raw, m) {
+		t.Fatalf("control (no wrapper) + offset differs from the re-stamped result:\n got %v\nwant %v", raw, m)
 	}
 }
 
