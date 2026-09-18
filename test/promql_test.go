@@ -264,14 +264,6 @@ var excludedEvals = map[string][]string{
 		// downstream error ("expanding series: error in servergroup ord=0:
 		// ...") around it. Needs the fan-out to unwrap backend query errors.
 		`count_values("a\xc5z", version)`,
-		// The avg -> sum/count rewrite overflows to +/-Inf on values near
-		// MaxFloat64; upstream's avg keeps an incremental mean. Needs a
-		// rewrite that doesn't sum first. bigzero sums to 0 or -Inf
-		// depending on the order the fan-out returns the series in, so it
-		// also fails intermittently.
-		`avg(data{test="big"})`,
-		`avg(data{test="-big"})`,
-		`avg(data{test="bigzero"})`,
 	},
 }
 

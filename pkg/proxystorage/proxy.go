@@ -797,23 +797,26 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		var result storage.SeriesSet
 		var lossy bool
 
-		// Not all Aggregation functions are composable, so we'll do what we can
-		switch n.Op {
-		// All "reentrant" cases (meaning they can be done repeatedly and the outcome doesn't change)
-		case parser.SUM, parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK, parser.GROUP:
-			removeOffsetFn()
+		// queryAggregate sends the aggregation down as it stands and returns
+		// the per-server_group partials for the engine to re-combine.
+		queryAggregate := func() storage.SeriesSet {
+			_ = removeOffsetFn()
 
 			if s.Interval > 0 {
-				result = client.QueryRange(ctx, n.String(), v1.Range{
+				return client.QueryRange(ctx, n.String(), v1.Range{
 					Start: s.Start.Add(-reqOffset),
 					End:   s.End.Add(-reqOffset),
 					Step:  s.Interval,
 				})
-			} else {
-				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
 			}
+			return client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+		}
 
-			result, lossy = containsLossyHistogram(result)
+		// Not all Aggregation functions are composable, so we'll do what we can
+		switch n.Op {
+		// All "reentrant" cases (meaning they can be done repeatedly and the outcome doesn't change)
+		case parser.SUM, parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK, parser.GROUP:
+			result, lossy = containsLossyHistogram(queryAggregate())
 			if lossy {
 				reason = reasonLossyHistogram
 				return nil, nil
@@ -821,6 +824,19 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 		// Convert avg into sum() / count()
 		case parser.AVG:
+			// With a single server_group there are no partials to weigh
+			// against each other: the one backend sees the whole series set,
+			// so avg is reentrant and goes down as it stands. That keeps the
+			// backend's incremental mean, which -- unlike the sum() / count()
+			// rewrite below -- doesn't overflow on values near MaxFloat64.
+			if len(state.sgs) == 1 {
+				result, lossy = containsLossyHistogram(queryAggregate())
+				if lossy {
+					reason = reasonLossyHistogram
+					return nil, nil
+				}
+				break
+			}
 
 			nameIncluded := false
 			for _, g := range n.Grouping {
@@ -889,19 +905,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 		// For count we simply need to change this to a sum over the data we get back
 		case parser.COUNT:
-			removeOffsetFn()
-
-			if s.Interval > 0 {
-				result = client.QueryRange(ctx, n.String(), v1.Range{
-					Start: s.Start.Add(-reqOffset),
-					End:   s.End.Add(-reqOffset),
-					Step:  s.Interval,
-				})
-			} else {
-				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
-			}
-
-			result, lossy = containsLossyHistogram(result)
+			result, lossy = containsLossyHistogram(queryAggregate())
 			if lossy {
 				reason = reasonLossyHistogram
 				return nil, nil
@@ -920,20 +924,8 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 				return nil, nil
 			}
 
-			_ = removeOffsetFn()
-
 			// First we must fetch the data into a vectorselector
-			if s.Interval > 0 {
-				result = client.QueryRange(ctx, n.String(), v1.Range{
-					Start: s.Start.Add(-reqOffset),
-					End:   s.End.Add(-reqOffset),
-					Step:  s.Interval,
-				})
-			} else {
-				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
-			}
-
-			result, lossy = containsLossyHistogram(result)
+			result, lossy = containsLossyHistogram(queryAggregate())
 			if lossy {
 				reason = reasonLossyHistogram
 				return nil, nil
