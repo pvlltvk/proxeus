@@ -42,8 +42,15 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 
 > **Scope:** dedup applies to raw selector results. Pushed-down aggregations fan out per-group *partials* that the
 > engine re-combines, so those are unioned, never deduped. A series present in two groups appears once in `up`, but
-> contributes to both partials in `count(up)`. If exact aggregates over overlapping groups matter, keep the overlap out
-> of the groups.
+> contributes to both partials in `count(up)`.
+>
+> **Exact aggregates:** `cross_group_exact_aggregates: true` (requires `cross_group_dedup`) fixes that count. With more
+> than one `server_group` proxeus declines aggregation pushdown, so the engine computes the aggregation locally over
+> the deduplicated raw series and `count(up)` matches `up`. The decision is visible as
+> `proxeus_pushdown_nodes_total{result="fallback",reason="exact_aggregates"}`. The cost is the point of the trade: raw
+> series cross the network instead of a handful of per-group partials, which hurts most on wide ranges and high
+> cardinality. A single-`server_group` deployment is unaffected — one backend sees the whole series set, so there is
+> nothing to dedup.
 
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
 `cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,

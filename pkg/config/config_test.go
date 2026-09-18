@@ -170,3 +170,31 @@ func TestAuthConfigRedactsPasswordHashes(t *testing.T) {
 		t.Fatalf("rendered config does not mark the password as a secret:\n%s", rendered)
 	}
 }
+
+// The cross-group flags only affect the fan-out/dedup machinery, so each one
+// requires cross_group_dedup. cross_group_exact_aggregates especially: without
+// dedup the raw fan-out returns both groups' series and the locally computed
+// aggregate double-counts exactly as before.
+func TestProxeusConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     ProxeusConfig
+		wantErr bool
+	}{
+		{name: "nothing enabled", cfg: ProxeusConfig{}},
+		{name: "dedup alone", cfg: ProxeusConfig{CrossGroupDedup: true}},
+		{name: "exact_aggregates without dedup", cfg: ProxeusConfig{CrossGroupExactAggregates: true}, wantErr: true},
+		{name: "exact_aggregates with dedup", cfg: ProxeusConfig{CrossGroupDedup: true, CrossGroupExactAggregates: true}},
+		{name: "dedup_metadata without dedup", cfg: ProxeusConfig{CrossGroupDedupMetadata: true}, wantErr: true},
+		{name: "partial_response without dedup", cfg: ProxeusConfig{CrossGroupPartialResponse: true}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
