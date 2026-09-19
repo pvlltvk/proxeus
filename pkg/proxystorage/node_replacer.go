@@ -261,237 +261,8 @@ func (r *nodeReplacer) queryRangeAt(queryStr string) storage.SeriesSet {
 // subtree or declines the pushdown, recording r.reason.
 func (r *nodeReplacer) replace() (parser.Node, error) {
 	switch n := r.node.(type) {
-	// Some AggregateExprs can be composed (meaning they are "reentrant". If the aggregation op
-	// is reentrant/composable then we'll do so, otherwise we let it fall through to normal query mechanisms
 	case *parser.AggregateExpr:
-		// If the vector selector already has the data we can skip
-		if vs, ok := n.Expr.(*parser.VectorSelector); ok {
-			if vs.UnexpandedSeriesSet != nil {
-				r.revisit = true
-				return nil, nil
-			}
-		}
-
-		logrus.Debugf("AggregateExpr %v %s", n, n.Op)
-
-		// With cross_group_exact_aggregates the per-group partials are what
-		// makes the aggregate double-count series that live in more than one
-		// group: they are unioned, never deduped. Decline the pushdown so the
-		// engine aggregates locally over the deduped raw series. A single
-		// server_group sees the whole series set, so there is nothing to fix.
-		if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
-			r.reason = reasonExactAggregates
-			return nil, nil
-		}
-
-		// Mark the fan-out as an aggregation pushdown: each server_group
-		// returns an aggregate partial that the engine re-combines, so the
-		// cross-group merge must union the partials instead of deduping them
-		// (the aggregation may have collapsed the labels dedup keys on).
-		r.ctx = promclient.WithAggregatePushdown(r.ctx)
-
-		var result storage.SeriesSet
-		var lossy bool
-
-		// queryAggregate sends the aggregation down as it stands and returns
-		// the per-server_group partials for the engine to re-combine.
-		queryAggregate := func() storage.SeriesSet {
-			_ = r.removeOffset()
-
-			if r.s.Interval > 0 {
-				return r.client.QueryRange(r.ctx, n.String(), v1.Range{
-					Start: r.s.Start.Add(-r.reqOffset),
-					End:   r.s.End.Add(-r.reqOffset),
-					Step:  r.s.Interval,
-				})
-			}
-			return r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
-		}
-
-		// Not all Aggregation functions are composable, so we'll do what we can
-		switch n.Op {
-		// All "reentrant" cases (meaning they can be done repeatedly and the outcome doesn't change)
-		case parser.SUM, parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK, parser.GROUP:
-			result, lossy = containsLossyHistogram(queryAggregate())
-			if lossy {
-				r.reason = reasonLossyHistogram
-				return nil, nil
-			}
-
-		// Convert avg into sum() / count()
-		case parser.AVG:
-			// With a single server_group there are no partials to weigh
-			// against each other: the one backend sees the whole series set,
-			// so avg is reentrant and goes down as it stands. That keeps the
-			// backend's incremental mean, which -- unlike the sum() / count()
-			// rewrite below -- doesn't overflow on values near MaxFloat64.
-			if len(r.state.sgs) == 1 {
-				result, lossy = containsLossyHistogram(queryAggregate())
-				if lossy {
-					r.reason = reasonLossyHistogram
-					return nil, nil
-				}
-				break
-			}
-
-			nameIncluded := false
-			for _, g := range n.Grouping {
-				if g == model.MetricNameLabel {
-					nameIncluded = true
-				}
-			}
-
-			if nameIncluded {
-				replacedGrouping := make([]string, len(n.Grouping))
-				for i, g := range n.Grouping {
-					if g == model.MetricNameLabel {
-						replacedGrouping[i] = metricNameWorkaroundLabel
-					} else {
-						replacedGrouping[i] = g
-					}
-				}
-
-				return &parser.AggregateExpr{
-					Op: parser.MAX,
-					Expr: promclient.PreserveLabel(&parser.BinaryExpr{
-						Op: parser.DIV,
-						LHS: &parser.AggregateExpr{
-							Op:       parser.SUM,
-							Expr:     promclient.PreserveLabel(promclient.CloneExpr(n.Expr), model.MetricNameLabel, metricNameWorkaroundLabel),
-							Param:    n.Param,
-							Grouping: replacedGrouping,
-							Without:  n.Without,
-						},
-
-						RHS: &parser.AggregateExpr{
-							Op:       parser.COUNT,
-							Expr:     promclient.PreserveLabel(promclient.CloneExpr(n.Expr), model.MetricNameLabel, metricNameWorkaroundLabel),
-							Param:    n.Param,
-							Grouping: replacedGrouping,
-							Without:  n.Without,
-						},
-						VectorMatching: &parser.VectorMatching{Card: parser.CardOneToOne},
-					}, metricNameWorkaroundLabel, model.MetricNameLabel),
-					Grouping: n.Grouping,
-					Without:  n.Without,
-				}, nil
-
-			}
-
-			// Replace with sum() / count()
-			return &parser.BinaryExpr{
-				Op: parser.DIV,
-				LHS: &parser.AggregateExpr{
-					Op:       parser.SUM,
-					Expr:     promclient.CloneExpr(n.Expr),
-					Param:    n.Param,
-					Grouping: n.Grouping,
-					Without:  n.Without,
-				},
-
-				RHS: &parser.AggregateExpr{
-					Op:       parser.COUNT,
-					Expr:     promclient.CloneExpr(n.Expr),
-					Param:    n.Param,
-					Grouping: n.Grouping,
-					Without:  n.Without,
-				},
-				VectorMatching: &parser.VectorMatching{Card: parser.CardOneToOne},
-			}, nil
-
-		// For count we simply need to change this to a sum over the data we get back
-		case parser.COUNT:
-			result, lossy = containsLossyHistogram(queryAggregate())
-			if lossy {
-				r.reason = reasonLossyHistogram
-				return nil, nil
-			}
-			n.Op = parser.SUM
-
-			// To aggregate count_values we simply sum(count_values(key, metric)) by (key)
-		case parser.COUNT_VALUES:
-
-			// The value label is the aggregation's parameter; it may be
-			// parenthesized (count_values((("v")), metric)). Anything else
-			// isn't ours to rewrite.
-			valueLabel, ok := unwrapParens(n.Param).(*parser.StringLiteral)
-			if !ok {
-				r.reason = reasonNonLiteralParam
-				return nil, nil
-			}
-
-			// First we must fetch the data into a vectorselector
-			result, lossy = containsLossyHistogram(queryAggregate())
-			if lossy {
-				r.reason = reasonLossyHistogram
-				return nil, nil
-			}
-
-			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
-			if r.s.Interval > 0 {
-				ret.LookbackDelta = r.s.Interval - time.Duration(1)
-			}
-			ret.UnexpandedSeriesSet = result
-
-			// Replace with sum(count_values()) BY (label). With `by` the
-			// value label has to join the grouping or the sum would collapse
-			// the distinct values back together; with `without` the grouping
-			// is an exclusion list -- the downstream already dropped those
-			// labels, and adding the value label there would drop it too.
-			grouping := slices.Clone(n.Grouping)
-			if !n.Without {
-				grouping = append(grouping, valueLabel.Val)
-			}
-			return &parser.AggregateExpr{
-				Op:       parser.SUM,
-				Expr:     ret,
-				Grouping: grouping,
-				Without:  n.Without,
-			}, nil
-
-		case parser.QUANTILE:
-			// DO NOTHING
-			// this caltulates an actual quantile over the resulting data
-			// as such there is no way to reduce the load necessary here. If
-			// the query is something like quantile(sum(foo)) then the inner aggregation
-			// will reduce the required data
-			r.reason = reasonNonReentrantAgg
-
-		// Both of these cases require some mechanism of knowing what labels to do the aggregation on.
-		// WIthout that knowledge we require pulling all of the data in, so we do nothing
-		case parser.STDDEV:
-			// DO NOTHING
-			r.reason = reasonNonReentrantAgg
-		case parser.STDVAR:
-			// DO NOTHING
-			r.reason = reasonNonReentrantAgg
-
-		// limitk(k, expr) and limit_ratio(r, expr) are NOT reentrant: the
-		// engine picks k (or floor(r*N)) series by hash from the *full*
-		// input vector, so pushing the aggregation independently into N
-		// upstreams and unioning the results would pick a different,
-		// possibly inconsistent, subset than evaluating against the union
-		// directly. We let the engine evaluate locally over the raw matrix
-		// data fetched via Querier.Select so the hash-based selection sees
-		// the complete series set. (Listed here explicitly rather than
-		// relying on default fall-through so the non-reentrant decision is
-		// visible alongside the reentrant case list above.)
-		case parser.LIMITK, parser.LIMIT_RATIO:
-			// DO NOTHING
-			r.reason = reasonNonReentrantAgg
-
-		}
-
-		if result != nil {
-			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
-			if r.s.Interval > 0 {
-				ret.LookbackDelta = r.s.Interval - time.Duration(1)
-			}
-			ret.UnexpandedSeriesSet = result
-			n.Expr = ret
-
-			return n, nil
-		}
+		return r.replaceAggregate(n)
 
 	// Call is for things such as rate() etc. This can be sent directly to the
 	// prometheus node to answer
@@ -818,6 +589,240 @@ func (r *nodeReplacer) replace() (parser.Node, error) {
 
 	default:
 		logrus.Debugf("default %v %s", n, reflect.TypeOf(n))
+	}
+	return nil, nil
+}
+
+// Some AggregateExprs can be composed (meaning they are "reentrant". If the aggregation op
+// is reentrant/composable then we'll do so, otherwise we let it fall through to normal query mechanisms
+func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, error) {
+	// If the vector selector already has the data we can skip
+	if vs, ok := n.Expr.(*parser.VectorSelector); ok {
+		if vs.UnexpandedSeriesSet != nil {
+			r.revisit = true
+			return nil, nil
+		}
+	}
+
+	logrus.Debugf("AggregateExpr %v %s", n, n.Op)
+
+	// With cross_group_exact_aggregates the per-group partials are what
+	// makes the aggregate double-count series that live in more than one
+	// group: they are unioned, never deduped. Decline the pushdown so the
+	// engine aggregates locally over the deduped raw series. A single
+	// server_group sees the whole series set, so there is nothing to fix.
+	if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
+		r.reason = reasonExactAggregates
+		return nil, nil
+	}
+
+	// Mark the fan-out as an aggregation pushdown: each server_group
+	// returns an aggregate partial that the engine re-combines, so the
+	// cross-group merge must union the partials instead of deduping them
+	// (the aggregation may have collapsed the labels dedup keys on).
+	r.ctx = promclient.WithAggregatePushdown(r.ctx)
+
+	var result storage.SeriesSet
+	var lossy bool
+
+	// queryAggregate sends the aggregation down as it stands and returns
+	// the per-server_group partials for the engine to re-combine.
+	queryAggregate := func() storage.SeriesSet {
+		_ = r.removeOffset()
+
+		if r.s.Interval > 0 {
+			return r.client.QueryRange(r.ctx, n.String(), v1.Range{
+				Start: r.s.Start.Add(-r.reqOffset),
+				End:   r.s.End.Add(-r.reqOffset),
+				Step:  r.s.Interval,
+			})
+		}
+		return r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
+	}
+
+	// Not all Aggregation functions are composable, so we'll do what we can
+	switch n.Op {
+	// All "reentrant" cases (meaning they can be done repeatedly and the outcome doesn't change)
+	case parser.SUM, parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK, parser.GROUP:
+		result, lossy = containsLossyHistogram(queryAggregate())
+		if lossy {
+			r.reason = reasonLossyHistogram
+			return nil, nil
+		}
+
+	// Convert avg into sum() / count()
+	case parser.AVG:
+		// With a single server_group there are no partials to weigh
+		// against each other: the one backend sees the whole series set,
+		// so avg is reentrant and goes down as it stands. That keeps the
+		// backend's incremental mean, which -- unlike the sum() / count()
+		// rewrite below -- doesn't overflow on values near MaxFloat64.
+		if len(r.state.sgs) == 1 {
+			result, lossy = containsLossyHistogram(queryAggregate())
+			if lossy {
+				r.reason = reasonLossyHistogram
+				return nil, nil
+			}
+			break
+		}
+
+		nameIncluded := false
+		for _, g := range n.Grouping {
+			if g == model.MetricNameLabel {
+				nameIncluded = true
+			}
+		}
+
+		if nameIncluded {
+			replacedGrouping := make([]string, len(n.Grouping))
+			for i, g := range n.Grouping {
+				if g == model.MetricNameLabel {
+					replacedGrouping[i] = metricNameWorkaroundLabel
+				} else {
+					replacedGrouping[i] = g
+				}
+			}
+
+			return &parser.AggregateExpr{
+				Op: parser.MAX,
+				Expr: promclient.PreserveLabel(&parser.BinaryExpr{
+					Op: parser.DIV,
+					LHS: &parser.AggregateExpr{
+						Op:       parser.SUM,
+						Expr:     promclient.PreserveLabel(promclient.CloneExpr(n.Expr), model.MetricNameLabel, metricNameWorkaroundLabel),
+						Param:    n.Param,
+						Grouping: replacedGrouping,
+						Without:  n.Without,
+					},
+
+					RHS: &parser.AggregateExpr{
+						Op:       parser.COUNT,
+						Expr:     promclient.PreserveLabel(promclient.CloneExpr(n.Expr), model.MetricNameLabel, metricNameWorkaroundLabel),
+						Param:    n.Param,
+						Grouping: replacedGrouping,
+						Without:  n.Without,
+					},
+					VectorMatching: &parser.VectorMatching{Card: parser.CardOneToOne},
+				}, metricNameWorkaroundLabel, model.MetricNameLabel),
+				Grouping: n.Grouping,
+				Without:  n.Without,
+			}, nil
+
+		}
+
+		// Replace with sum() / count()
+		return &parser.BinaryExpr{
+			Op: parser.DIV,
+			LHS: &parser.AggregateExpr{
+				Op:       parser.SUM,
+				Expr:     promclient.CloneExpr(n.Expr),
+				Param:    n.Param,
+				Grouping: n.Grouping,
+				Without:  n.Without,
+			},
+
+			RHS: &parser.AggregateExpr{
+				Op:       parser.COUNT,
+				Expr:     promclient.CloneExpr(n.Expr),
+				Param:    n.Param,
+				Grouping: n.Grouping,
+				Without:  n.Without,
+			},
+			VectorMatching: &parser.VectorMatching{Card: parser.CardOneToOne},
+		}, nil
+
+	// For count we simply need to change this to a sum over the data we get back
+	case parser.COUNT:
+		result, lossy = containsLossyHistogram(queryAggregate())
+		if lossy {
+			r.reason = reasonLossyHistogram
+			return nil, nil
+		}
+		n.Op = parser.SUM
+
+		// To aggregate count_values we simply sum(count_values(key, metric)) by (key)
+	case parser.COUNT_VALUES:
+
+		// The value label is the aggregation's parameter; it may be
+		// parenthesized (count_values((("v")), metric)). Anything else
+		// isn't ours to rewrite.
+		valueLabel, ok := unwrapParens(n.Param).(*parser.StringLiteral)
+		if !ok {
+			r.reason = reasonNonLiteralParam
+			return nil, nil
+		}
+
+		// First we must fetch the data into a vectorselector
+		result, lossy = containsLossyHistogram(queryAggregate())
+		if lossy {
+			r.reason = reasonLossyHistogram
+			return nil, nil
+		}
+
+		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+		if r.s.Interval > 0 {
+			ret.LookbackDelta = r.s.Interval - time.Duration(1)
+		}
+		ret.UnexpandedSeriesSet = result
+
+		// Replace with sum(count_values()) BY (label). With `by` the
+		// value label has to join the grouping or the sum would collapse
+		// the distinct values back together; with `without` the grouping
+		// is an exclusion list -- the downstream already dropped those
+		// labels, and adding the value label there would drop it too.
+		grouping := slices.Clone(n.Grouping)
+		if !n.Without {
+			grouping = append(grouping, valueLabel.Val)
+		}
+		return &parser.AggregateExpr{
+			Op:       parser.SUM,
+			Expr:     ret,
+			Grouping: grouping,
+			Without:  n.Without,
+		}, nil
+
+	case parser.QUANTILE:
+		// DO NOTHING
+		// this caltulates an actual quantile over the resulting data
+		// as such there is no way to reduce the load necessary here. If
+		// the query is something like quantile(sum(foo)) then the inner aggregation
+		// will reduce the required data
+		r.reason = reasonNonReentrantAgg
+
+	// Both of these cases require some mechanism of knowing what labels to do the aggregation on.
+	// WIthout that knowledge we require pulling all of the data in, so we do nothing
+	case parser.STDDEV:
+		// DO NOTHING
+		r.reason = reasonNonReentrantAgg
+	case parser.STDVAR:
+		// DO NOTHING
+		r.reason = reasonNonReentrantAgg
+
+	// limitk(k, expr) and limit_ratio(r, expr) are NOT reentrant: the
+	// engine picks k (or floor(r*N)) series by hash from the *full*
+	// input vector, so pushing the aggregation independently into N
+	// upstreams and unioning the results would pick a different,
+	// possibly inconsistent, subset than evaluating against the union
+	// directly. We let the engine evaluate locally over the raw matrix
+	// data fetched via Querier.Select so the hash-based selection sees
+	// the complete series set. (Listed here explicitly rather than
+	// relying on default fall-through so the non-reentrant decision is
+	// visible alongside the reentrant case list above.)
+	case parser.LIMITK, parser.LIMIT_RATIO:
+		// DO NOTHING
+		r.reason = reasonNonReentrantAgg
+
+	}
+
+	if result != nil {
+		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+		if r.s.Interval > 0 {
+			ret.LookbackDelta = r.s.Interval - time.Duration(1)
+		}
+		ret.UnexpandedSeriesSet = result
+		n.Expr = ret
+
+		return n, nil
 	}
 	return nil, nil
 }
