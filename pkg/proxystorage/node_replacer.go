@@ -31,30 +31,75 @@ import (
 //   - offsets within the subtree must match: if they don't then we'll get mismatched data, so we wait until we are far enough down the tree that they converge
 //   - Don't reduce accuracy/granularity: the intention of this is to get the correct data faster, meaning correctness overrules speed.
 func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, node parser.Node, path []parser.Node) (retNode parser.Node, retErr error) {
+	r := &nodeReplacer{
+		p:      p,
+		ctx:    ctx,
+		s:      s,
+		node:   node,
+		path:   path,
+		reason: reasonUnsupported,
+	}
+
 	// Record the pushdown decision for this node (see pushdownNodes). Each
 	// bail-out below sets reason; the initial value covers the branches with
 	// nothing better to ask the backends for. revisit is set where we're
 	// handed a node we already replaced -- parser.Walk descends into the
 	// replacement, and those visits aren't decisions.
-	reason := reasonUnsupported
-	revisit := false
 	if kind := pushdownNodeKind(node); kind != "" {
 		defer func() {
 			switch {
-			case retErr != nil || revisit:
+			case retErr != nil || r.revisit:
 			case retNode != nil:
 				pushdownNodes.WithLabelValues(kind, resultPushed, "").Inc()
 			default:
-				pushdownNodes.WithLabelValues(kind, resultFallback, reason).Inc()
+				pushdownNodes.WithLabelValues(kind, resultFallback, r.reason).Inc()
 			}
 		}()
 	}
 
+	stop, err := r.prepare()
+	if err != nil || stop {
+		return nil, err
+	}
+
+	return r.replace()
+}
+
+// nodeReplacer is the per-call state of one NodeReplacer visit: the node under
+// consideration, what the walk of its subtree found out, and the pushdown
+// decision. reason is mutable because the deferred recorder in NodeReplacer
+// reports whatever the guards or the switch arm below last set.
+type nodeReplacer struct {
+	p    *ProxyStorage
+	ctx  context.Context
+	s    *parser.EvalStmt
+	node parser.Node
+	path []parser.Node
+
+	state  *proxyStorageState
+	client pushdownAPI
+
+	offset       time.Duration
+	reqOffset    time.Duration
+	synthOffset  time.Duration
+	subtreeHasAt bool
+
+	atTimestampFinder *promclient.TimestampFinder
+	atUnsafeFinder    *promclient.BooleanFinder
+
+	reason  string
+	revisit bool
+}
+
+// prepare walks the subtree below node and applies the pushdown guards, in
+// order. It returns stop=true when the node must not be replaced, with
+// r.reason set to why; otherwise it fills in the state the switch arms read.
+func (r *nodeReplacer) prepare() (bool, error) {
 	// If we are a child of a subquery; we just skip replacement (since it already did a nodereplacer for those)
-	for _, n := range path {
+	for _, n := range r.path {
 		if isSubQuery(n) {
-			reason = reasonSubqueryChild
-			return nil, nil
+			r.reason = reasonSubqueryChild
+			return true, nil
 		}
 	}
 
@@ -67,22 +112,22 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	// atTimestampFinder records the @ timestamp itself (in ms) so we can
 	// issue an instant query at a guaranteed-safe time when pushing down
 	// step-invariant subtrees — see queryRangeAt.
-	atTimestampFinder := &promclient.TimestampFinder{}
+	r.atTimestampFinder = &promclient.TimestampFinder{}
 	// atUnsafeFinder counts Call nodes whose result depends on the
 	// evaluation timestamp regardless of any inner @; if any are present
 	// queryRangeAt cannot use the instant-query optimization.
-	atUnsafeFinder := &promclient.BooleanFinder{Func: isAtModifierUnsafeCall}
+	r.atUnsafeFinder = &promclient.BooleanFinder{Func: isAtModifierUnsafeCall}
 	// histFinder rides along on the same tree walk to detect histogram-
 	// bearing subtrees: histogram-only function calls (always) plus
 	// VectorSelectors whose metric name is histogram-typed per the
 	// per-server-group metadata cache (when native_histogram.metadata_refresh
 	// is configured).
-	histFinder := &histogramFinder{isHistogramName: p.histogramNamePredicate()}
+	histFinder := &histogramFinder{isHistogramName: r.p.histogramNamePredicate()}
 
-	visitor := promclient.NewMultiVisitor([]parser.Visitor{aggFinder, offsetFinder, vecFinder, timestampFinder, atTimestampFinder, atUnsafeFinder, histFinder})
+	visitor := promclient.NewMultiVisitor([]parser.Visitor{aggFinder, offsetFinder, vecFinder, timestampFinder, r.atTimestampFinder, r.atUnsafeFinder, histFinder})
 
-	if _, err := parser.Walk(ctx, visitor, s, node, nil, nil); err != nil {
-		return nil, err
+	if _, err := parser.Walk(r.ctx, visitor, r.s, r.node, nil, nil); err != nil {
+		return false, err
 	}
 
 	// Histogram-bearing queries lose schema fidelity over the HTTP API
@@ -98,35 +143,32 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	// Ancestor-path inheritance: parser.Walk descends into children even
 	// when NodeReplacer returns nil for the parent, so a histogram-only
 	// call above us still propagates the histogram signal.
-	if pathHasHistogramOnlyCall(path) || histFinder.found.Load() {
-		if missing := p.strictMissingRemoteRead(); len(missing) > 0 {
-			return nil, histogramFidelityError(missing)
+	if pathHasHistogramOnlyCall(r.path) || histFinder.found.Load() {
+		if missing := r.p.strictMissingRemoteRead(); len(missing) > 0 {
+			return false, histogramFidelityError(missing)
 		}
-		reason = reasonHistogram
-		return nil, nil
+		r.reason = reasonHistogram
+		return true, nil
 	}
 
 	if aggFinder.Found > 0 {
-
 		switch {
 		// // If there was a single agg and that was us, then we're okay
-		case (isAgg(node) || isBinaryExpr(node)) && aggFinder.Found == 1:
-			break
+		case (isAgg(r.node) || isBinaryExpr(r.node)) && aggFinder.Found == 1:
 		// If the aggregations are in a SubQuery; we can allow Subquery to run through NodeReplacerZz
-		case isSubQuery(node):
-			break
+		case isSubQuery(r.node):
 		default:
-			reason = reasonNestedAggregate
-			return nil, nil
+			r.reason = reasonNestedAggregate
+			return true, nil
 		}
 	}
 
 	// If there is more than 1 vector selector here and we are not a subquery
 	// we can't combine as we don't know if those 2 selectors will for-sure
 	// land on the same node
-	if vecFinder.Found > 1 && !isSubQuery(node) {
-		reason = reasonMultiVectorSelector
-		return nil, nil
+	if vecFinder.Found > 1 && !isSubQuery(r.node) {
+		r.reason = reasonMultiVectorSelector
+		return true, nil
 	}
 
 	// subtreeHasAt is true when at least one VectorSelector in this subtree has
@@ -134,93 +176,98 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	// downstream request window: the downstream resolves `@ T offset O` into
 	// sample[T-O] internally, so any rewrite that removes the offset or moves
 	// the request range silently changes the lookup time.
-	subtreeHasAt := timestampFinder.Found > 0
+	r.subtreeHasAt = timestampFinder.Found > 0
 
 	// If the tree below us is not all the same offset, then we can't do anything below -- we'll need
 	// to wait until further in execution where they all match
-	var offset time.Duration
-
+	//
 	// If we couldn't find an offset, then something is wrong-- lets skip
 	// Also if there was an error, skip
 	if !offsetFinder.Found || offsetFinder.Error != nil {
-		reason = reasonOffsetMismatch
-		return nil, nil
+		r.reason = reasonOffsetMismatch
+		return true, nil
 	}
-	offset = offsetFinder.Offset
+	r.offset = offsetFinder.Offset
 
 	// reqOffset is the time-shift applied to downstream request times so that
 	// the engine, after restoring offsets on the synthesized VectorSelector,
 	// looks up samples at the right timestamps. When the subtree has @, the
 	// downstream already resolves @+offset, so we don't shift and the
 	// synthesized node has no offset to re-apply.
-	reqOffset := offset
-	synthOffset := offset
-	if subtreeHasAt {
-		reqOffset = 0
-		synthOffset = 0
+	r.reqOffset = r.offset
+	r.synthOffset = r.offset
+	if r.subtreeHasAt {
+		r.reqOffset = 0
+		r.synthOffset = 0
 	}
 
-	// Function to recursivelt remove offset. This is needed as we're using
-	// the node API to String() the query to downstreams. Promql's iterators require
-	// that the time be the absolute time, whereas the API returns them based on the
-	// range you ask for (with the offset being implicit).
-	//
-	// When the subtree has an @ modifier we keep offsets in the string: see
-	// subtreeHasAt comment above.
-	removeOffsetFn := func() error {
-		if subtreeHasAt {
-			return nil
-		}
-		_, err := parser.Walk(ctx, &promclient.OffsetRemover{}, s, node, nil, nil)
-		return err
-	}
-
-	state := p.GetState()
+	r.state = r.p.GetState()
 	// pushdownAPI counts the series/samples the pushdown fetches below pull
-	// from the backends; every downstream request in this function goes
-	// through it.
-	client := pushdownAPI{state.client}
+	// from the backends; every downstream request in the switch arms below
+	// goes through it.
+	r.client = pushdownAPI{r.state.client}
 
-	// queryRangeAt issues a step-aware downstream request for queryStr. When
-	// the subtree below us pins evaluation to a single timestamp via @, the
-	// result at every step is identical (step-invariant); in that case we
-	// issue a single instant Query at the @ timestamp and replicate the
-	// returned vector across each step in [s.Start, s.End]. This avoids
-	// sending QueryRange with a pre-epoch sub-second start time, which the
-	// upstream prometheus/common model.Time.UnmarshalJSON mis-decodes on
-	// the way back (see api_query.go hasNegativeFractionalSecond). When the
-	// subtree has no @, or it contains a Call whose result depends on the
-	// evaluation timestamp even with @ pinning (timestamp, predict_linear,
-	// time, etc. — see promql.AtModifierUnsafeFunctions), falls back to the
-	// regular QueryRange.
-	queryRangeAt := func(queryStr string) storage.SeriesSet {
-		if subtreeHasAt && atTimestampFinder.Found && atUnsafeFinder.Found == 0 && s.Interval > 0 {
-			at := timestamp.Time(atTimestampFinder.Timestamp)
-			result := client.Query(ctx, queryStr, at)
-			if err := result.Err(); err != nil {
-				return result
-			}
-			// The instant query returns one sample per series at the @ time;
-			// replicate each across the request's step grid. (Every series in
-			// a SeriesSet is vector-shaped here — there is no Scalar/Matrix/
-			// String ambiguity left at this layer.)
-			return vectorToStepMatrix(result, s.Start.Add(-reqOffset), s.End.Add(-reqOffset), s.Interval)
-		}
-		return client.QueryRange(ctx, queryStr, v1.Range{
-			Start: s.Start.Add(-reqOffset),
-			End:   s.End.Add(-reqOffset),
-			Step:  s.Interval,
-		})
+	return false, nil
+}
+
+// Function to recursivelt remove offset. This is needed as we're using
+// the node API to String() the query to downstreams. Promql's iterators require
+// that the time be the absolute time, whereas the API returns them based on the
+// range you ask for (with the offset being implicit).
+//
+// When the subtree has an @ modifier we keep offsets in the string: see
+// subtreeHasAt comment above.
+func (r *nodeReplacer) removeOffset() error {
+	if r.subtreeHasAt {
+		return nil
 	}
+	_, err := parser.Walk(r.ctx, &promclient.OffsetRemover{}, r.s, r.node, nil, nil)
+	return err
+}
 
-	switch n := node.(type) {
+// queryRangeAt issues a step-aware downstream request for queryStr. When
+// the subtree below us pins evaluation to a single timestamp via @, the
+// result at every step is identical (step-invariant); in that case we
+// issue a single instant Query at the @ timestamp and replicate the
+// returned vector across each step in [s.Start, s.End]. This avoids
+// sending QueryRange with a pre-epoch sub-second start time, which the
+// upstream prometheus/common model.Time.UnmarshalJSON mis-decodes on
+// the way back (see api_query.go hasNegativeFractionalSecond). When the
+// subtree has no @, or it contains a Call whose result depends on the
+// evaluation timestamp even with @ pinning (timestamp, predict_linear,
+// time, etc. — see promql.AtModifierUnsafeFunctions), falls back to the
+// regular QueryRange.
+func (r *nodeReplacer) queryRangeAt(queryStr string) storage.SeriesSet {
+	if r.subtreeHasAt && r.atTimestampFinder.Found && r.atUnsafeFinder.Found == 0 && r.s.Interval > 0 {
+		at := timestamp.Time(r.atTimestampFinder.Timestamp)
+		result := r.client.Query(r.ctx, queryStr, at)
+		if err := result.Err(); err != nil {
+			return result
+		}
+		// The instant query returns one sample per series at the @ time;
+		// replicate each across the request's step grid. (Every series in
+		// a SeriesSet is vector-shaped here — there is no Scalar/Matrix/
+		// String ambiguity left at this layer.)
+		return vectorToStepMatrix(result, r.s.Start.Add(-r.reqOffset), r.s.End.Add(-r.reqOffset), r.s.Interval)
+	}
+	return r.client.QueryRange(r.ctx, queryStr, v1.Range{
+		Start: r.s.Start.Add(-r.reqOffset),
+		End:   r.s.End.Add(-r.reqOffset),
+		Step:  r.s.Interval,
+	})
+}
+
+// replace dispatches on the node type: each arm either returns the replacement
+// subtree or declines the pushdown, recording r.reason.
+func (r *nodeReplacer) replace() (parser.Node, error) {
+	switch n := r.node.(type) {
 	// Some AggregateExprs can be composed (meaning they are "reentrant". If the aggregation op
 	// is reentrant/composable then we'll do so, otherwise we let it fall through to normal query mechanisms
 	case *parser.AggregateExpr:
 		// If the vector selector already has the data we can skip
 		if vs, ok := n.Expr.(*parser.VectorSelector); ok {
 			if vs.UnexpandedSeriesSet != nil {
-				revisit = true
+				r.revisit = true
 				return nil, nil
 			}
 		}
@@ -232,8 +279,8 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// group: they are unioned, never deduped. Decline the pushdown so the
 		// engine aggregates locally over the deduped raw series. A single
 		// server_group sees the whole series set, so there is nothing to fix.
-		if state.cfg.CrossGroupExactAggregates && len(state.sgs) > 1 {
-			reason = reasonExactAggregates
+		if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
+			r.reason = reasonExactAggregates
 			return nil, nil
 		}
 
@@ -241,7 +288,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// returns an aggregate partial that the engine re-combines, so the
 		// cross-group merge must union the partials instead of deduping them
 		// (the aggregation may have collapsed the labels dedup keys on).
-		ctx = promclient.WithAggregatePushdown(ctx)
+		r.ctx = promclient.WithAggregatePushdown(r.ctx)
 
 		var result storage.SeriesSet
 		var lossy bool
@@ -249,16 +296,16 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// queryAggregate sends the aggregation down as it stands and returns
 		// the per-server_group partials for the engine to re-combine.
 		queryAggregate := func() storage.SeriesSet {
-			_ = removeOffsetFn()
+			_ = r.removeOffset()
 
-			if s.Interval > 0 {
-				return client.QueryRange(ctx, n.String(), v1.Range{
-					Start: s.Start.Add(-reqOffset),
-					End:   s.End.Add(-reqOffset),
-					Step:  s.Interval,
+			if r.s.Interval > 0 {
+				return r.client.QueryRange(r.ctx, n.String(), v1.Range{
+					Start: r.s.Start.Add(-r.reqOffset),
+					End:   r.s.End.Add(-r.reqOffset),
+					Step:  r.s.Interval,
 				})
 			}
-			return client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+			return r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
 		}
 
 		// Not all Aggregation functions are composable, so we'll do what we can
@@ -267,7 +314,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		case parser.SUM, parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK, parser.GROUP:
 			result, lossy = containsLossyHistogram(queryAggregate())
 			if lossy {
-				reason = reasonLossyHistogram
+				r.reason = reasonLossyHistogram
 				return nil, nil
 			}
 
@@ -278,10 +325,10 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// so avg is reentrant and goes down as it stands. That keeps the
 			// backend's incremental mean, which -- unlike the sum() / count()
 			// rewrite below -- doesn't overflow on values near MaxFloat64.
-			if len(state.sgs) == 1 {
+			if len(r.state.sgs) == 1 {
 				result, lossy = containsLossyHistogram(queryAggregate())
 				if lossy {
-					reason = reasonLossyHistogram
+					r.reason = reasonLossyHistogram
 					return nil, nil
 				}
 				break
@@ -356,7 +403,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		case parser.COUNT:
 			result, lossy = containsLossyHistogram(queryAggregate())
 			if lossy {
-				reason = reasonLossyHistogram
+				r.reason = reasonLossyHistogram
 				return nil, nil
 			}
 			n.Op = parser.SUM
@@ -369,20 +416,20 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// isn't ours to rewrite.
 			valueLabel, ok := unwrapParens(n.Param).(*parser.StringLiteral)
 			if !ok {
-				reason = reasonNonLiteralParam
+				r.reason = reasonNonLiteralParam
 				return nil, nil
 			}
 
 			// First we must fetch the data into a vectorselector
 			result, lossy = containsLossyHistogram(queryAggregate())
 			if lossy {
-				reason = reasonLossyHistogram
+				r.reason = reasonLossyHistogram
 				return nil, nil
 			}
 
-			ret := &parser.VectorSelector{OriginalOffset: synthOffset}
-			if s.Interval > 0 {
-				ret.LookbackDelta = s.Interval - time.Duration(1)
+			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+			if r.s.Interval > 0 {
+				ret.LookbackDelta = r.s.Interval - time.Duration(1)
 			}
 			ret.UnexpandedSeriesSet = result
 
@@ -408,16 +455,16 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// as such there is no way to reduce the load necessary here. If
 			// the query is something like quantile(sum(foo)) then the inner aggregation
 			// will reduce the required data
-			reason = reasonNonReentrantAgg
+			r.reason = reasonNonReentrantAgg
 
 		// Both of these cases require some mechanism of knowing what labels to do the aggregation on.
 		// WIthout that knowledge we require pulling all of the data in, so we do nothing
 		case parser.STDDEV:
 			// DO NOTHING
-			reason = reasonNonReentrantAgg
+			r.reason = reasonNonReentrantAgg
 		case parser.STDVAR:
 			// DO NOTHING
-			reason = reasonNonReentrantAgg
+			r.reason = reasonNonReentrantAgg
 
 		// limitk(k, expr) and limit_ratio(r, expr) are NOT reentrant: the
 		// engine picks k (or floor(r*N)) series by hash from the *full*
@@ -431,14 +478,14 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// visible alongside the reentrant case list above.)
 		case parser.LIMITK, parser.LIMIT_RATIO:
 			// DO NOTHING
-			reason = reasonNonReentrantAgg
+			r.reason = reasonNonReentrantAgg
 
 		}
 
 		if result != nil {
-			ret := &parser.VectorSelector{OriginalOffset: synthOffset}
-			if s.Interval > 0 {
-				ret.LookbackDelta = s.Interval - time.Duration(1)
+			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+			if r.s.Interval > 0 {
+				ret.LookbackDelta = r.s.Interval - time.Duration(1)
 			}
 			ret.UnexpandedSeriesSet = result
 			n.Expr = ret
@@ -466,23 +513,23 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		switch n.Func.Name {
 		case "absent", "absent_over_time",
 			"label_join", "label_replace", "info":
-			reason = reasonUnsupportedFunc
+			r.reason = reasonUnsupportedFunc
 			return nil, nil
 		}
 
 		// For all the Call's we actually will work on, we need to remove the offset
-		removeOffsetFn()
+		_ = r.removeOffset()
 
 		var result storage.SeriesSet
-		if s.Interval > 0 {
-			result = queryRangeAt(n.String())
+		if r.s.Interval > 0 {
+			result = r.queryRangeAt(n.String())
 		} else {
-			result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+			result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
 		}
 
 		result, lossy := containsLossyHistogram(result)
 		if lossy {
-			reason = reasonLossyHistogram
+			r.reason = reasonLossyHistogram
 			return nil, nil
 		}
 
@@ -493,15 +540,15 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// sample from a sparse range output (e.g. present_over_time returning
 		// 1 at one step only) otherwise bleeds forward into every later step
 		// within the lookback window.
-		if s.Interval > 0 {
-			startMs := timestamp.FromTime(s.Start.Add(-reqOffset))
-			endMs := timestamp.FromTime(s.End.Add(-reqOffset))
-			result = fillStaleNaNGaps(result, startMs, endMs, int64(s.Interval/time.Millisecond))
+		if r.s.Interval > 0 {
+			startMs := timestamp.FromTime(r.s.Start.Add(-r.reqOffset))
+			endMs := timestamp.FromTime(r.s.End.Add(-r.reqOffset))
+			result = fillStaleNaNGaps(result, startMs, endMs, int64(r.s.Interval/time.Millisecond))
 		}
 
-		ret := &parser.VectorSelector{OriginalOffset: synthOffset}
-		if s.Interval > 0 {
-			ret.LookbackDelta = s.Interval - time.Duration(1)
+		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+		if r.s.Interval > 0 {
+			ret.LookbackDelta = r.s.Interval - time.Duration(1)
 		}
 		ret.UnexpandedSeriesSet = result
 
@@ -528,34 +575,34 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	case *parser.VectorSelector:
 		// If the vector selector already has the data we can skip
 		if n.UnexpandedSeriesSet != nil {
-			revisit = true
+			r.revisit = true
 			return nil, nil
 		}
 
 		// Check if this VectorSelector is below a MatrixSelector.
 		// If we hit this someone is asking for a matrix directly, if so then we don't
 		// have anyway to ask for less-- since this is exactly what they are asking for
-		if len(path) > 0 {
-			if _, ok := path[len(path)-1].(*parser.MatrixSelector); ok {
-				reason = reasonMatrixParent
+		if len(r.path) > 0 {
+			if _, ok := r.path[len(r.path)-1].(*parser.MatrixSelector); ok {
+				r.reason = reasonMatrixParent
 				return nil, nil
 			}
 		}
 
 		logrus.Debugf("VectorSelector: %v", n)
-		removeOffsetFn()
+		_ = r.removeOffset()
 
 		var result storage.SeriesSet
 		origLookback := n.LookbackDelta
-		if s.Interval > 0 {
-			n.LookbackDelta = s.Interval - time.Duration(1)
-			result = client.QueryRange(ctx, n.String(), v1.Range{
-				Start: s.Start.Add(-reqOffset),
-				End:   s.End.Add(-reqOffset),
-				Step:  s.Interval,
+		if r.s.Interval > 0 {
+			n.LookbackDelta = r.s.Interval - time.Duration(1)
+			result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
+				Start: r.s.Start.Add(-r.reqOffset),
+				End:   r.s.End.Add(-r.reqOffset),
+				Step:  r.s.Interval,
 			})
 		} else {
-			result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+			result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
 		}
 
 		if err := result.Err(); err != nil {
@@ -569,7 +616,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			// window we set above (which would otherwise drop boundary
 			// samples like a load at t=0 with a range query starting at 0).
 			n.LookbackDelta = origLookback
-			reason = reasonLossyHistogram
+			r.reason = reasonLossyHistogram
 			return nil, nil
 		}
 
@@ -590,15 +637,15 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			ret := &parser.VectorSelector{
 				Name:           n.Name,
 				LabelMatchers:  n.LabelMatchers,
-				OriginalOffset: synthOffset,
+				OriginalOffset: r.synthOffset,
 			}
-			if s.Interval > 0 {
-				ret.LookbackDelta = s.Interval - time.Duration(1)
+			if r.s.Interval > 0 {
+				ret.LookbackDelta = r.s.Interval - time.Duration(1)
 			}
 			ret.UnexpandedSeriesSet = result
 			return ret, nil
 		}
-		n.OriginalOffset = offset
+		n.OriginalOffset = r.offset
 		n.UnexpandedSeriesSet = result
 		return n, nil
 
@@ -613,7 +660,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 	case *parser.SubqueryExpr:
 		logrus.Debugf("SubqueryExpr: %v", n)
 
-		subEvalStmt := *s
+		subEvalStmt := *r.s
 		subEvalStmt.Expr = n.Expr
 
 		// If the subquery has an @ modifier its evaluation is pinned to that
@@ -622,12 +669,12 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		if n.Timestamp != nil {
 			subEnd = timestamp.Time(*n.Timestamp).Add(-n.Offset)
 		} else {
-			subEnd = s.End.Add(-n.Offset)
+			subEnd = r.s.End.Add(-n.Offset)
 		}
 		subEvalStmt.End = subEnd
 
 		if n.Step == 0 {
-			subEvalStmt.Interval = time.Duration(p.NoStepSubqueryIntervalFn(durationMilliseconds(n.Range))) * time.Millisecond
+			subEvalStmt.Interval = time.Duration(r.p.NoStepSubqueryIntervalFn(durationMilliseconds(n.Range))) * time.Millisecond
 		} else {
 			subEvalStmt.Interval = n.Step
 		}
@@ -636,14 +683,14 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		if n.Timestamp != nil {
 			subStart = subEnd.Add(-n.Range)
 		} else {
-			subStart = s.Start.Add(-n.Offset).Add(-n.Range)
+			subStart = r.s.Start.Add(-n.Offset).Add(-n.Range)
 		}
 		subEvalStmt.Start = subStart.Truncate(subEvalStmt.Interval)
 		if subEvalStmt.Start.Before(subStart) {
 			subEvalStmt.Start = subEvalStmt.Start.Add(subEvalStmt.Interval)
 		}
 
-		newN, err := parser.Inspect(ctx, &subEvalStmt, func(parser.Node, []parser.Node) error { return nil }, p.NodeReplacer)
+		newN, err := parser.Inspect(r.ctx, &subEvalStmt, func(parser.Node, []parser.Node) error { return nil }, r.p.NodeReplacer)
 		if err != nil {
 			return nil, err
 		}
@@ -652,7 +699,7 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			n.Expr = newN.(parser.Expr)
 			return n, nil
 		}
-		reason = reasonNoInnerPushdown
+		r.reason = reasonNoInnerPushdown
 
 	// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS
 	// these are relatively rare -- as things like `sum(foo) > 2` would *not* be viable as `sum(foo)` could
@@ -666,18 +713,18 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// vectorBinaryExpr will send the node as a query to the downstream and return an expanded VectorSelector
 		vectorBinaryExpr := func(vs *parser.VectorSelector) (parser.Node, error) {
 			logrus.Debugf("BinaryExpr (VectorSelector + Literal): %v", n)
-			removeOffsetFn()
+			_ = r.removeOffset()
 
 			var result storage.SeriesSet
-			if s.Interval > 0 {
-				vs.LookbackDelta = s.Interval - time.Duration(1)
-				result = client.QueryRange(ctx, n.String(), v1.Range{
-					Start: s.Start.Add(-reqOffset),
-					End:   s.End.Add(-reqOffset),
-					Step:  s.Interval,
+			if r.s.Interval > 0 {
+				vs.LookbackDelta = r.s.Interval - time.Duration(1)
+				result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
+					Start: r.s.Start.Add(-r.reqOffset),
+					End:   r.s.End.Add(-r.reqOffset),
+					Step:  r.s.Interval,
 				})
 			} else {
-				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
 			}
 
 			if err := result.Err(); err != nil {
@@ -685,13 +732,13 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			}
 			result, lossy := containsLossyHistogram(result)
 			if lossy {
-				reason = reasonLossyHistogram
+				r.reason = reasonLossyHistogram
 				return nil, nil
 			}
 
-			ret := &parser.VectorSelector{OriginalOffset: synthOffset}
-			if s.Interval > 0 {
-				ret.LookbackDelta = s.Interval - time.Duration(1)
+			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+			if r.s.Interval > 0 {
+				ret.LookbackDelta = r.s.Interval - time.Duration(1)
 			}
 			ret.UnexpandedSeriesSet = result
 			return ret, nil
@@ -704,40 +751,40 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			logrus.Debugf("BinaryExpr (AggregateExpr + Literal): %v", n)
 
 			// cross_group_exact_aggregates: see the AggregateExpr case.
-			if state.cfg.CrossGroupExactAggregates && len(state.sgs) > 1 {
-				reason = reasonExactAggregates
+			if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
+				r.reason = reasonExactAggregates
 				return nil, nil
 			}
 
 			// Same as the AggregateExpr case: per-group aggregate partials
 			// must be unioned by the cross-group merge, not deduped.
-			ctx := promclient.WithAggregatePushdown(ctx)
+			aggCtx := promclient.WithAggregatePushdown(r.ctx)
 
-			removeOffsetFn()
+			_ = r.removeOffset()
 
 			var result storage.SeriesSet
 
-			if s.Interval > 0 {
-				result = client.QueryRange(ctx, n.String(), v1.Range{
-					Start: s.Start.Add(-reqOffset),
-					End:   s.End.Add(-reqOffset),
-					Step:  s.Interval,
+			if r.s.Interval > 0 {
+				result = r.client.QueryRange(aggCtx, n.String(), v1.Range{
+					Start: r.s.Start.Add(-r.reqOffset),
+					End:   r.s.End.Add(-r.reqOffset),
+					Step:  r.s.Interval,
 				})
 			} else {
-				result = client.Query(ctx, n.String(), s.Start.Add(-reqOffset))
+				result = r.client.Query(aggCtx, n.String(), r.s.Start.Add(-r.reqOffset))
 			}
 			if err := result.Err(); err != nil {
 				return nil, err
 			}
 			result, lossy := containsLossyHistogram(result)
 			if lossy {
-				reason = reasonLossyHistogram
+				r.reason = reasonLossyHistogram
 				return nil, nil
 			}
 
-			ret := &parser.VectorSelector{OriginalOffset: synthOffset}
-			if s.Interval > 0 {
-				ret.LookbackDelta = s.Interval - time.Duration(1)
+			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+			if r.s.Interval > 0 {
+				ret.LookbackDelta = r.s.Interval - time.Duration(1)
 			}
 			ret.UnexpandedSeriesSet = result
 
@@ -755,9 +802,9 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			literal = promclient.ExprIsLiteral(promclient.UnwrapExpr(this))
 		}
 		// If one side is a literal lets check
-		reason = reasonNoLiteralOperand
+		r.reason = reasonNoLiteralOperand
 		if literal {
-			reason = reasonUnsupportedOperand
+			r.reason = reasonUnsupportedOperand
 			switch otherTyped := other.(type) {
 			case *parser.VectorSelector:
 				return vectorBinaryExpr(otherTyped)
@@ -771,7 +818,6 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 	default:
 		logrus.Debugf("default %v %s", n, reflect.TypeOf(n))
-
 	}
 	return nil, nil
 }
