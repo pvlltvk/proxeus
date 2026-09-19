@@ -264,82 +264,8 @@ func (r *nodeReplacer) replace() (parser.Node, error) {
 	case *parser.AggregateExpr:
 		return r.replaceAggregate(n)
 
-	// Call is for things such as rate() etc. This can be sent directly to the
-	// prometheus node to answer
 	case *parser.Call:
-		logrus.Debugf("call %v %v", n, n.Type())
-
-		// absent and absent_over_time are difficult to implement at this layer; and as such we won't touch them
-		// we'll do our NodeReplace at another node in the tree.
-		//
-		// label_join / label_replace / info are evaluated by the engine via
-		// dedicated evalLabel{Join,Replace,Info} dispatchers that bypass the
-		// FunctionCalls table and call ev.errorf/ev.error with a precise,
-		// caller-facing message (e.g. "vector cannot contain metrics with
-		// the same labelset"). Pushing them to a single downstream means the
-		// error round-trips through ErrorWrap chains (target=…, servergroup=…)
-		// before reaching the engine, mangling the exact wording — fine for
-		// production, fatal for eval_fail tests. Let the engine handle these
-		// locally by fetching args[0] via Querier.Select.
-		switch n.Func.Name {
-		case "absent", "absent_over_time",
-			"label_join", "label_replace", "info":
-			r.reason = reasonUnsupportedFunc
-			return nil, nil
-		}
-
-		// For all the Call's we actually will work on, we need to remove the offset
-		_ = r.removeOffset()
-
-		var result storage.SeriesSet
-		if r.s.Interval > 0 {
-			result = r.queryRangeAt(n.String())
-		} else {
-			result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
-		}
-
-		result, lossy := containsLossyHistogram(result)
-		if lossy {
-			r.reason = reasonLossyHistogram
-			return nil, nil
-		}
-
-		// For range queries, fill StaleNaN at step timestamps the downstream
-		// did not return a value for. The engine's per-step VectorSelector
-		// eval uses ev.lookbackDelta (5m default, not our ret.LookbackDelta
-		// hint) when peeking at the previous sample, so an isolated step
-		// sample from a sparse range output (e.g. present_over_time returning
-		// 1 at one step only) otherwise bleeds forward into every later step
-		// within the lookback window.
-		if r.s.Interval > 0 {
-			startMs := timestamp.FromTime(r.s.Start.Add(-r.reqOffset))
-			endMs := timestamp.FromTime(r.s.End.Add(-r.reqOffset))
-			result = fillStaleNaNGaps(result, startMs, endMs, int64(r.s.Interval/time.Millisecond))
-		}
-
-		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
-		if r.s.Interval > 0 {
-			ret.LookbackDelta = r.s.Interval - time.Duration(1)
-		}
-		ret.UnexpandedSeriesSet = result
-
-		// Some functions require specific handling which we'll catch here
-		switch n.Func.Name {
-		// the "scalar()" function is a bit tricky. It can return a scalar or a vector.
-		// So to handle this instead of returning the vector directly (as its just the values selected)
-		// we can set it as the args (the vector of data) and the promql engine handles the types properly
-		case "scalar":
-			n.Args[0] = ret
-			return n, nil
-		// the functions of sort() and sort_desc() need whole results to calculate.
-		case "sort", "sort_desc":
-			return &parser.Call{
-				Func: n.Func,
-				Args: []parser.Expr{ret},
-			}, nil
-		}
-
-		return ret, nil
+		return r.replaceCall(n)
 
 	// If we are simply fetching a Vector then we can fetch the data using the same step that
 	// the query came in as (reducing the amount of data we need to fetch)
@@ -825,6 +751,84 @@ func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, e
 		return n, nil
 	}
 	return nil, nil
+}
+
+// Call is for things such as rate() etc. This can be sent directly to the
+// prometheus node to answer
+func (r *nodeReplacer) replaceCall(n *parser.Call) (parser.Node, error) {
+	logrus.Debugf("call %v %v", n, n.Type())
+
+	// absent and absent_over_time are difficult to implement at this layer; and as such we won't touch them
+	// we'll do our NodeReplace at another node in the tree.
+	//
+	// label_join / label_replace / info are evaluated by the engine via
+	// dedicated evalLabel{Join,Replace,Info} dispatchers that bypass the
+	// FunctionCalls table and call ev.errorf/ev.error with a precise,
+	// caller-facing message (e.g. "vector cannot contain metrics with
+	// the same labelset"). Pushing them to a single downstream means the
+	// error round-trips through ErrorWrap chains (target=…, servergroup=…)
+	// before reaching the engine, mangling the exact wording — fine for
+	// production, fatal for eval_fail tests. Let the engine handle these
+	// locally by fetching args[0] via Querier.Select.
+	switch n.Func.Name {
+	case "absent", "absent_over_time",
+		"label_join", "label_replace", "info":
+		r.reason = reasonUnsupportedFunc
+		return nil, nil
+	}
+
+	// For all the Call's we actually will work on, we need to remove the offset
+	_ = r.removeOffset()
+
+	var result storage.SeriesSet
+	if r.s.Interval > 0 {
+		result = r.queryRangeAt(n.String())
+	} else {
+		result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
+	}
+
+	result, lossy := containsLossyHistogram(result)
+	if lossy {
+		r.reason = reasonLossyHistogram
+		return nil, nil
+	}
+
+	// For range queries, fill StaleNaN at step timestamps the downstream
+	// did not return a value for. The engine's per-step VectorSelector
+	// eval uses ev.lookbackDelta (5m default, not our ret.LookbackDelta
+	// hint) when peeking at the previous sample, so an isolated step
+	// sample from a sparse range output (e.g. present_over_time returning
+	// 1 at one step only) otherwise bleeds forward into every later step
+	// within the lookback window.
+	if r.s.Interval > 0 {
+		startMs := timestamp.FromTime(r.s.Start.Add(-r.reqOffset))
+		endMs := timestamp.FromTime(r.s.End.Add(-r.reqOffset))
+		result = fillStaleNaNGaps(result, startMs, endMs, int64(r.s.Interval/time.Millisecond))
+	}
+
+	ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+	if r.s.Interval > 0 {
+		ret.LookbackDelta = r.s.Interval - time.Duration(1)
+	}
+	ret.UnexpandedSeriesSet = result
+
+	// Some functions require specific handling which we'll catch here
+	switch n.Func.Name {
+	// the "scalar()" function is a bit tricky. It can return a scalar or a vector.
+	// So to handle this instead of returning the vector directly (as its just the values selected)
+	// we can set it as the args (the vector of data) and the promql engine handles the types properly
+	case "scalar":
+		n.Args[0] = ret
+		return n, nil
+	// the functions of sort() and sort_desc() need whole results to calculate.
+	case "sort", "sort_desc":
+		return &parser.Call{
+			Func: n.Func,
+			Args: []parser.Expr{ret},
+		}, nil
+	}
+
+	return ret, nil
 }
 
 func isAgg(node parser.Node) bool {
