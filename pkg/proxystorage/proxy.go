@@ -3,6 +3,7 @@ package proxystorage
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -15,19 +16,25 @@ import (
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
+	"github.com/prometheus/prometheus/model/value"
+	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/agent"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/sirupsen/logrus"
 
 	"github.com/pvlltvk/proxeus/pkg/logging"
 
 	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
+	"github.com/pvlltvk/proxeus/pkg/promapi"
 	"github.com/pvlltvk/proxeus/pkg/promclient"
 	"github.com/pvlltvk/proxeus/pkg/proxyquerier"
 	"github.com/pvlltvk/proxeus/pkg/servergroup"
@@ -469,6 +476,86 @@ func (p *ProxyStorage) Config() *proxyconfig.Config {
 	return state.cfg
 }
 
+// vectorToStepMatrix converts an instant-query SeriesSet (one sample per
+// series at the @ time) into a range-query-shaped SeriesSet: each input
+// series' single sample is replicated at every step time in [start, end]
+// (inclusive of start, inclusive of end when (end-start) is a multiple of
+// step). Histograms are replicated the same way. This is only valid when the
+// underlying expression is step-invariant — currently used by the NodeReplacer
+// when the subtree below has an @ modifier.
+//
+// The replicated FloatHistogram pointer is shared across steps; that is safe
+// because promapi.NewSeries hands out copy-on-read iterators, so the engine
+// can't observe an aliased histogram.
+func vectorToStepMatrix(vec storage.SeriesSet, start, end time.Time, step time.Duration) storage.SeriesSet {
+	if step <= 0 {
+		return promapi.NewSeriesSet(nil, vec.Warnings(), vec.Err())
+	}
+	startMs := timestamp.FromTime(start)
+	endMs := timestamp.FromTime(end)
+	stepMs := int64(step / time.Millisecond)
+	if stepMs <= 0 || endMs < startMs {
+		return promapi.NewSeriesSet(nil, vec.Warnings(), vec.Err())
+	}
+	n := int((endMs-startMs)/stepMs) + 1
+	var out []storage.Series
+	for vec.Next() {
+		src := vec.At()
+		lbls := src.Labels().Copy()
+
+		// Instant query → at most one sample per series. Read it (the last
+		// one wins if, defensively, more than one is present).
+		var (
+			haveFloat bool
+			fval      float64
+			fh        *histogram.FloatHistogram
+		)
+		it := src.Iterator(nil)
+		for vt := it.Next(); vt != chunkenc.ValNone; vt = it.Next() {
+			switch vt {
+			case chunkenc.ValFloat:
+				_, fval = it.At()
+				haveFloat, fh = true, nil
+			case chunkenc.ValHistogram, chunkenc.ValFloatHistogram:
+				_, fh = it.AtFloatHistogram(nil)
+				haveFloat = false
+			}
+		}
+		if err := it.Err(); err != nil {
+			return promapi.NewSeriesSet(nil, vec.Warnings(), err)
+		}
+
+		samples := make([]chunks.Sample, 0, n)
+		for i := 0; i < n; i++ {
+			ts := startMs + int64(i)*stepMs
+			switch {
+			case fh != nil:
+				samples = append(samples, promapi.HistogramSample(ts, fh))
+			case haveFloat:
+				samples = append(samples, promapi.FloatSample(ts, fval))
+			}
+		}
+		out = append(out, promapi.NewSeries(lbls, samples))
+	}
+	return promapi.NewSeriesSet(out, vec.Warnings(), vec.Err())
+}
+
+// unwrapParens strips the ParenExpr layers the parser keeps around an
+// expression, e.g. the `(("v"))` of count_values((("v")), metric).
+func unwrapParens(e parser.Expr) parser.Expr {
+	for {
+		p, ok := e.(*parser.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.Expr
+	}
+}
+
+func durationMilliseconds(d time.Duration) int64 {
+	return int64(d / (time.Millisecond / time.Nanosecond))
+}
+
 // validateUniqueServerGroupLabels ensures that every server_group carries a
 // non-empty labels set and that no two groups share the same label fingerprint.
 // It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
@@ -513,4 +600,84 @@ func validateUniqueServerGroupLabels(groups []*servergroup.Config) error {
 		)
 	}
 	return nil
+}
+
+// fillStaleNaNGaps inserts StaleNaN markers at the step timestamps where the
+// downstream's range response did not include a sample. We need this because
+// proxeus substitutes a *parser.Call (e.g. present_over_time, last_over_time)
+// with a synthetic VectorSelector whose UnexpandedSeriesSet exposes the
+// downstream-computed samples. When the engine re-evaluates that VectorSelector
+// it uses the engine-wide lookback (default 5m) to find samples — even though
+// the substituted node represents the call's already-computed step-pinned
+// output. Without explicit "no value at this step" markers, an isolated sample
+// at one step T_k bleeds forward to every subsequent step within the lookback,
+// turning sparse outputs (present_over_time returning 1 at only one step) into
+// dense ones. StaleNaN at the empty step timestamps tells vectorSelectorSingle
+// to bail out at that step (see promql.IsStaleNaN check in engine.go).
+//
+// startTs/endTs/interval are in milliseconds. startTs and endTs are inclusive.
+// If interval is <= 0 (instant query) ss is returned unchanged. Otherwise the
+// set is materialized into a fresh, re-iterable copy with the StaleNaN markers
+// added — the source cursor is consumed, and the result still flows on to
+// UnexpandedSeriesSet.
+func fillStaleNaNGaps(ss storage.SeriesSet, startTs, endTs, interval int64) storage.SeriesSet {
+	if interval <= 0 {
+		return ss
+	}
+	stale := math.Float64frombits(value.StaleNaN)
+	var out []storage.Series
+	for ss.Next() {
+		s := ss.At()
+		lbls := s.Labels().Copy()
+		var samples []chunks.Sample
+		present := make(map[int64]struct{})
+		it := s.Iterator(nil)
+		for vt := it.Next(); vt != chunkenc.ValNone; vt = it.Next() {
+			switch vt {
+			case chunkenc.ValFloat:
+				t, v := it.At()
+				samples = append(samples, promapi.FloatSample(t, v))
+				present[t] = struct{}{}
+			case chunkenc.ValHistogram, chunkenc.ValFloatHistogram:
+				t, fh := it.AtFloatHistogram(nil)
+				samples = append(samples, promapi.HistogramSample(t, fh))
+				present[t] = struct{}{}
+			}
+		}
+		if err := it.Err(); err != nil {
+			return promapi.NewSeriesSet(nil, ss.Warnings(), err)
+		}
+
+		// Bound the fill defensively: a bogus start/end from upstream
+		// shouldn't make us allocate a giant slice. If the eval window is
+		// far larger than the actual returned data, skip the fill — the
+		// existing samples stay correct (the engine's lookback can still
+		// misbehave, but that's strictly no worse than before).
+		expected := (endTs-startTs)/interval + 1
+		if expected > 0 && expected <= int64(len(present))+10_000 {
+			for ts := startTs; ts <= endTs; ts += interval {
+				if _, ok := present[ts]; ok {
+					continue
+				}
+				samples = append(samples, promapi.FloatSample(ts, stale))
+			}
+			// promapi.NewSeries' list iterator must walk samples in
+			// timestamp order; the appended StaleNaN points can sit out of
+			// order relative to the originals.
+			sortSamplesByTime(samples)
+		}
+		out = append(out, promapi.NewSeries(lbls, samples))
+	}
+	return promapi.NewSeriesSet(out, ss.Warnings(), ss.Err())
+}
+
+// sortSamplesByTime sorts samples by timestamp using insertion sort — a step
+// range is typically a handful of points, so a stdlib sort.Slice would pay
+// disproportionate cost for the closure call.
+func sortSamplesByTime(vs []chunks.Sample) {
+	for i := 1; i < len(vs); i++ {
+		for j := i; j > 0 && vs[j-1].T() > vs[j].T(); j-- {
+			vs[j-1], vs[j] = vs[j], vs[j-1]
+		}
+	}
 }
