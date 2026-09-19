@@ -50,47 +50,6 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		}()
 	}
 
-	isAgg := func(node parser.Node) bool {
-		_, ok := node.(*parser.AggregateExpr)
-		return ok
-	}
-
-	isSubQuery := func(node parser.Node) bool {
-		_, ok := node.(*parser.SubqueryExpr)
-		return ok
-	}
-
-	isBinaryExpr := func(node parser.Node) bool {
-		_, ok := node.(*parser.BinaryExpr)
-		return ok
-	}
-
-	isVectorSelector := func(node parser.Node) bool {
-		_, ok := node.(*parser.VectorSelector)
-		return ok
-	}
-
-	hasTimestamp := func(node parser.Node) bool {
-		if vs, ok := node.(*parser.VectorSelector); ok {
-			return vs.Timestamp != nil
-		}
-		return false
-	}
-
-	// isAtModifierUnsafeCall flags Call nodes whose result is NOT
-	// step-invariant even when an inner @ modifier pins the input — e.g.
-	// timestamp() returns the evaluation-time timestamp, predict_linear
-	// extrapolates from evalTime, etc. Their presence in the subtree
-	// disqualifies the instant-query optimization in queryRangeAt below.
-	isAtModifierUnsafeCall := func(node parser.Node) bool {
-		c, ok := node.(*parser.Call)
-		if !ok {
-			return false
-		}
-		_, unsafe := promql.AtModifierUnsafeFunctions[c.Func.Name]
-		return unsafe
-	}
-
 	// If we are a child of a subquery; we just skip replacement (since it already did a nodereplacer for those)
 	for _, n := range path {
 		if isSubQuery(n) {
@@ -815,6 +774,47 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 	}
 	return nil, nil
+}
+
+func isAgg(node parser.Node) bool {
+	_, ok := node.(*parser.AggregateExpr)
+	return ok
+}
+
+func isSubQuery(node parser.Node) bool {
+	_, ok := node.(*parser.SubqueryExpr)
+	return ok
+}
+
+func isBinaryExpr(node parser.Node) bool {
+	_, ok := node.(*parser.BinaryExpr)
+	return ok
+}
+
+func isVectorSelector(node parser.Node) bool {
+	_, ok := node.(*parser.VectorSelector)
+	return ok
+}
+
+func hasTimestamp(node parser.Node) bool {
+	if vs, ok := node.(*parser.VectorSelector); ok {
+		return vs.Timestamp != nil
+	}
+	return false
+}
+
+// isAtModifierUnsafeCall flags Call nodes whose result is NOT
+// step-invariant even when an inner @ modifier pins the input — e.g.
+// timestamp() returns the evaluation-time timestamp, predict_linear
+// extrapolates from evalTime, etc. Their presence in the subtree
+// disqualifies the instant-query optimization in queryRangeAt above.
+func isAtModifierUnsafeCall(node parser.Node) bool {
+	c, ok := node.(*parser.Call)
+	if !ok {
+		return false
+	}
+	_, unsafe := promql.AtModifierUnsafeFunctions[c.Func.Name]
+	return unsafe
 }
 
 // vectorToStepMatrix converts an instant-query SeriesSet (one sample per
