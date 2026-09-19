@@ -273,52 +273,8 @@ func (r *nodeReplacer) replace() (parser.Node, error) {
 	case *parser.MatrixSelector:
 		return r.replaceMatrixSelector(n)
 
-	// For Subquery Expressions; we basically want to replace them with our own statement (separate interval, step, etc.)
-	// Note: since we are replacing this with another query we can get some value differences as this sends larger sub-queries
-	// downstream (which may have access to less data, and promql has some weird heuristics on how it calculates values on step)
 	case *parser.SubqueryExpr:
-		logrus.Debugf("SubqueryExpr: %v", n)
-
-		subEvalStmt := *r.s
-		subEvalStmt.Expr = n.Expr
-
-		// If the subquery has an @ modifier its evaluation is pinned to that
-		// timestamp and the outer eval window is irrelevant.
-		var subEnd time.Time
-		if n.Timestamp != nil {
-			subEnd = timestamp.Time(*n.Timestamp).Add(-n.Offset)
-		} else {
-			subEnd = r.s.End.Add(-n.Offset)
-		}
-		subEvalStmt.End = subEnd
-
-		if n.Step == 0 {
-			subEvalStmt.Interval = time.Duration(r.p.NoStepSubqueryIntervalFn(durationMilliseconds(n.Range))) * time.Millisecond
-		} else {
-			subEvalStmt.Interval = n.Step
-		}
-
-		var subStart time.Time
-		if n.Timestamp != nil {
-			subStart = subEnd.Add(-n.Range)
-		} else {
-			subStart = r.s.Start.Add(-n.Offset).Add(-n.Range)
-		}
-		subEvalStmt.Start = subStart.Truncate(subEvalStmt.Interval)
-		if subEvalStmt.Start.Before(subStart) {
-			subEvalStmt.Start = subEvalStmt.Start.Add(subEvalStmt.Interval)
-		}
-
-		newN, err := parser.Inspect(r.ctx, &subEvalStmt, func(parser.Node, []parser.Node) error { return nil }, r.p.NodeReplacer)
-		if err != nil {
-			return nil, err
-		}
-
-		if newN != nil {
-			n.Expr = newN.(parser.Expr)
-			return n, nil
-		}
-		r.reason = reasonNoInnerPushdown
+		return r.replaceSubquery(n)
 
 	// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS
 	// these are relatively rare -- as things like `sum(foo) > 2` would *not* be viable as `sum(foo)` could
@@ -837,6 +793,55 @@ func (r *nodeReplacer) replaceVectorSelector(n *parser.VectorSelector) (parser.N
 // have anyway to ask for less-- since this is exactly what they are asking for
 func (r *nodeReplacer) replaceMatrixSelector(n *parser.MatrixSelector) (parser.Node, error) {
 	// DO NOTHING
+	return nil, nil
+}
+
+// For Subquery Expressions; we basically want to replace them with our own statement (separate interval, step, etc.)
+// Note: since we are replacing this with another query we can get some value differences as this sends larger sub-queries
+// downstream (which may have access to less data, and promql has some weird heuristics on how it calculates values on step)
+func (r *nodeReplacer) replaceSubquery(n *parser.SubqueryExpr) (parser.Node, error) {
+	logrus.Debugf("SubqueryExpr: %v", n)
+
+	subEvalStmt := *r.s
+	subEvalStmt.Expr = n.Expr
+
+	// If the subquery has an @ modifier its evaluation is pinned to that
+	// timestamp and the outer eval window is irrelevant.
+	var subEnd time.Time
+	if n.Timestamp != nil {
+		subEnd = timestamp.Time(*n.Timestamp).Add(-n.Offset)
+	} else {
+		subEnd = r.s.End.Add(-n.Offset)
+	}
+	subEvalStmt.End = subEnd
+
+	if n.Step == 0 {
+		subEvalStmt.Interval = time.Duration(r.p.NoStepSubqueryIntervalFn(durationMilliseconds(n.Range))) * time.Millisecond
+	} else {
+		subEvalStmt.Interval = n.Step
+	}
+
+	var subStart time.Time
+	if n.Timestamp != nil {
+		subStart = subEnd.Add(-n.Range)
+	} else {
+		subStart = r.s.Start.Add(-n.Offset).Add(-n.Range)
+	}
+	subEvalStmt.Start = subStart.Truncate(subEvalStmt.Interval)
+	if subEvalStmt.Start.Before(subStart) {
+		subEvalStmt.Start = subEvalStmt.Start.Add(subEvalStmt.Interval)
+	}
+
+	newN, err := parser.Inspect(r.ctx, &subEvalStmt, func(parser.Node, []parser.Node) error { return nil }, r.p.NodeReplacer)
+	if err != nil {
+		return nil, err
+	}
+
+	if newN != nil {
+		n.Expr = newN.(parser.Expr)
+		return n, nil
+	}
+	r.reason = reasonNoInnerPushdown
 	return nil, nil
 }
 
