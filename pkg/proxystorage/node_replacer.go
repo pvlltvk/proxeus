@@ -270,10 +270,8 @@ func (r *nodeReplacer) replace() (parser.Node, error) {
 	case *parser.VectorSelector:
 		return r.replaceVectorSelector(n)
 
-	// If we hit this someone is asking for a matrix directly, if so then we don't
-	// have anyway to ask for less-- since this is exactly what they are asking for
 	case *parser.MatrixSelector:
-		// DO NOTHING
+		return r.replaceMatrixSelector(n)
 
 	// For Subquery Expressions; we basically want to replace them with our own statement (separate interval, step, etc.)
 	// Note: since we are replacing this with another query we can get some value differences as this sends larger sub-queries
@@ -833,6 +831,13 @@ func (r *nodeReplacer) replaceVectorSelector(n *parser.VectorSelector) (parser.N
 	n.OriginalOffset = r.offset
 	n.UnexpandedSeriesSet = result
 	return n, nil
+}
+
+// If we hit this someone is asking for a matrix directly, if so then we don't
+// have anyway to ask for less-- since this is exactly what they are asking for
+func (r *nodeReplacer) replaceMatrixSelector(n *parser.MatrixSelector) (parser.Node, error) {
+	// DO NOTHING
+	return nil, nil
 }
 
 func isAgg(node parser.Node) bool {
