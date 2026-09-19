@@ -393,7 +393,6 @@ func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, e
 				Grouping: n.Grouping,
 				Without:  n.Without,
 			}, nil
-
 		}
 
 		// Replace with sum() / count()
@@ -497,7 +496,6 @@ func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, e
 	case parser.LIMITK, parser.LIMIT_RATIO:
 		// DO NOTHING
 		r.reason = reasonNonReentrantAgg
-
 	}
 
 	if result != nil {
