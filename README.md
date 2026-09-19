@@ -49,8 +49,16 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > the deduplicated raw series and `count(up)` matches `up`. The decision is visible as
 > `proxeus_pushdown_nodes_total{result="fallback",reason="exact_aggregates"}`. The cost is the point of the trade: raw
 > series cross the network instead of a handful of per-group partials, which hurts most on wide ranges and high
-> cardinality. A single-`server_group` deployment is unaffected — one backend sees the whole series set, so there is
-> nothing to dedup.
+> cardinality, and a query that used to fit under `--query.max-samples` as a few partials can now exceed it and fail
+> outright. A single-`server_group` deployment is unaffected — one backend sees the whole series set, so there is
+> nothing to dedup. The gate counts *configured* groups, not overlapping ones, so a deployment whose groups hold
+> disjoint data pays the cost for no correctness gain.
+>
+> Two things to know before enabling it. Recording and alerting rules run through the same engine, so their recorded
+> values and alert thresholds change with the flag (a 2× overlap halves a `sum`) and the raw-series cost is paid every
+> evaluation interval. And "exact" means exact modulo dedup's fingerprint: overlapping series have to be identical
+> apart from each group's declared `labels`, so if a backend stamps anything else of its own (a Thanos
+> `prometheus_replica`, say) dedup won't collapse them and the aggregate still double-counts.
 
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
 `cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,
