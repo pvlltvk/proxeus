@@ -140,8 +140,22 @@ type ProxeusConfig struct {
 	// the engine re-combines, so those are unioned, never deduped — a series
 	// present in multiple groups appears once in `up` but contributes to every
 	// group's partial in `count(up)`. If exact aggregates over overlapping
-	// groups matter, keep the overlap out of the groups.
+	// groups matter, enable CrossGroupExactAggregates.
 	CrossGroupDedup bool `yaml:"cross_group_dedup"`
+
+	// CrossGroupExactAggregates, when true, makes aggregations exact over
+	// overlapping server_groups: proxeus declines aggregation pushdown while
+	// more than one server_group is configured, so the engine computes the
+	// aggregation locally over deduplicated raw series instead of re-combining
+	// per-group partials. `count(up)` then matches `up`. Requires
+	// CrossGroupDedup to also be true; proxeus will refuse to start otherwise.
+	// Default false preserves historical behavior.
+	//
+	// Cost: raw series cross the network instead of per-group aggregate
+	// partials, which is the expensive path — a wide range that used to come
+	// back as a handful of partials now transfers every series it aggregates
+	// over.
+	CrossGroupExactAggregates bool `yaml:"cross_group_exact_aggregates"`
 
 	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to
 	// /api/v1/series so Grafana label browsers and dashboards don't show one
@@ -160,13 +174,19 @@ type ProxeusConfig struct {
 	CrossGroupPartialResponse bool `yaml:"cross_group_partial_response"`
 }
 
-// Validate checks the cross-group flag dependencies. Both
-// CrossGroupDedupMetadata and CrossGroupPartialResponse only affect the
-// cross-group fan-out/dedup machinery, so neither makes sense without
+// Validate checks the cross-group flag dependencies. CrossGroupDedupMetadata,
+// CrossGroupExactAggregates and CrossGroupPartialResponse only affect the
+// cross-group fan-out/dedup machinery, so none makes sense without
 // CrossGroupDedup also being enabled.
 func (c *ProxeusConfig) Validate() error {
 	if c.CrossGroupDedupMetadata && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_dedup_metadata: true requires cross_group_dedup: true")
+	}
+	// Without dedup the raw fan-out returns both groups' series, so the
+	// locally computed aggregate double-counts anyway — the flag would look
+	// like a fix while changing nothing but the query cost.
+	if c.CrossGroupExactAggregates && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_exact_aggregates: true requires cross_group_dedup: true")
 	}
 	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")

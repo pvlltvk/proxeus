@@ -18,6 +18,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
 	"github.com/pvlltvk/proxeus/pkg/promapi"
 	"github.com/pvlltvk/proxeus/pkg/promclient"
 	"github.com/pvlltvk/proxeus/pkg/servergroup"
@@ -397,6 +398,7 @@ func TestNodeReplacer(t *testing.T) {
 	ps.state.Store(&proxyStorageState{
 		client: api,
 		sgs:    newServerGroups(2),
+		cfg:    &proxyconfig.Config{},
 	})
 
 	now := time.Unix(10000, 0)
@@ -489,6 +491,7 @@ func TestNodeReplacerAvgSingleServerGroup(t *testing.T) {
 	ps.state.Store(&proxyStorageState{
 		client: api,
 		sgs:    newServerGroups(1),
+		cfg:    &proxyconfig.Config{},
 	})
 
 	now := time.Unix(10000, 0)
