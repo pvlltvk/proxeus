@@ -41,6 +41,18 @@ tls_server_config:
 	}
 }
 
+func TestConfigFromBytesValidates(t *testing.T) {
+	if _, err := ConfigFromBytes([]byte("proxeus:\n  cross_group_dedup_metadata: true\n")); err == nil {
+		t.Error("cross_group_dedup_metadata without cross_group_dedup was accepted")
+	}
+	if _, err := ConfigFromBytes([]byte("proxeus:\n  cross_group_partial_response: true\n")); err == nil {
+		t.Error("cross_group_partial_response without cross_group_dedup was accepted")
+	}
+	if _, err := ConfigFromBytes([]byte("proxeus:\n  cross_group_dedup: true\n  cross_group_dedup_metadata: true\n")); err != nil {
+		t.Errorf("valid config was rejected: %v", err)
+	}
+}
+
 // TestRemoteWriteMaxSamplesPerSendDefault is a regression test for
 // https://github.com/jacksontj/promxy/issues/781. Upstream's default
 // max_samples_per_send (2000) can produce remote_write requests that decompress

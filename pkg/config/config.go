@@ -52,6 +52,13 @@ func ConfigFromBytes(configBytes []byte) (*Config, error) {
 		return nil, fmt.Errorf("error applying remote_write defaults: %v", err)
 	}
 
+	// Validate here rather than only in ProxyStorage.ApplyConfig so --check-config
+	// and a SIGHUP reload reject the same configs startup does, before any
+	// Reloadable sees them.
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
 }
 

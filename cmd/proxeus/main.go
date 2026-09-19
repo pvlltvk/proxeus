@@ -354,7 +354,7 @@ func main() {
 		if _, err := proxyconfig.ConfigFromFile(opts.ConfigFile); err != nil {
 			logrus.Fatalf("Error loading cfg: %v", err)
 		}
-		fmt.Printf("%s if valid proxeus config file syntax\n", opts.ConfigFile)
+		fmt.Printf("%s is a valid proxeus config file\n", opts.ConfigFile)
 		os.Exit(0)
 	}
 
