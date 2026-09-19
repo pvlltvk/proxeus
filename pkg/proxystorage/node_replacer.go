@@ -276,120 +276,8 @@ func (r *nodeReplacer) replace() (parser.Node, error) {
 	case *parser.SubqueryExpr:
 		return r.replaceSubquery(n)
 
-	// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS
-	// these are relatively rare -- as things like `sum(foo) > 2` would *not* be viable as `sum(foo)` could
-	// potentially require multiple servergroups to generate the correct response.
-	// From inspection there are only 3 specific types where this sort of replacement is "safe" (assuming one side is a literal)
-	// 	`VectorSector`
-	// 	`AggregateExpr` (Max, Min, TopK, BottomK only -- and only if re-combined)
 	case *parser.BinaryExpr:
-		logrus.Debugf("BinaryExpr: %v", n)
-
-		// vectorBinaryExpr will send the node as a query to the downstream and return an expanded VectorSelector
-		vectorBinaryExpr := func(vs *parser.VectorSelector) (parser.Node, error) {
-			logrus.Debugf("BinaryExpr (VectorSelector + Literal): %v", n)
-			_ = r.removeOffset()
-
-			var result storage.SeriesSet
-			if r.s.Interval > 0 {
-				vs.LookbackDelta = r.s.Interval - time.Duration(1)
-				result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
-					Start: r.s.Start.Add(-r.reqOffset),
-					End:   r.s.End.Add(-r.reqOffset),
-					Step:  r.s.Interval,
-				})
-			} else {
-				result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
-			}
-
-			if err := result.Err(); err != nil {
-				return nil, err
-			}
-			result, lossy := containsLossyHistogram(result)
-			if lossy {
-				r.reason = reasonLossyHistogram
-				return nil, nil
-			}
-
-			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
-			if r.s.Interval > 0 {
-				ret.LookbackDelta = r.s.Interval - time.Duration(1)
-			}
-			ret.UnexpandedSeriesSet = result
-			return ret, nil
-		}
-
-		// aggregateBinaryExpr will send the node as a query to the downstream and
-		// replace the aggregate expr with the resulting data. This will cause the aggregation
-		// (min, max, topk, bottomk) to be re-run against the expression.
-		aggregateBinaryExpr := func(agg *parser.AggregateExpr) (parser.Node, error) {
-			logrus.Debugf("BinaryExpr (AggregateExpr + Literal): %v", n)
-
-			// cross_group_exact_aggregates: see the AggregateExpr case.
-			if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
-				r.reason = reasonExactAggregates
-				return nil, nil
-			}
-
-			// Same as the AggregateExpr case: per-group aggregate partials
-			// must be unioned by the cross-group merge, not deduped.
-			aggCtx := promclient.WithAggregatePushdown(r.ctx)
-
-			_ = r.removeOffset()
-
-			var result storage.SeriesSet
-
-			if r.s.Interval > 0 {
-				result = r.client.QueryRange(aggCtx, n.String(), v1.Range{
-					Start: r.s.Start.Add(-r.reqOffset),
-					End:   r.s.End.Add(-r.reqOffset),
-					Step:  r.s.Interval,
-				})
-			} else {
-				result = r.client.Query(aggCtx, n.String(), r.s.Start.Add(-r.reqOffset))
-			}
-			if err := result.Err(); err != nil {
-				return nil, err
-			}
-			result, lossy := containsLossyHistogram(result)
-			if lossy {
-				r.reason = reasonLossyHistogram
-				return nil, nil
-			}
-
-			ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
-			if r.s.Interval > 0 {
-				ret.LookbackDelta = r.s.Interval - time.Duration(1)
-			}
-			ret.UnexpandedSeriesSet = result
-
-			agg.Expr = ret
-			return agg, nil
-		}
-
-		// Only valid if the other side is either `NumberLiteral` or `StringLiteral`
-		this := n.LHS
-		other := n.RHS
-		literal := promclient.ExprIsLiteral(promclient.UnwrapExpr(this))
-		if !literal {
-			this = n.RHS
-			other = n.LHS
-			literal = promclient.ExprIsLiteral(promclient.UnwrapExpr(this))
-		}
-		// If one side is a literal lets check
-		r.reason = reasonNoLiteralOperand
-		if literal {
-			r.reason = reasonUnsupportedOperand
-			switch otherTyped := other.(type) {
-			case *parser.VectorSelector:
-				return vectorBinaryExpr(otherTyped)
-			case *parser.AggregateExpr:
-				switch otherTyped.Op {
-				case parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK:
-					return aggregateBinaryExpr(otherTyped)
-				}
-			}
-		}
+		return r.replaceBinary(n)
 
 	default:
 		logrus.Debugf("default %v %s", n, reflect.TypeOf(n))
@@ -842,6 +730,124 @@ func (r *nodeReplacer) replaceSubquery(n *parser.SubqueryExpr) (parser.Node, err
 		return n, nil
 	}
 	r.reason = reasonNoInnerPushdown
+	return nil, nil
+}
+
+// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS
+// these are relatively rare -- as things like `sum(foo) > 2` would *not* be viable as `sum(foo)` could
+// potentially require multiple servergroups to generate the correct response.
+// From inspection there are only 3 specific types where this sort of replacement is "safe" (assuming one side is a literal)
+//
+//	`VectorSector`
+//	`AggregateExpr` (Max, Min, TopK, BottomK only -- and only if re-combined)
+func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) {
+	logrus.Debugf("BinaryExpr: %v", n)
+
+	// vectorBinaryExpr will send the node as a query to the downstream and return an expanded VectorSelector
+	vectorBinaryExpr := func(vs *parser.VectorSelector) (parser.Node, error) {
+		logrus.Debugf("BinaryExpr (VectorSelector + Literal): %v", n)
+		_ = r.removeOffset()
+
+		var result storage.SeriesSet
+		if r.s.Interval > 0 {
+			vs.LookbackDelta = r.s.Interval - time.Duration(1)
+			result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
+				Start: r.s.Start.Add(-r.reqOffset),
+				End:   r.s.End.Add(-r.reqOffset),
+				Step:  r.s.Interval,
+			})
+		} else {
+			result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
+		}
+
+		if err := result.Err(); err != nil {
+			return nil, err
+		}
+		result, lossy := containsLossyHistogram(result)
+		if lossy {
+			r.reason = reasonLossyHistogram
+			return nil, nil
+		}
+
+		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+		if r.s.Interval > 0 {
+			ret.LookbackDelta = r.s.Interval - time.Duration(1)
+		}
+		ret.UnexpandedSeriesSet = result
+		return ret, nil
+	}
+
+	// aggregateBinaryExpr will send the node as a query to the downstream and
+	// replace the aggregate expr with the resulting data. This will cause the aggregation
+	// (min, max, topk, bottomk) to be re-run against the expression.
+	aggregateBinaryExpr := func(agg *parser.AggregateExpr) (parser.Node, error) {
+		logrus.Debugf("BinaryExpr (AggregateExpr + Literal): %v", n)
+
+		// cross_group_exact_aggregates: see the AggregateExpr case.
+		if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
+			r.reason = reasonExactAggregates
+			return nil, nil
+		}
+
+		// Same as the AggregateExpr case: per-group aggregate partials
+		// must be unioned by the cross-group merge, not deduped.
+		aggCtx := promclient.WithAggregatePushdown(r.ctx)
+
+		_ = r.removeOffset()
+
+		var result storage.SeriesSet
+
+		if r.s.Interval > 0 {
+			result = r.client.QueryRange(aggCtx, n.String(), v1.Range{
+				Start: r.s.Start.Add(-r.reqOffset),
+				End:   r.s.End.Add(-r.reqOffset),
+				Step:  r.s.Interval,
+			})
+		} else {
+			result = r.client.Query(aggCtx, n.String(), r.s.Start.Add(-r.reqOffset))
+		}
+		if err := result.Err(); err != nil {
+			return nil, err
+		}
+		result, lossy := containsLossyHistogram(result)
+		if lossy {
+			r.reason = reasonLossyHistogram
+			return nil, nil
+		}
+
+		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
+		if r.s.Interval > 0 {
+			ret.LookbackDelta = r.s.Interval - time.Duration(1)
+		}
+		ret.UnexpandedSeriesSet = result
+
+		agg.Expr = ret
+		return agg, nil
+	}
+
+	// Only valid if the other side is either `NumberLiteral` or `StringLiteral`
+	this := n.LHS
+	other := n.RHS
+	literal := promclient.ExprIsLiteral(promclient.UnwrapExpr(this))
+	if !literal {
+		this = n.RHS
+		other = n.LHS
+		literal = promclient.ExprIsLiteral(promclient.UnwrapExpr(this))
+	}
+	// If one side is a literal lets check
+	r.reason = reasonNoLiteralOperand
+	if literal {
+		r.reason = reasonUnsupportedOperand
+		switch otherTyped := other.(type) {
+		case *parser.VectorSelector:
+			return vectorBinaryExpr(otherTyped)
+		case *parser.AggregateExpr:
+			switch otherTyped.Op {
+			case parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK:
+				return aggregateBinaryExpr(otherTyped)
+			}
+		}
+	}
 	return nil, nil
 }
 
