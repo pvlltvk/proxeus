@@ -199,8 +199,8 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 				Labels: sg.Labels,
 			}
 		}
-		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t)",
-			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse)
+		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t, exact_aggregates=%t)",
+			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse, c.CrossGroupExactAggregates)
 		multiAPI, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
 			DedupMetadata:      c.CrossGroupDedupMetadata,
 			PartialResponse:    c.CrossGroupPartialResponse,
@@ -788,6 +788,16 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 
 		logrus.Debugf("AggregateExpr %v %s", n, n.Op)
 
+		// With cross_group_exact_aggregates the per-group partials are what
+		// makes the aggregate double-count series that live in more than one
+		// group: they are unioned, never deduped. Decline the pushdown so the
+		// engine aggregates locally over the deduped raw series. A single
+		// server_group sees the whole series set, so there is nothing to fix.
+		if state.cfg.CrossGroupExactAggregates && len(state.sgs) > 1 {
+			reason = reasonExactAggregates
+			return nil, nil
+		}
+
 		// Mark the fan-out as an aggregation pushdown: each server_group
 		// returns an aggregate partial that the engine re-combines, so the
 		// cross-group merge must union the partials instead of deduping them
@@ -1253,6 +1263,12 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 		// (min, max, topk, bottomk) to be re-run against the expression.
 		aggregateBinaryExpr := func(agg *parser.AggregateExpr) (parser.Node, error) {
 			logrus.Debugf("BinaryExpr (AggregateExpr + Literal): %v", n)
+
+			// cross_group_exact_aggregates: see the AggregateExpr case.
+			if state.cfg.CrossGroupExactAggregates && len(state.sgs) > 1 {
+				reason = reasonExactAggregates
+				return nil, nil
+			}
 
 			// Same as the AggregateExpr case: per-group aggregate partials
 			// must be unioned by the cross-group merge, not deduped.
