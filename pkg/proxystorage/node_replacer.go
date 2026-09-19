@@ -267,84 +267,8 @@ func (r *nodeReplacer) replace() (parser.Node, error) {
 	case *parser.Call:
 		return r.replaceCall(n)
 
-	// If we are simply fetching a Vector then we can fetch the data using the same step that
-	// the query came in as (reducing the amount of data we need to fetch)
 	case *parser.VectorSelector:
-		// If the vector selector already has the data we can skip
-		if n.UnexpandedSeriesSet != nil {
-			r.revisit = true
-			return nil, nil
-		}
-
-		// Check if this VectorSelector is below a MatrixSelector.
-		// If we hit this someone is asking for a matrix directly, if so then we don't
-		// have anyway to ask for less-- since this is exactly what they are asking for
-		if len(r.path) > 0 {
-			if _, ok := r.path[len(r.path)-1].(*parser.MatrixSelector); ok {
-				r.reason = reasonMatrixParent
-				return nil, nil
-			}
-		}
-
-		logrus.Debugf("VectorSelector: %v", n)
-		_ = r.removeOffset()
-
-		var result storage.SeriesSet
-		origLookback := n.LookbackDelta
-		if r.s.Interval > 0 {
-			n.LookbackDelta = r.s.Interval - time.Duration(1)
-			result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
-				Start: r.s.Start.Add(-r.reqOffset),
-				End:   r.s.End.Add(-r.reqOffset),
-				Step:  r.s.Interval,
-			})
-		} else {
-			result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
-		}
-
-		if err := result.Err(); err != nil {
-			return nil, err
-		}
-		result, lossy := containsLossyHistogram(result)
-		if lossy {
-			// We abandoned the pushdown — restore the original LookbackDelta
-			// so the engine's local eval uses the default lookback when it
-			// calls Querier.Select instead of the tighter step-minus-1
-			// window we set above (which would otherwise drop boundary
-			// samples like a load at t=0 with a range query starting at 0).
-			n.LookbackDelta = origLookback
-			r.reason = reasonLossyHistogram
-			return nil, nil
-		}
-
-		if n.Timestamp != nil {
-			// Downstream resolved @ T (and any offset) when evaluating
-			// n.String(); the result is step-invariant. Replace with a flat
-			// VectorSelector whose samples sit at the request timestamps so
-			// the engine looks them up by ts directly instead of reapplying
-			// @ T - offset to a sample set that's already pinned.
-			//
-			// Preserve Name and LabelMatchers: functions like absent() read
-			// these from the (already-resolved) VectorSelector AST node to
-			// synthesize output labels (createLabelsForAbsentFunction). The
-			// matchers are inert for data lookup at this point — the
-			// downstream already returned exactly the right series — but
-			// dropping them would mean absent(foo{job="x"} @ T) returns
-			// `{} 1` instead of `{job="x"} 1`.
-			ret := &parser.VectorSelector{
-				Name:           n.Name,
-				LabelMatchers:  n.LabelMatchers,
-				OriginalOffset: r.synthOffset,
-			}
-			if r.s.Interval > 0 {
-				ret.LookbackDelta = r.s.Interval - time.Duration(1)
-			}
-			ret.UnexpandedSeriesSet = result
-			return ret, nil
-		}
-		n.OriginalOffset = r.offset
-		n.UnexpandedSeriesSet = result
-		return n, nil
+		return r.replaceVectorSelector(n)
 
 	// If we hit this someone is asking for a matrix directly, if so then we don't
 	// have anyway to ask for less-- since this is exactly what they are asking for
@@ -829,6 +753,86 @@ func (r *nodeReplacer) replaceCall(n *parser.Call) (parser.Node, error) {
 	}
 
 	return ret, nil
+}
+
+// If we are simply fetching a Vector then we can fetch the data using the same step that
+// the query came in as (reducing the amount of data we need to fetch)
+func (r *nodeReplacer) replaceVectorSelector(n *parser.VectorSelector) (parser.Node, error) {
+	// If the vector selector already has the data we can skip
+	if n.UnexpandedSeriesSet != nil {
+		r.revisit = true
+		return nil, nil
+	}
+
+	// Check if this VectorSelector is below a MatrixSelector.
+	// If we hit this someone is asking for a matrix directly, if so then we don't
+	// have anyway to ask for less-- since this is exactly what they are asking for
+	if len(r.path) > 0 {
+		if _, ok := r.path[len(r.path)-1].(*parser.MatrixSelector); ok {
+			r.reason = reasonMatrixParent
+			return nil, nil
+		}
+	}
+
+	logrus.Debugf("VectorSelector: %v", n)
+	_ = r.removeOffset()
+
+	var result storage.SeriesSet
+	origLookback := n.LookbackDelta
+	if r.s.Interval > 0 {
+		n.LookbackDelta = r.s.Interval - time.Duration(1)
+		result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
+			Start: r.s.Start.Add(-r.reqOffset),
+			End:   r.s.End.Add(-r.reqOffset),
+			Step:  r.s.Interval,
+		})
+	} else {
+		result = r.client.Query(r.ctx, n.String(), r.s.Start.Add(-r.reqOffset))
+	}
+
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	result, lossy := containsLossyHistogram(result)
+	if lossy {
+		// We abandoned the pushdown — restore the original LookbackDelta
+		// so the engine's local eval uses the default lookback when it
+		// calls Querier.Select instead of the tighter step-minus-1
+		// window we set above (which would otherwise drop boundary
+		// samples like a load at t=0 with a range query starting at 0).
+		n.LookbackDelta = origLookback
+		r.reason = reasonLossyHistogram
+		return nil, nil
+	}
+
+	if n.Timestamp != nil {
+		// Downstream resolved @ T (and any offset) when evaluating
+		// n.String(); the result is step-invariant. Replace with a flat
+		// VectorSelector whose samples sit at the request timestamps so
+		// the engine looks them up by ts directly instead of reapplying
+		// @ T - offset to a sample set that's already pinned.
+		//
+		// Preserve Name and LabelMatchers: functions like absent() read
+		// these from the (already-resolved) VectorSelector AST node to
+		// synthesize output labels (createLabelsForAbsentFunction). The
+		// matchers are inert for data lookup at this point — the
+		// downstream already returned exactly the right series — but
+		// dropping them would mean absent(foo{job="x"} @ T) returns
+		// `{} 1` instead of `{job="x"} 1`.
+		ret := &parser.VectorSelector{
+			Name:           n.Name,
+			LabelMatchers:  n.LabelMatchers,
+			OriginalOffset: r.synthOffset,
+		}
+		if r.s.Interval > 0 {
+			ret.LookbackDelta = r.s.Interval - time.Duration(1)
+		}
+		ret.UnexpandedSeriesSet = result
+		return ret, nil
+	}
+	n.OriginalOffset = r.offset
+	n.UnexpandedSeriesSet = result
+	return n, nil
 }
 
 func isAgg(node parser.Node) bool {
