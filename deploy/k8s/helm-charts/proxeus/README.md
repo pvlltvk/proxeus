@@ -135,7 +135,7 @@ mcp:
 
 ## Upgrading from chart 0.0.1
 
-- `appVersion` is a release (`v0.2.0`) and `image.tag` defaults to it, instead of tracking `master`.
+- `appVersion` is a release (`v0.3.0`) and `image.tag` defaults to it, instead of tracking `master`.
 - The pod runs as 65534 with a read-only root filesystem. A sidecar you add through `extraContainers` has to
   cope with that, or override `securityContext`.
 - `--web.enable-lifecycle` and the reloader sidecar are now off by default (`webLifecycle`,
