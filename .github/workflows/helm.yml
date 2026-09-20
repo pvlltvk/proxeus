@@ -79,3 +79,5 @@ jobs:
         refuses --set storage.persistence.enabled=true --set replicaCount=3
         refuses --set hpa.enabled=true --set verticalAutoscaler.enabled=true --set verticalAutoscaler.updateMode=Auto
         refuses --set shutdownDelay=bogus
+        refuses -f "$CHART"/ci/rules-values.yaml --set replicaCount=3
+        refuses -f "$CHART"/ci/rules-values.yaml --set hpa.enabled=true

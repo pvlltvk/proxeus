@@ -1,0 +1,25 @@
+# In-process rule evaluation: one replica, since proxeus has no leader election.
+# The rule files come from a ConfigMap of your own; the chart only mounts it.
+replicaCount: 1
+
+extraVolumes:
+  - name: rules
+    configMap:
+      name: proxeus-rules
+
+extraVolumeMounts:
+  - name: rules
+    mountPath: /etc/proxeus-rules
+    readOnly: true
+
+config:
+  global:
+    evaluation_interval: 30s
+  remote_write:
+    - url: http://vminsert:8480/insert/0/prometheus/api/v1/write
+  rule_files:
+    - /etc/proxeus-rules/*.yml
+  proxeus:
+    server_groups:
+      - static_configs:
+          - targets: ['thanos-query:9090']

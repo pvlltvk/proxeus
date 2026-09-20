@@ -31,13 +31,14 @@ Set `configMap: <name>` instead to point at a ConfigMap you manage yourself; `co
 
 | key | default | notes |
 |---|---|---|
-| `replicaCount` | `1` | proxeus is stateless unless `storage.persistence` is on, so scale freely |
+| `replicaCount` | `1` | proxeus is stateless unless `storage.persistence` is on, but see [Rule evaluation and replicas](#rule-evaluation-and-replicas) before scaling out |
 | `image.repository` | `ghcr.io/pvlltvk/proxeus` | `image.tag` empty means the chart's `appVersion`; `image.digest` pins by content |
 | `service` | ClusterIP on 8082 | |
 | `ingress` | disabled | authenticate proxeus (see below) before exposing it |
 | `networkPolicy` | disabled | ingress to 8082 only, from the peers you list |
 | `serviceMonitor` / `podMonitor` | disabled | need the Prometheus Operator CRDs; skipped silently when absent |
 | `hpa` / `verticalAutoscaler` | disabled | an actuating VPA `updateMode` together with the HPA is refused |
+| `rules.alertingOnly` | `false` | states that `config.rule_files` records nothing, which is what makes more than one replica safe — see [Rule evaluation and replicas](#rule-evaluation-and-replicas) |
 | `podDisruptionBudget` | disabled | `maxUnavailable: 1` unless you set a field yourself |
 | `serviceAccount` | created | |
 | `rbac.create` | `true` | ClusterRole reading pods/services/endpoints, for `kubernetes_sd_configs` |
@@ -70,6 +71,40 @@ storage:
 
 Every replica of the Deployment mounts the same claim, so `storage.persistence` with `replicaCount > 1` is
 refused unless the access mode is `ReadWriteMany`.
+
+## Rule evaluation and replicas
+
+proxeus evaluates `config.rule_files` itself, in-process, and has **no leader election**. Every replica therefore
+evaluates every rule:
+
+- alerting rules are fine — Alertmanager deduplicates by label set, the same as a pair of HA Prometheus servers;
+- recording rules are not — each replica `remote_write`s the same series, so the write target receives one copy per
+  replica.
+
+So `config.rule_files` together with more than one possible replica (`replicaCount > 1`, or `hpa.enabled` with
+`maxReplicas > 1`) is refused. Three ways out:
+
+```yaml
+# 1. one replica, rules evaluated in proxeus -- see ci/rules-values.yaml
+replicaCount: 1
+hpa:
+  enabled: false
+
+# 2. rule files that only alert, never record
+replicaCount: 3
+rules:
+  alertingOnly: true
+
+# 3. no rules here at all: an external ruler (Thanos Ruler, a rules-only
+#    Prometheus) queries proxeus and writes its own output
+replicaCount: 3
+```
+
+Option 3 is the one that scales, and it keeps the federated view: the ruler's queries go through proxeus, so its rules
+still span every backend. See [High availability](../../../../README.md#high-availability).
+
+With `configMap: <name>` the chart cannot read the config, so it cannot tell whether your ConfigMap has `rule_files`
+and the check does not run. Multiple replicas with an external ConfigMap are on you.
 
 ## Shutdown
 

@@ -4,6 +4,12 @@
   "type": "object",
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 0 },
+    "rules": {
+      "type": "object",
+      "properties": {
+        "alertingOnly": { "type": "boolean" }
+      }
+    },
     "nameOverride": { "type": ["string", "null"] },
     "fullnameOverride": { "type": ["string", "null"] },
     "deployment": {

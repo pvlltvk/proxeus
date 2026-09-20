@@ -277,6 +277,37 @@ The forwarded token is issued to *Grafana*, so the issuer has to be told to name
 `client_id` to the token's `aud` (in Keycloak, an "Audience" mapper on the Grafana client's dedicated scope adding the
 proxeus client). Without that step proxeus rejects every forwarded token as the wrong audience.
 
+## High availability
+
+The read path is stateless: run as many replicas as you like behind one Service, each answers queries on its own, and
+nothing is shared between them. One thing does not scale that way — **rule evaluation**.
+
+Rules from `rule_files` are evaluated in-process, and proxeus has no leader election, so every replica evaluates every
+rule:
+
+- **alerting rules** are fine. Alertmanager deduplicates by label set, exactly as it does for a pair of HA Prometheus
+  servers.
+- **recording rules** are not. Each replica `remote_write`s the same series, so the write target receives one copy per
+  replica.
+
+That leaves two shapes, and the choice is which of the two you need:
+
+**In-process rules, a single replica.** The simple one. Keep `rule_files` in the proxeus config, run one replica, and
+accept that rule evaluation stops while it restarts. The Helm chart refuses `config.rule_files` with more than one
+possible replica for exactly this reason — see
+[the chart README](deploy/k8s/helm-charts/proxeus/README.md#rule-evaluation-and-replicas).
+
+**An external ruler, replicas as you like.** The scale-out one, and the recommended path. Drop `rule_files` from proxeus
+and hand rule evaluation to a component built for it, pointed at proxeus as its query endpoint:
+
+- **Thanos Ruler** — `thanos rule --query=http://proxeus:8082`, writing to its own object store or `remote_write`.
+- **A rules-only Prometheus** — no scrape targets, `rule_files` of its own, and `remote_read` against proxeus
+  (`/api/v1/read`, with `read_recent: true` so evaluation actually reaches it).
+
+The federated view survives the move, because the ruler's queries still go through proxeus: a rule spanning Thanos and
+VictoriaMetrics keeps working, and proxeus stays stateless. This needs no proxeus-side configuration beyond removing
+`rule_files` — the rulers just see a Prometheus API endpoint.
+
 ## Prometheus fork
 
 Aggregation pushdown needs a hook inside the PromQL engine that upstream Prometheus does not expose. Proxeus therefore
@@ -297,7 +328,8 @@ Grafana Mimir takes with `grafana/mimir-prometheus`.
 
 **Recording and alerting rules** work, and execute across your entire federated view — a global error-rate alert that no
 single backend could evaluate. Proxeus has no local TSDB, so rule output needs a `remote_write` target defined in the
-config; that is where the resulting series are written.
+config; that is where the resulting series are written. Rule evaluation is per-replica, so see
+[High availability](#high-availability) before running more than one.
 
 > **In containers:** `remote_write` needs a writable directory for its WAL. The published image is built `FROM scratch`
 > and runs as `nobody`, so there is nothing writable by default — pass `--storage.path` pointed at a mounted volume:
