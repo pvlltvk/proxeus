@@ -1,4 +1,4 @@
-package proxystorage
+package proxyconfig
 
 import (
 	"strings"
@@ -84,7 +84,7 @@ func TestValidateUniqueServerGroupLabels(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateUniqueServerGroupLabels(tc.groups)
+			err := ValidateUniqueServerGroupLabels(tc.groups)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected an error but got nil")

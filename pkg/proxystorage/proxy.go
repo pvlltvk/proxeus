@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -146,7 +145,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	// series identity — a collision would silently merge unrelated series). With
 	// dedup off it's only a hygiene concern (ambiguous provenance), so we warn
 	// rather than refuse to start, preserving historical proxeus behavior.
-	if err := validateUniqueServerGroupLabels(c.ServerGroups); err != nil {
+	if err := proxyconfig.ValidateUniqueServerGroupLabels(c.ServerGroups); err != nil {
 		if c.CrossGroupDedup {
 			return err
 		}
@@ -554,52 +553,6 @@ func unwrapParens(e parser.Expr) parser.Expr {
 
 func durationMilliseconds(d time.Duration) int64 {
 	return int64(d / (time.Millisecond / time.Nanosecond))
-}
-
-// validateUniqueServerGroupLabels ensures that every server_group carries a
-// non-empty labels set and that no two groups share the same label fingerprint.
-// It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
-// internally so the check is consistent with the one inside promclient.
-//
-// Single-group configurations are exempt: with only one group there is no
-// cross-group identity to disambiguate and no dedup partner, so empty labels
-// are unambiguous.
-func validateUniqueServerGroupLabels(groups []*servergroup.Config) error {
-	if len(groups) < 2 {
-		return nil
-	}
-
-	type entry struct {
-		name   string
-		labels model.LabelSet
-	}
-	seen := make(map[model.Fingerprint][]entry)
-
-	for _, cfg := range groups {
-		if len(cfg.Labels) == 0 {
-			return fmt.Errorf(
-				"server_group label collision: group %s has empty labels — every server_group must declare a unique non-empty 'labels' set",
-				cfg.Name,
-			)
-		}
-		fp := cfg.Labels.FastFingerprint()
-		seen[fp] = append(seen[fp], entry{name: cfg.Name, labels: cfg.Labels})
-	}
-
-	for _, entries := range seen {
-		if len(entries) < 2 {
-			continue
-		}
-		parts := make([]string, len(entries))
-		for i, e := range entries {
-			parts[i] = fmt.Sprintf("%s (labels=%s)", e.name, e.labels)
-		}
-		return fmt.Errorf(
-			"server_group label collision: groups [%s] share the same labels — every server_group must declare a unique non-empty 'labels' set",
-			strings.Join(parts, ", "),
-		)
-	}
-	return nil
 }
 
 // fillStaleNaNGaps inserts StaleNaN markers at the step timestamps where the
