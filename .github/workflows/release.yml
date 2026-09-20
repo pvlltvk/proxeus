@@ -27,7 +27,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Read from the tagged tree: notes committed after the tag are invisible
+          # here. --notes-file and --generate-notes are mutually exclusive in gh.
+          notes_file="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "${notes_file}" ]; then
+            notes_arg=(--notes-file "${notes_file}")
+          else
+            echo "::warning::${notes_file} not in the tagged tree, generating notes from commits"
+            notes_arg=(--generate-notes)
+          fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
+            "${notes_arg[@]}" \
             build/*

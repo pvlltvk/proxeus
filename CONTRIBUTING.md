@@ -27,3 +27,5 @@ These are the same checks CI runs (`.github/workflows/go.yml`). A PR won't merge
 ## Releasing
 
 Maintainer-only: pushing a `v*` tag triggers `.github/workflows/release.yml`, which runs `make release` (cross-platform binaries + `SHA256SUMS`) and publishes a GitHub Release. `.github/workflows/build.yml` builds and pushes the multi-arch Docker image to `ghcr.io/pvlltvk/proxeus` for the same tag.
+
+The release body comes from `docs/release-notes/<tag>.md` in the tagged tree, so **merge the notes before creating the tag** — a file added afterwards is invisible to the workflow, which then falls back to notes generated from the commit list. See `docs/release-notes/README.md`.
