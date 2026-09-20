@@ -1,5 +1,15 @@
 replicaCount: 1
 
+rules:
+  # config.rule_files is evaluated in-process and proxeus has no leader
+  # election, so every replica evaluates every rule and a recording rule
+  # remote_writes the same series once per replica. The chart refuses rule_files
+  # with more than one possible replica unless this says the rule files only
+  # alert -- Alertmanager deduplicates alerts by label set, so evaluating them
+  # everywhere is the usual Prometheus HA pattern. Recording rules plus
+  # scale-out belong in an external ruler that queries proxeus.
+  alertingOnly: false
+
 # ref: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
 deployment:
   enabled: true
