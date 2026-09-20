@@ -125,6 +125,26 @@ oidc:
 			identity: Identity{Name: "alice", Groups: []string{"admins", "viewers"}, Provider: "oidc"},
 		},
 		{
+			name: "groups claim as a single string",
+			claims: map[string]interface{}{
+				"aud":                "proxeus",
+				"preferred_username": "alice",
+				"groups":             "admins",
+			},
+			status:   http.StatusOK,
+			identity: Identity{Name: "alice", Groups: []string{"admins"}, Provider: "oidc"},
+		},
+		{
+			name: "non-string entries in the groups claim are skipped",
+			claims: map[string]interface{}{
+				"aud":                "proxeus",
+				"preferred_username": "alice",
+				"groups":             []interface{}{"admins", 42},
+			},
+			status:   http.StatusOK,
+			identity: Identity{Name: "alice", Groups: []string{"admins"}, Provider: "oidc"},
+		},
+		{
 			name: "azp names the client while aud does not",
 			claims: map[string]interface{}{
 				"aud":                "account",
@@ -263,4 +283,94 @@ oidc:
 			t.Fatalf("status = %d, want 401", w.Code)
 		}
 	})
+}
+
+// The authorization tests in auth_test.go run on basic and trusted_header
+// identities; this is the other provider that carries groups, where they come
+// out of a claim in a signed token rather than a header.
+func TestMiddlewareAuthorizationWithOIDCGroups(t *testing.T) {
+	issuer := newTestIssuer(t)
+	cfg := configFromYAML(t, fmt.Sprintf(`
+oidc:
+  issuer_url: %s
+  client_id: proxeus
+  username_claim: email
+  groups_claim: groups
+authorization:
+  allowed_users: [admin@example.com]
+  allowed_groups: [authors]
+  routes:
+    - path_prefix: /mcp
+      allowed_groups: [authors]
+`, issuer.url))
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		email  string
+		groups []string
+		path   string
+		status int
+	}{
+		{
+			name:   "allowed by a group in the token",
+			email:  "kilgore@kilgore.trout",
+			groups: []string{"authors"},
+			path:   "/api/v1/query",
+			status: http.StatusOK,
+		},
+		{
+			name:   "the same group passes the route rule",
+			email:  "kilgore@kilgore.trout",
+			groups: []string{"authors"},
+			path:   "/mcp",
+			status: http.StatusOK,
+		},
+		{
+			name:   "a group the policy does not list",
+			email:  "kilgore@kilgore.trout",
+			groups: []string{"viewers"},
+			path:   "/api/v1/query",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "no groups claim at all",
+			email:  "bob@example.com",
+			path:   "/api/v1/query",
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "allowed by name where no rule covers the path",
+			email:  "admin@example.com",
+			path:   "/api/v1/query",
+			status: http.StatusOK,
+		},
+		{
+			name:   "the name does not satisfy the route rule's group",
+			email:  "admin@example.com",
+			path:   "/mcp",
+			status: http.StatusForbidden,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claims := map[string]interface{}{"aud": "proxeus", "email": test.email}
+			if test.groups != nil {
+				claims["groups"] = test.groups
+			}
+
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			req.Header.Set("Authorization", "Bearer "+issuer.token(t, claims))
+			w := httptest.NewRecorder()
+			a.Middleware(identityHandler(&Identity{})).ServeHTTP(w, req)
+
+			if w.Code != test.status {
+				t.Fatalf("GET %s as %s: status = %d, want %d", test.path, test.email, w.Code, test.status)
+			}
+		})
+	}
 }
