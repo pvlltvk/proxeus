@@ -1,6 +1,7 @@
 package proxyconfig
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -38,6 +39,26 @@ tls_server_config:
 	}
 	if cfg.WebConfig.ClientCAs != "tls-ca-chain.pem" {
 		t.Errorf("Invalid ClientCAs. Expected 'tls-ca-chain.pem', Got '%s'", cfg.WebConfig.ClientCAs)
+	}
+}
+
+func TestConfigFromBytesRejectsLabelCollision(t *testing.T) {
+	const collide = `
+proxeus:
+  cross_group_dedup: %t
+  server_groups:
+    - static_configs: [{targets: [a:9090]}]
+      labels: {backend: same}
+    - static_configs: [{targets: [b:9090]}]
+      labels: {backend: same}
+`
+	if _, err := ConfigFromBytes([]byte(fmt.Sprintf(collide, true))); err == nil {
+		t.Error("colliding server_group labels were accepted with cross_group_dedup on")
+	}
+	// Without dedup a collision is only a provenance concern, and ApplyConfig
+	// warns about it -- loading must still succeed.
+	if _, err := ConfigFromBytes([]byte(fmt.Sprintf(collide, false))); err != nil {
+		t.Errorf("collision without cross_group_dedup was rejected: %v", err)
 	}
 }
 

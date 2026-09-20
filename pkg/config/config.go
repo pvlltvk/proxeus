@@ -3,7 +3,9 @@ package proxyconfig
 import (
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/exporter-toolkit/web"
 	"github.com/prometheus/prometheus/config"
 	yaml "gopkg.in/yaml.v2"
@@ -28,6 +30,56 @@ var DefaultProxeusConfig = ProxeusConfig{}
 // and the queue manager drops the batch. Restoring the historical default keeps
 // proxeus's requests comfortably under that limit. See issue #781.
 const DefaultMaxSamplesPerSend = 100
+
+// ValidateUniqueServerGroupLabels ensures that every server_group carries a
+// non-empty labels set and that no two groups share the same label fingerprint.
+// It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
+// internally so the check is consistent with the one inside promclient.
+//
+// Single-group configurations are exempt: with only one group there is no
+// cross-group identity to disambiguate and no dedup partner, so empty labels
+// are unambiguous.
+func ValidateUniqueServerGroupLabels(groups []*servergroup.Config) error {
+	if len(groups) < 2 {
+		return nil
+	}
+
+	type entry struct {
+		name   string
+		labels model.LabelSet
+	}
+	seen := make(map[model.Fingerprint][]entry)
+
+	for i, cfg := range groups {
+		name := cfg.Name
+		if name == "" {
+			name = fmt.Sprintf("sg-%d", i)
+		}
+		if len(cfg.Labels) == 0 {
+			return fmt.Errorf(
+				"server_group label collision: group %s has empty labels — every server_group must declare a unique non-empty 'labels' set",
+				name,
+			)
+		}
+		fp := cfg.Labels.FastFingerprint()
+		seen[fp] = append(seen[fp], entry{name: name, labels: cfg.Labels})
+	}
+
+	for _, entries := range seen {
+		if len(entries) < 2 {
+			continue
+		}
+		parts := make([]string, len(entries))
+		for i, e := range entries {
+			parts[i] = fmt.Sprintf("%s (labels=%s)", e.name, e.labels)
+		}
+		return fmt.Errorf(
+			"server_group label collision: groups [%s] share the same labels — every server_group must declare a unique non-empty 'labels' set",
+			strings.Join(parts, ", "),
+		)
+	}
+	return nil
+}
 
 // ConfigFromFile loads a config file at path
 func ConfigFromFile(path string) (*Config, error) {
@@ -190,6 +242,15 @@ func (c *ProxeusConfig) Validate() error {
 	}
 	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
+	}
+	// Dedup keys series identity on these labels, so a collision would silently
+	// merge unrelated series. Checked here as well as in ApplyConfig so that
+	// --check-config and a reload reject it instead of deferring to a startup
+	// fatal. Without dedup it stays a warning, which ApplyConfig still emits.
+	if c.CrossGroupDedup {
+		if err := ValidateUniqueServerGroupLabels(c.ServerGroups); err != nil {
+			return err
+		}
 	}
 	return nil
 }
