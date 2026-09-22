@@ -24,7 +24,7 @@ jobs:
     - name: install
       run: |
         go install -v golang.org/x/tools/cmd/goimports@latest
-        go install -v github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7.2
+        go install -v github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
     - name: Test
       run: |
