@@ -33,4 +33,17 @@ topologySpreadConstraints:
       matchLabels:
         app.kubernetes.io/name: proxeus
 
-priorityClassName: system-cluster-critical
+# A PriorityClass of your own, created outside the chart. Do not reach for
+# system-cluster-critical here: the apiserver accepts it outside kube-system
+# and it lets proxeus preempt the control plane's own add-ons.
+# priorityClassName: proxeus-high
+
+config:
+  global:
+    evaluation_interval: 5s
+  proxeus:
+    server_groups:
+      - static_configs:
+          - targets: ['thanos-query:9090']
+      - static_configs:
+          - targets: ['vmselect:8481']

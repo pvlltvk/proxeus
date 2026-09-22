@@ -8,3 +8,9 @@ ingress:
     - secretName: proxeus-tls
       hosts:
         - proxeus.example.com
+
+config:
+  proxeus:
+    server_groups:
+      - static_configs:
+          - targets: ['thanos-query:9090']

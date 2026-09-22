@@ -27,6 +27,21 @@ spec:
     - port: http
       # --metrics-path, which extraArgs may move
       path: {{ include "chart.flag" (list . "metrics-path" "/metrics") }}
+      {{- with .Values.serviceMonitor.scheme }}
+      scheme: {{ . }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.tlsConfig }}
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.basicAuth }}
+      basicAuth:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.authorization }}
+      authorization:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       interval: {{ .Values.serviceMonitor.interval }}
       {{- with .Values.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}

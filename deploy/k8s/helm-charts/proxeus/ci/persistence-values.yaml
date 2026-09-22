@@ -2,7 +2,16 @@ storage:
   path: /data
   persistence:
     enabled: true
-    storageClassName: fast
+    # Empty means the cluster's default StorageClass. Name one only if it
+    # exists: an unbound claim leaves the pod Pending, and neither the class
+    # nor the size can be changed by a later `helm upgrade`.
+    storageClassName: ""
     size: 20Gi
     annotations:
       everest.io/disk-volume-type: SSD
+
+config:
+  proxeus:
+    server_groups:
+      - static_configs:
+          - targets: ['thanos-query:9090']

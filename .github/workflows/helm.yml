@@ -52,14 +52,17 @@ jobs:
     # Rendering is as far as CI can go without a cluster: every combination
     # under ci/ must produce Kubernetes objects that pass schema validation.
     - name: Render
+      # bash without pipefail would take the exit status from kubeconform, which
+      # happily reports "0 resources" when helm template failed upstream.
+      shell: bash
       run: |
         render() {
           helm template proxeus "$CHART" --api-versions monitoring.coreos.com/v1 "$@" \
             | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" \
                 -schema-location default -schema-location "$CRD_SCHEMAS"
         }
-        echo "== defaults"
-        render
+        echo "== defaults + a minimal backend"
+        render --set-json 'config.proxeus.server_groups=[{"static_configs":[{"targets":["thanos-query:9090"]}]}]'
         for f in "$CHART"/ci/*-values.yaml; do
           echo "== $f"
           render -f "$f"
@@ -74,6 +77,7 @@ jobs:
             exit 1
           fi
         }
+        refuses
         refuses --set mcp.enabled=true
         refuses --set configmapReloader.enabled=true
         refuses --set storage.persistence.enabled=true --set replicaCount=3
