@@ -3,7 +3,7 @@
 # ── Stage 1: Build Go binaries ───────────────────────────────────────────────
 # The Mantine UI assets are pre-built and committed under pkg/mantineui/static
 # (see pkg/mantineui/embed.go); there is no node stage here.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETARCH
