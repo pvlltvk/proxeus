@@ -26,6 +26,21 @@ spec:
   podMetricsEndpoints:
     - port: http
       path: {{ include "chart.flag" (list . "metrics-path" "/metrics") }}
+      {{- with .Values.podMonitor.scheme }}
+      scheme: {{ . }}
+      {{- end }}
+      {{- with .Values.podMonitor.tlsConfig }}
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podMonitor.basicAuth }}
+      basicAuth:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podMonitor.authorization }}
+      authorization:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       interval: {{ .Values.podMonitor.interval }}
       {{- with .Values.podMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}

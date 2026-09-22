@@ -255,10 +255,31 @@ Refuse the combinations that are broken or unsafe instead of shipping them.
 {{- fail "config.proxeus.server_groups is empty: proxeus would start, pass its probes and answer every query with nothing. List the backends to federate -- static_configs, dns_sd_configs, or a kubernetes_sd_configs scoped to a namespace and filtered down to one port per target -- or set configMap: <name> to manage the config yourself. An unscoped `kubernetes_sd_configs: - role: pod` is not a safe starting point: it makes every pod in the cluster a backend, proxeus included, and the first query OOMKills the pod" -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.webConfig.existingSecret -}}
+{{- if not (or .Values.webConfig.tls .Values.webConfig.basicAuthUsers) -}}
+{{- fail "webConfig.existingSecret needs webConfig.tls and/or webConfig.basicAuthUsers to say what that file turns on: --web.config.file covers the whole listener, /-/healthy, /-/ready and /metrics included, and the chart cannot read the Secret to wire the probes and the ServiceMonitor to match" -}}
+{{- end -}}
+{{- if and .Values.webConfig.basicAuthUsers (not .Values.probes.httpHeaders) -}}
+{{- fail "webConfig.basicAuthUsers authenticates /-/healthy and /-/ready as well, and the kubelet sends no credentials, so liveness 401s and restarts the pod forever. Give the probes the credentials with probes.httpHeaders (name: Authorization, value: Basic <base64 of user:password>), or use config.proxeus.auth.basic instead -- it exempts the probe paths and /metrics" -}}
+{{- end -}}
+{{- if and .Values.webConfig.tls (not (eq (upper (toString .Values.probes.scheme)) "HTTPS")) -}}
+{{- fail "webConfig.tls serves the probe endpoints over TLS too: set probes.scheme: HTTPS, or the kubelet's plaintext GET fails and liveness restarts the pod forever" -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $monitor := dict "serviceMonitor" .Values.serviceMonitor "podMonitor" .Values.podMonitor -}}
+{{- if $monitor.enabled -}}
+{{- if and $.Values.webConfig.basicAuthUsers (not (or $monitor.basicAuth $monitor.authorization)) -}}
+{{- fail (printf "%s.enabled with webConfig.basicAuthUsers: --web.config.file authenticates /metrics too, so every scrape gets a 401. Set %s.basicAuth (or %s.authorization) to the same credentials, or use config.proxeus.auth, which leaves /metrics exempt" $name $name $name) -}}
+{{- end -}}
+{{- if and $.Values.webConfig.tls (not (eq (lower (toString (default "" $monitor.scheme))) "https")) -}}
+{{- fail (printf "%s.enabled with webConfig.tls: set %s.scheme: https (and %s.tlsConfig) or the scrape talks plaintext to a TLS listener" $name $name $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.mcp.enabled -}}
-{{- $authenticated := or .Values.mcp.authenticatedByProxy .Values.webConfig.existingSecret (dig "proxeus" "auth" false (default dict .Values.config)) -}}
+{{- $authenticated := or .Values.mcp.authenticatedByProxy .Values.webConfig.basicAuthUsers (dig "proxeus" "auth" false (default dict .Values.config)) -}}
 {{- if not $authenticated -}}
-{{- fail "mcp.enabled requires authentication: set config.proxeus.auth or webConfig.existingSecret, or mcp.authenticatedByProxy: true when something in front of proxeus authenticates" -}}
+{{- fail "mcp.enabled requires authentication: set config.proxeus.auth or webConfig.basicAuthUsers, or mcp.authenticatedByProxy: true when something in front of proxeus authenticates. webConfig.tls on its own encrypts the endpoint without authenticating it" -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.hpa.enabled .Values.verticalAutoscaler.enabled (not (eq (default "Off" .Values.verticalAutoscaler.updateMode) "Off")) -}}
