@@ -53,9 +53,13 @@ data:
     ### Proxeus configuration
     ##
     proxeus:
+      # Replace with the backends to federate. An unscoped
+      # `kubernetes_sd_configs: - role: pod` makes every pod in the cluster a
+      # backend, proxeus included, and the first query OOMKills it: scope
+      # discovery to a namespace and filter it down to one port per target.
       server_groups:
-      - kubernetes_sd_configs:
-        - role: pod
+      - static_configs:
+        - targets: ['thanos-query:9090']
 
 kind: ConfigMap
 metadata:

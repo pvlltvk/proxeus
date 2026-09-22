@@ -68,8 +68,8 @@ serviceAccount:
   name:
 
 # Read access to pods/services/endpoints, which kubernetes_sd_configs in the
-# config needs -- including the server_groups default below. Turn it off when
-# the config only uses static_configs or non-kubernetes discovery.
+# config needs. Turn it off when the config only uses static_configs or
+# non-kubernetes discovery.
 rbac:
   create: true
   extraRules: []
@@ -143,6 +143,13 @@ serviceMonitor:
   honorLabels: false
   relabelings: []
   metricRelabelings: []
+  # config.proxeus.auth leaves /metrics exempt, so a scrape needs nothing here.
+  # --web.config.file does not: it authenticates and TLS-wraps every path, so a
+  # webConfig release has to hand the scrape the same credentials.
+  scheme: ""
+  tlsConfig: {}
+  basicAuth: {}
+  authorization: {}
 
 podMonitor:
   # Alternative to serviceMonitor when the Service is disabled or scraping
@@ -155,6 +162,10 @@ podMonitor:
   honorLabels: false
   relabelings: []
   metricRelabelings: []
+  scheme: ""
+  tlsConfig: {}
+  basicAuth: {}
+  authorization: {}
 
 # ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
 # The image is FROM scratch and runs as nobody (65534); nothing in it needs a
@@ -232,9 +243,29 @@ mcp:
 
 # --web.config.file: TLS server config and/or basic_auth_users, from a Secret
 # you create. See https://prometheus.io/docs/prometheus/latest/configuration/https/
+#
+# It covers the whole listener -- /-/healthy, /-/ready and /metrics included --
+# so probes and scrapes have to match it, and the chart cannot read the Secret
+# to find out how. Say so here and it wires the probes and refuses the
+# combinations that cannot work. config.proxeus.auth is the easier option: it
+# exempts those paths by default.
 webConfig:
   existingSecret: ""
   key: web-config.yaml
+  # the file sets tls_server_config
+  tls: false
+  # the file sets basic_auth_users
+  basicAuthUsers: false
+
+# httpGet probes against /-/healthy and /-/ready. scheme has to be HTTPS once
+# webConfig serves TLS, and httpHeaders is how the kubelet authenticates -- it
+# gets no credentials otherwise. Anything here is part of the pod template, so
+# a password in httpHeaders is readable by anything that can read pods.
+probes:
+  scheme: HTTP
+  httpHeaders: []
+    # - name: Authorization
+    #   value: Basic YWxpY2U6czNjcmV0
 
 # Secrets mounted into the proxeus container, for the *_file options of the
 # server groups' http_client (bearer_token_file, basic_auth.password_file,
@@ -302,6 +333,17 @@ config:
     ### Proxeus configuration
     ##
     proxeus:
-      server_groups:
-      - kubernetes_sd_configs:
-        - role: pod
+      # No default backends: the chart has no way to guess them, and the
+      # obvious guess is actively harmful. An unscoped `kubernetes_sd_configs:
+      # - role: pod` makes every pod in the cluster a PromQL backend --
+      # proxeus itself included -- and the first query fans out wide enough to
+      # OOMKill the pod. So the chart refuses to render until this lists real
+      # backends, e.g.
+      #
+      #   server_groups:
+      #   - static_configs:
+      #     - targets: ['thanos-query:9090']
+      #
+      # or a kubernetes_sd_configs scoped to a namespace and a port. Set
+      # configMap: <name> instead to keep the config out of Helm entirely.
+      server_groups: []

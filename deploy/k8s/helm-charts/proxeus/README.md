@@ -29,6 +29,32 @@ config:
 
 Set `configMap: <name>` instead to point at a ConfigMap you manage yourself; `config:` is then ignored.
 
+`config.proxeus.server_groups` has **no default** and the chart refuses to render while it is empty — there is
+no sensible guess, and the obvious one is a trap. An unscoped
+
+```yaml
+    server_groups:
+      - kubernetes_sd_configs:
+          - role: pod            # do not do this
+```
+
+makes every pod in the cluster a PromQL backend, proxeus included, on every port each pod declares. One
+`/api/v1/query?query=up` then fans out across all of them: the pod grew past 1.8Gi in under a minute and was
+OOMKilled while the query was still returning `context deadline exceeded`. Discovery-based groups need a
+namespace scope and a port filter, e.g.
+
+```yaml
+    server_groups:
+      - kubernetes_sd_configs:
+          - role: service
+            namespaces:
+              names: [monitoring]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_service_port_name]
+            regex: thanos-query;http
+            action: keep
+```
+
 | key | default | notes |
 |---|---|---|
 | `replicaCount` | `1` | proxeus is stateless unless `storage.persistence` is on, but see [Rule evaluation and replicas](#rule-evaluation-and-replicas) before scaling out |
@@ -36,8 +62,10 @@ Set `configMap: <name>` instead to point at a ConfigMap you manage yourself; `co
 | `service` | ClusterIP on 8082 | |
 | `ingress` | disabled | authenticate proxeus (see below) before exposing it |
 | `networkPolicy` | disabled | ingress to 8082 only, from the peers you list |
-| `serviceMonitor` / `podMonitor` | disabled | need the Prometheus Operator CRDs; skipped silently when absent |
-| `hpa` / `verticalAutoscaler` | disabled | an actuating VPA `updateMode` together with the HPA is refused |
+| `config.proxeus.server_groups` | none | required: the chart refuses to render without backends, see above |
+| `serviceMonitor` / `podMonitor` | disabled | need the Prometheus Operator CRDs; skipped, with a warning in NOTES, when absent |
+| `probes` | plain HTTP, no headers | scheme and headers for the liveness/readiness probes, see [Secrets](#secrets) |
+| `hpa` / `verticalAutoscaler` | disabled | an actuating VPA `updateMode` together with the HPA is refused; the VPA needs its own CRDs and is skipped, with a warning, when absent |
 | `rules.alertingOnly` | `false` | states that `config.rule_files` records nothing, which is what makes more than one replica safe — see [Rule evaluation and replicas](#rule-evaluation-and-replicas) |
 | `podDisruptionBudget` | disabled | `maxUnavailable: 1` unless you set a field yourself |
 | `serviceAccount` | created | |
@@ -132,7 +160,9 @@ proxeus does **not** expand environment variables in its config file, so credent
   (`bearer_token_file`, `basic_auth.password_file`, `tls_config.{ca,cert,key}_file`) and mount the Secret with
   `extraSecretMounts`. See [`ci/secrets-values.yaml`](ci/secrets-values.yaml).
 - TLS for proxeus' own listener, or `basic_auth_users` for `--web.config.file`: put the file in a Secret and set
-  `webConfig.existingSecret`; the chart mounts it at `/etc/proxeus-web/` and passes the flag.
+  `webConfig.existingSecret`; the chart mounts it at `/etc/proxeus-web/` and passes the flag. Unlike
+  `config.proxeus.auth`, that file covers **every** path — `/-/healthy`, `/-/ready` and `/metrics` included —
+  so the probes and any ServiceMonitor have to be told about it, see below.
 - `config.proxeus.auth.basic.users` holds bcrypt hashes inline. Those go through the ConfigMap like the rest of
   the config; if you would rather not have them in a ConfigMap at all, render the whole config into a Secret
   yourself — but note that `configMap: <name>` expects a ConfigMap, so this needs `extraVolumes`/
@@ -140,8 +170,43 @@ proxeus does **not** expand environment variables in its config file, so credent
 - Environment variables the Prometheus SD libraries read themselves (cloud credentials, `HTTP_PROXY`) go in
   `env` / `envFrom`.
 
-Note that `/metrics`, `/-/healthy` and `/-/ready` are exempt from authentication by default, so probes and
-ServiceMonitors keep working with `config.proxeus.auth` on. Override `auth.exempt_paths` and you own that.
+### Which authentication to use
+
+`config.proxeus.auth` exempts `/metrics`, `/-/healthy` and `/-/ready` by default, so probes and ServiceMonitors
+keep working with nothing extra. Override `auth.exempt_paths` and you own that.
+
+`--web.config.file` has no exemptions. Everything the kubelet or Prometheus sends to a `webConfig` release needs
+credentials of its own, so the chart cannot infer what that Secret contains and asks:
+
+```yaml
+webConfig:
+  existingSecret: proxeus-web-config
+  basicAuthUsers: true          # the file sets basic_auth_users
+  tls: true                     # the file sets tls_server_config
+
+probes:
+  scheme: HTTPS                 # required by webConfig.tls
+  httpHeaders:                  # required by webConfig.basicAuthUsers
+    - name: Authorization
+      value: Basic YWxpY2U6czNjcmV0
+
+serviceMonitor:
+  enabled: true
+  scheme: https
+  tlsConfig:
+    insecureSkipVerify: true
+  basicAuth:
+    username:
+      name: proxeus-scrape-credentials
+      key: username
+    password:
+      name: proxeus-scrape-credentials
+      key: password
+```
+
+Leaving any of those out is refused at render time rather than shipped: without `probes.httpHeaders` the kubelet
+gets a 401 from `/-/healthy`, liveness fails, and the pod restarts forever. `probes.httpHeaders` ends up in the
+pod template in clear text, which is the other reason to prefer `config.proxeus.auth`.
 
 ## Reloading config
 
@@ -168,15 +233,43 @@ mcp:
   authenticatedByProxy: true   # oauth2-proxy, an authenticating ingress, ...
 ```
 
+## Values `helm upgrade` cannot change
+
+Some values map onto Kubernetes fields that are immutable after creation. The chart still renders the new value,
+the API server rejects or ignores it, and the release looks fine:
+
+| value | what happens |
+|---|---|
+| `service.clusterIP` | immutable on an existing Service; the upgrade fails. Delete and recreate the Service, or the release |
+| `storage.persistence.size` | only grows, and only on a StorageClass with `allowVolumeExpansion: true`; ignored otherwise |
+| `storage.persistence.storageClassName` | immutable on an existing claim. A claim that never bound (a class that does not exist) cannot be fixed by an upgrade either — delete the PVC, then upgrade |
+
+Pick the storage values before the first install, and check `kubectl get storageclass` for a class that actually
+exists: naming one that does not leaves the claim `Pending` and the pod unschedulable, with no way out through
+`helm upgrade`.
+
+## Upgrading to chart 0.3.0
+
+- `config.proxeus.server_groups` no longer defaults to `kubernetes_sd_configs: - role: pod`. That default made
+  every pod in the cluster a backend and OOMKilled proxeus on the first query; it is now empty and required. An
+  upgrade that relied on it is refused until the backends are spelled out.
+- `webConfig.existingSecret` now needs `webConfig.tls` and/or `webConfig.basicAuthUsers`, and the matching
+  `probes` (and monitor) settings. The combination was accepted before and crash-looped.
+- `mcp.enabled` is no longer satisfied by `webConfig.existingSecret` alone — `webConfig.basicAuthUsers` (or
+  `config.proxeus.auth`, or `mcp.authenticatedByProxy`) is what counts. TLS without basic auth encrypts the MCP
+  endpoint without authenticating it.
+- `verticalAutoscaler` renders only when the VPA CRDs are registered, matching `serviceMonitor`/`podMonitor`,
+  instead of failing the install.
+
 ## Upgrading from chart 0.0.1
 
-- `appVersion` is a release (`v0.3.0`) and `image.tag` defaults to it, instead of tracking `master`.
+- `appVersion` is a release (`v0.3.3`) and `image.tag` defaults to it, instead of tracking `master`.
 - The pod runs as 65534 with a read-only root filesystem. A sidecar you add through `extraContainers` has to
   cope with that, or override `securityContext`.
 - `--web.enable-lifecycle` and the reloader sidecar are now off by default (`webLifecycle`,
   `configmapReloader.enabled`).
 - `resources` defaults are higher; the old 100m/128Mi could not merge much.
-- A ClusterRole/ClusterRoleBinding is created (`rbac.create`), which the default `kubernetes_sd_configs` config
-  always needed and the chart never shipped.
+- A ClusterRole/ClusterRoleBinding is created (`rbac.create`), which any `kubernetes_sd_configs` config needs and
+  the chart never shipped. Turn it off when the config only uses `static_configs`.
 - `hpa`, `podDisruptionBudget` and `verticalAutoscaler` now render current API versions
   (`autoscaling/v2`, `policy/v1`, `autoscaling.k8s.io/v1`); the old ones were removed in Kubernetes 1.25/1.26.

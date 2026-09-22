@@ -28,3 +28,15 @@ something in front of proxeus authenticates.
 WARNING: --web.enable-lifecycle is on, so /-/reload and /-/quit are served to
 anything that can reach the pod. Restrict it with networkPolicy.ingress.
 {{- end }}
+{{- if and (or .Values.serviceMonitor.enabled .Values.podMonitor.enabled) (not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1")) }}
+
+WARNING: serviceMonitor/podMonitor are enabled but monitoring.coreos.com/v1 is
+not registered in this cluster, so nothing was created and proxeus is not being
+scraped. Install the Prometheus Operator CRDs and upgrade the release.
+{{- end }}
+{{- if and .Values.verticalAutoscaler.enabled (not (.Capabilities.APIVersions.Has "autoscaling.k8s.io/v1")) }}
+
+WARNING: verticalAutoscaler is enabled but autoscaling.k8s.io/v1 is not
+registered in this cluster, so no VerticalPodAutoscaler was created. Install the
+VPA CRDs and upgrade the release.
+{{- end }}

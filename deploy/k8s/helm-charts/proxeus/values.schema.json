@@ -168,7 +168,26 @@
       "type": "object",
       "properties": {
         "existingSecret": { "type": "string" },
-        "key": { "type": "string", "minLength": 1 }
+        "key": { "type": "string", "minLength": 1 },
+        "tls": { "type": "boolean" },
+        "basicAuthUsers": { "type": "boolean" }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "properties": {
+        "scheme": { "type": "string", "enum": ["HTTP", "HTTPS", "http", "https"] },
+        "httpHeaders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "string" }
+            }
+          }
+        }
       }
     },
     "extraSecretMounts": {
@@ -227,7 +246,11 @@
         "annotations": { "type": "object" },
         "honorLabels": { "type": "boolean" },
         "relabelings": { "type": "array", "items": { "type": "object" } },
-        "metricRelabelings": { "type": "array", "items": { "type": "object" } }
+        "metricRelabelings": { "type": "array", "items": { "type": "object" } },
+        "scheme": { "type": "string", "enum": ["", "http", "https"] },
+        "tlsConfig": { "type": "object" },
+        "basicAuth": { "type": "object" },
+        "authorization": { "type": "object" }
       }
     }
   }
