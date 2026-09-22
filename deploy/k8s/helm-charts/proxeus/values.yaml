@@ -68,8 +68,8 @@ serviceAccount:
   name:
 
 # Read access to pods/services/endpoints, which kubernetes_sd_configs in the
-# config needs -- including the server_groups default below. Turn it off when
-# the config only uses static_configs or non-kubernetes discovery.
+# config needs. Turn it off when the config only uses static_configs or
+# non-kubernetes discovery.
 rbac:
   create: true
   extraRules: []
@@ -302,6 +302,17 @@ config:
     ### Proxeus configuration
     ##
     proxeus:
-      server_groups:
-      - kubernetes_sd_configs:
-        - role: pod
+      # No default backends: the chart has no way to guess them, and the
+      # obvious guess is actively harmful. An unscoped `kubernetes_sd_configs:
+      # - role: pod` makes every pod in the cluster a PromQL backend --
+      # proxeus itself included -- and the first query fans out wide enough to
+      # OOMKill the pod. So the chart refuses to render until this lists real
+      # backends, e.g.
+      #
+      #   server_groups:
+      #   - static_configs:
+      #     - targets: ['thanos-query:9090']
+      #
+      # or a kubernetes_sd_configs scoped to a namespace and a port. Set
+      # configMap: <name> instead to keep the config out of Helm entirely.
+      server_groups: []

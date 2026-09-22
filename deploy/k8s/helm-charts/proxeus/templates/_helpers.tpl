@@ -250,6 +250,11 @@ Refuse the combinations that are broken or unsafe instead of shipping them.
 {{- if and .Values.configmapReloader.enabled (not .Values.webLifecycle) -}}
 {{- fail "configmapReloader.enabled needs webLifecycle: true -- without it /-/reload is not served and the sidecar reloads nothing" -}}
 {{- end -}}
+{{- if not .Values.configMap -}}
+{{- if not (dig "proxeus" "server_groups" false (default dict .Values.config)) -}}
+{{- fail "config.proxeus.server_groups is empty: proxeus would start, pass its probes and answer every query with nothing. List the backends to federate -- static_configs, dns_sd_configs, or a kubernetes_sd_configs scoped to a namespace and filtered down to one port per target -- or set configMap: <name> to manage the config yourself. An unscoped `kubernetes_sd_configs: - role: pod` is not a safe starting point: it makes every pod in the cluster a backend, proxeus included, and the first query OOMKills the pod" -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.mcp.enabled -}}
 {{- $authenticated := or .Values.mcp.authenticatedByProxy .Values.webConfig.existingSecret (dig "proxeus" "auth" false (default dict .Values.config)) -}}
 {{- if not $authenticated -}}
