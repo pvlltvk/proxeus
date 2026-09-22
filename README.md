@@ -89,7 +89,7 @@ docker run -p 8082:8082 -v $PWD/config.yaml:/etc/proxeus/config.yaml:ro \
   ghcr.io/pvlltvk/proxeus:latest --config=/etc/proxeus/config.yaml
 ```
 
-Or build from source (Go 1.26+):
+Or build from source (Go 1.27+):
 
 ```sh
 git clone git@github.com:pvlltvk/proxeus.git
