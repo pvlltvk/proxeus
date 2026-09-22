@@ -1,7 +1,7 @@
 apiVersion: v2
 name: proxeus
-version: 0.2.0
-appVersion: v0.3.0
+version: 0.3.0
+appVersion: v0.3.3
 description: A single PromQL endpoint over many Prometheus-compatible backends
 home: https://github.com/pvlltvk/proxeus
 icon: https://raw.githubusercontent.com/pvlltvk/proxeus/main/logo.svg
