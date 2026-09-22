@@ -1,5 +1,8 @@
 # Config managed outside Helm, so the reload sidecar earns its keep and the
-# lifecycle endpoint has to be on for it.
+# lifecycle endpoint has to be on for it. The chart only mounts the ConfigMap;
+# create it in the release namespace first:
+#   kubectl create configmap proxeus-config-external --from-file=config.yaml
+# The init container below then waits for the backend that config points at.
 configMap: proxeus-config-external
 
 webLifecycle: true
@@ -24,13 +27,30 @@ initContainers:
     image: busybox:1.36
     command: ['sh', '-c', 'until nc -z thanos-query 9090; do sleep 2; done']
 
+# An authenticating sidecar in front of proxeus, so only :4180 is worth
+# exposing. Placeholder credentials -- point it at your own IdP. /-/healthy and
+# /-/ready stay unauthenticated so the kubelet's probes still pass through.
 extraContainers:
   - name: oauth2-proxy
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
-    args: ['--upstream=http://127.0.0.1:8082', '--http-address=0.0.0.0:4180']
+    args:
+      - --provider=google
+      - --client-id=proxeus-demo
+      - --client-secret=proxeus-demo-secret
+      - --cookie-secret=0123456789abcdef0123456789abcdef
+      - --email-domain=*
+      - --http-address=0.0.0.0:4180
+      - --upstream=http://127.0.0.1:8082
+      - --skip-auth-route=^/-/(healthy|ready)$
     ports:
       - containerPort: 4180
         name: oauth2
+    resources:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+      limits:
+        memory: 64Mi
 
 extraVolumes:
   - name: tmp

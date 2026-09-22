@@ -21,3 +21,9 @@ networkPolicy:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: grafana
+
+config:
+  proxeus:
+    server_groups:
+      - static_configs:
+          - targets: ['thanos-query:9090']
