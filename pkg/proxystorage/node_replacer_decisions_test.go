@@ -244,6 +244,49 @@ func TestNodeReplacerDecisions(t *testing.T) {
 			},
 			calls: []string{"QueryRange[agg=false] rate(foo[1m]) @ 1699999440000 to 1700000000000 step 1m0s"},
 		},
+		// Nothing below the subquery is pushed, so neither is the subquery.
+		{
+			expr: "(vector(1))[10m:1m]",
+			decisions: []string{
+				"call/fallback/offset_mismatch=1", "call/fallback/subquery_child=1",
+				"subquery/fallback/no_inner_pushdown=1",
+			},
+			calls: []string{},
+		},
+		// An inner pushdown counts every enclosing subquery as pushed.
+		{
+			expr: "(absent_over_time(sum(foo)[10m:1m]))[1h:5m]",
+			decisions: []string{
+				"aggregate/fallback/subquery_child=2", "aggregate/pushed/=1",
+				"call/fallback/nested_aggregate=1", "call/fallback/subquery_child=1",
+				"subquery/fallback/subquery_child=1", "subquery/pushed/=2",
+				"vector_selector/fallback/subquery_child=2",
+			},
+			calls: []string{"QueryRange[agg=true] sum(foo) @ 1699995900000 to 1700000000000 step 1m0s"},
+		},
+		// A pushed sibling doesn't make the subquery beside it pushed.
+		{
+			expr: "sum(foo) + absent_over_time((vector(1))[10m:1m])",
+			decisions: []string{
+				"aggregate/pushed/=1", "binary/fallback/no_literal_operand=1",
+				"call/fallback/offset_mismatch=1", "call/fallback/subquery_child=1",
+				"call/fallback/unsupported_func=1", "subquery/fallback/no_inner_pushdown=1",
+			},
+			calls: []string{"Query[agg=true] sum(foo) @ 1700000000000"},
+		},
+		// Same, inside an outer subquery: the inner one needs its own tracker
+		// or the sibling's pushdown leaks into it.
+		{
+			expr: "(bar + absent_over_time((vector(1))[5m:1m]))[10m:1m]",
+			decisions: []string{
+				"binary/fallback/no_literal_operand=1", "binary/fallback/subquery_child=1",
+				"call/fallback/offset_mismatch=1", "call/fallback/subquery_child=3",
+				"call/fallback/unsupported_func=1", "subquery/fallback/no_inner_pushdown=1",
+				"subquery/fallback/subquery_child=1", "subquery/pushed/=1",
+				"vector_selector/fallback/subquery_child=1", "vector_selector/pushed/=1",
+			},
+			calls: []string{"QueryRange[agg=false] bar @ 1699999440000 to 1700000000000 step 1m0s"},
+		},
 		// An @ on the subquery pins the inner window to the @ time instead of
 		// the request's; here the whole call goes down in one piece.
 		{
