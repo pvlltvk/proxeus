@@ -45,6 +45,9 @@ func (p *ProxyStorage) NodeReplacer(ctx context.Context, s *parser.EvalStmt, nod
 			case retErr != nil || r.revisit:
 			case retNode != nil:
 				pushdownNodes.WithLabelValues(kind, resultPushed, "").Inc()
+				if pushed := subqueryInnerPushdownTracker(ctx); pushed != nil {
+					*pushed = true
+				}
 			default:
 				pushdownNodes.WithLabelValues(kind, resultFallback, r.reason).Inc()
 			}
@@ -430,7 +433,8 @@ func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, e
 
 		// The value label is the aggregation's parameter; it may be
 		// parenthesized (count_values((("v")), metric)). Anything else
-		// isn't ours to rewrite.
+		// isn't ours to rewrite. Defensive only: checkAST already requires a
+		// string Param, so just a hand-built AST reaches this.
 		valueLabel, ok := unwrapParens(n.Param).(*parser.StringLiteral)
 		if !ok {
 			r.reason = reasonNonLiteralParam
@@ -712,12 +716,15 @@ func (r *nodeReplacer) replaceSubquery(n *parser.SubqueryExpr) (parser.Node, err
 		subEvalStmt.Start = subEvalStmt.Start.Add(subEvalStmt.Interval)
 	}
 
-	newN, err := parser.Inspect(r.ctx, &subEvalStmt, func(parser.Node, []parser.Node) error { return nil }, r.p.NodeReplacer)
+	// Inspect returns a non-nil node even when nothing below was replaced,
+	// so whether the subquery was pushed comes from the tracker instead.
+	innerCtx, pushed := withSubqueryInnerPushdownTracker(r.ctx)
+	newN, err := parser.Inspect(innerCtx, &subEvalStmt, func(parser.Node, []parser.Node) error { return nil }, r.p.NodeReplacer)
 	if err != nil {
 		return nil, err
 	}
 
-	if newN != nil {
+	if newN != nil && *pushed {
 		n.Expr = newN.(parser.Expr)
 		return n, nil
 	}
@@ -841,6 +848,21 @@ func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) 
 		}
 	}
 	return nil, nil
+}
+
+type subqueryInnerPushdownKey struct{}
+
+// withSubqueryInnerPushdownTracker returns a context carrying a fresh flag
+// that any pushdown in the walk under it sets. Each subquery installs its
+// own, so an earlier sibling's pushdown can't leak into a nested subquery.
+func withSubqueryInnerPushdownTracker(ctx context.Context) (context.Context, *bool) {
+	pushed := new(bool)
+	return context.WithValue(ctx, subqueryInnerPushdownKey{}, pushed), pushed
+}
+
+func subqueryInnerPushdownTracker(ctx context.Context) *bool {
+	pushed, _ := ctx.Value(subqueryInnerPushdownKey{}).(*bool)
+	return pushed
 }
 
 func isAgg(node parser.Node) bool {
