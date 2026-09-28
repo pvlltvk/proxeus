@@ -370,10 +370,6 @@ func TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal(t *testing.T) {
 	}
 }
 
-// TestNewCrossGroupMultiAPI_IgnoreLabels covers CrossGroupOpts.IgnoreLabels on
-// the query path: labels a backend stamps on its own (Thanos Receive's
-// receive_replica and tenant_id, say) must not stop two copies of the same
-// target from colliding, the way per-group `labels` keys already don't.
 func TestNewCrossGroupMultiAPI_IgnoreLabels(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -440,9 +436,6 @@ func TestNewCrossGroupMultiAPI_IgnoreLabels(t *testing.T) {
 				t.Fatalf("expected %d series, got %d: %v", tc.wantSeries, len(mat), mat)
 			}
 			if tc.wantWinner != "" {
-				// The winner's own labels (including any extras it carries) pass
-				// through unchanged -- ignored labels only affect identity, not
-				// output.
 				got := mat[0].Metric
 				if got["backend"] != tc.wantWinner {
 					t.Fatalf("winner backend = %q, want %q", got["backend"], tc.wantWinner)
@@ -461,10 +454,6 @@ func TestNewCrossGroupMultiAPI_IgnoreLabels(t *testing.T) {
 	}
 }
 
-// TestNewCrossGroupMultiAPI_IgnoreLabelsOverlapsGroupLabel checks that listing
-// a name in IgnoreLabels that is already one backend's own `labels` key is
-// harmless: it's already in the ignore set via that path, so the union is a
-// no-op.
 func TestNewCrossGroupMultiAPI_IgnoreLabelsOverlapsGroupLabel(t *testing.T) {
 	api0 := &stubAPI{
 		query: func() model.Value {
@@ -491,10 +480,6 @@ func TestNewCrossGroupMultiAPI_IgnoreLabelsOverlapsGroupLabel(t *testing.T) {
 	}
 }
 
-// TestNewCrossGroupMultiAPI_IgnoreLabelsMetadataDedup mirrors
-// TestNewCrossGroupMultiAPI_IgnoreLabels for the /api/v1/series path: the same
-// ignore set gated by DedupMetadata must collapse series that only differ by a
-// backend-stamped label like tenant_id.
 func TestNewCrossGroupMultiAPI_IgnoreLabelsMetadataDedup(t *testing.T) {
 	api0 := &stubAPI{
 		series: func() []model.LabelSet {

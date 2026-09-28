@@ -78,10 +78,6 @@ func TestConfigFromBytesValidates(t *testing.T) {
 	}
 }
 
-// TestConfigFromBytesValidatesIgnoreLabels checks that cross_group_dedup_ignore_labels
-// goes through the same Validate() path as the other cross-group flags -- ConfigFromBytes
-// is what --check-config and a SIGHUP reload both call, so it must reject what
-// ProxeusConfig.Validate rejects.
 func TestConfigFromBytesValidatesIgnoreLabels(t *testing.T) {
 	if _, err := ConfigFromBytes([]byte(
 		"proxeus:\n  cross_group_dedup_ignore_labels: [tenant_id]\n",
@@ -272,12 +268,10 @@ func TestProxeusConfigValidate(t *testing.T) {
 		},
 		{
 			name:    "ignore_labels rejects invalid label name",
-			cfg:     ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{"not-a-valid-name"}},
+			cfg:     ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{"\xff"}},
 			wantErr: true,
 		},
 		{
-			// A name that is already a server_group `labels` key is redundant,
-			// not harmful -- it's already ignored via that path.
 			name: "ignore_labels allows a name that overlaps a group labels key",
 			cfg: ProxeusConfig{
 				CrossGroupDedup:             true,

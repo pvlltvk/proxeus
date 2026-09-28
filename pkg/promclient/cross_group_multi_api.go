@@ -42,11 +42,7 @@ type CrossGroupOpts struct {
 	// (only used when DedupMetadata is true).
 	MetadataCollisions *prometheus.CounterVec
 
-	// IgnoreLabels are label names that do not count toward series identity,
-	// on top of each backend's own Labels. Real stacks stamp labels of their
-	// own on every series (Thanos Receive's receive_replica and tenant_id,
-	// say), so without this the same target scraped by two stacks never
-	// collapses to one series.
+	// IgnoreLabels are ignored for identity on top of each backend's Labels.
 	IgnoreLabels []string
 }
 
@@ -58,9 +54,8 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 	apis := make([]API, len(backends))
 	names := make([]string, len(backends))
 
-	// ignoreLabels is the union of all per-group label keys, plus
-	// opts.IgnoreLabels (labels the backends stamp on their own, outside
-	// proxeus's control). Series that differ only in these keys are
+	// ignoreLabels is the union of all per-group label keys and
+	// opts.IgnoreLabels. Series that differ only in these keys are
 	// considered the same underlying series.
 	ignoreLabels := make(map[model.LabelName]struct{})
 	for i, b := range backends {
