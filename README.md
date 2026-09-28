@@ -40,6 +40,33 @@ raw series. This is why proxeus depends on a patched PromQL engine (see [Prometh
 collapse to one. Ties break on `server_groups[]` order — lowest index wins — so results are deterministic rather than
 racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 
+> **Identity rule:** two series from different `server_groups` are the same series if their labels match once you
+> remove `__name__` and the union of every group's own `labels:` keys. Real backends stamp labels of their own on top
+> of that — Thanos Receive adds `receive_replica` and `tenant_id` to everything it stores, vmagent's
+> `-remoteWrite.label` and Prometheus's own `external_labels` commonly add things like `prometheus_replica` — and
+> those are *not* covered by a group's `labels:` key unless you list them explicitly. `cross_group_dedup_ignore_labels`
+> does that:
+>
+> ```yaml
+> proxeus:
+>   cross_group_dedup: true
+>   cross_group_dedup_ignore_labels: [receive_replica, tenant_id]
+> ```
+>
+> It's a single global list, unioned into the same ignore set every group's `labels:` already contributes — so
+> `cluster` does *not* need to go here if every group declares it as a `labels:` key (the common case, and how the
+> example above does it). List it here only if some backend stamps `cluster` on its series without proxeus having
+> declared it as that group's label.
+>
+> The ignored labels only affect identity, not output: the winning series keeps its full label set, extras included.
+> Overlapping series carry whichever backend won the collision's extra labels; a series only one backend has doesn't
+> gain any. The effective ignore set is logged once at startup and on every reload.
+>
+> This only works if both stacks' scrape configs agree on `job` and `instance` for the same target — dedup can't
+> reconcile `instance="10.0.0.5:9100"` on one backend with `instance="node-a"` on the other, that's a scrape-config
+> problem, not a labels problem. And never list a label that's actually part of a series' identity: putting `instance`
+> or `job` in `cross_group_dedup_ignore_labels` silently merges unrelated targets into one series.
+
 > **Scope:** dedup applies to raw selector results. Pushed-down aggregations fan out per-group *partials* that the
 > engine re-combines, so those are unioned, never deduped. A series present in two groups appears once in `up`, but
 > contributes to both partials in `count(up)`.
