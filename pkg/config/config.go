@@ -81,6 +81,32 @@ func ValidateUniqueServerGroupLabels(groups []*servergroup.Config) error {
 	return nil
 }
 
+// validateCrossGroupDedupIgnoreLabels rejects names that could never be a
+// sane addition to the dedup ignore set: `__name__` (that's the metric, not
+// an identity label to ignore), empty names, duplicates and syntactically
+// invalid label names. A name that also happens to be a server_group `labels`
+// key is allowed -- it is already ignored via that path, so listing it again
+// is redundant, not harmful.
+func validateCrossGroupDedupIgnoreLabels(names []string) error {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: empty label name")
+		}
+		if name == model.MetricNameLabel {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: %q cannot be ignored", model.MetricNameLabel)
+		}
+		if !model.LabelName(name).IsValidLegacy() {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: %q is not a valid label name", name)
+		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: duplicate label name %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
 // ConfigFromFile loads a config file at path
 func ConfigFromFile(path string) (*Config, error) {
 	configBytes, err := os.ReadFile(path)
@@ -224,6 +250,20 @@ type ProxeusConfig struct {
 	// Thanos outage should not blank out VM-sourced series. Only affects the
 	// cross-group fan-out, so it requires CrossGroupDedup to also be true.
 	CrossGroupPartialResponse bool `yaml:"cross_group_partial_response"`
+
+	// CrossGroupDedupIgnoreLabels lists label names that, on top of each
+	// server_group's own `labels` keys, do not count toward a series' identity
+	// for cross-group dedup. Real stacks stamp their own labels on every
+	// series -- Thanos Receive adds `receive_replica` and `tenant_id`,
+	// Prometheus/vmagent external_labels commonly add `cluster` or
+	// `prometheus_replica` -- and without this the same target scraped by two
+	// stacks never collapses to one series. Requires CrossGroupDedup to also be
+	// true. Default empty preserves historical behavior.
+	//
+	// This cannot be validated for correctness: listing a label that actually
+	// carries identity (e.g. `instance`) silently merges unrelated series. The
+	// effective ignore set is logged at startup and on every reload.
+	CrossGroupDedupIgnoreLabels []string `yaml:"cross_group_dedup_ignore_labels"`
 }
 
 // Validate checks the cross-group flag dependencies. CrossGroupDedupMetadata,
@@ -242,6 +282,12 @@ func (c *ProxeusConfig) Validate() error {
 	}
 	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
+	}
+	if len(c.CrossGroupDedupIgnoreLabels) > 0 && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_dedup_ignore_labels: requires cross_group_dedup: true")
+	}
+	if err := validateCrossGroupDedupIgnoreLabels(c.CrossGroupDedupIgnoreLabels); err != nil {
+		return err
 	}
 	// Dedup keys series identity on these labels, so a collision would silently
 	// merge unrelated series. Checked here as well as in ApplyConfig so that
