@@ -87,6 +87,24 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > apart from each group's declared `labels`, so if a backend stamps anything else of its own (a Thanos
 > `prometheus_replica`, say) dedup won't collapse them and the aggregate still double-counts.
 
+> **Gap filling.** The dedup winner's series is returned as-is, so a hole in it stays a hole even when another group
+> has the data — typical during a migration, when the new backend lacks history or the old one stops first.
+> `cross_group_dedup_fill_gaps: true` fills those holes from the other groups in priority order; the winner's own
+> samples are never replaced. A `StaleNaN` in the winner also starts a gap.
+>
+> ```yaml
+> proxeus:
+>   cross_group_dedup: true
+>   cross_group_dedup_fill_gaps: true
+>   cross_group_dedup_gap: 0   # 0 = auto: twice the winner's median sample interval
+> ```
+>
+> Filled samples are counted in `proxeus_cross_group_dedup_filled_samples_total{winner,filler}`; a steady rate means
+> the winner is missing data. Values can differ slightly at a filled seam (downsampled Thanos next to raw
+> VictoriaMetrics, or different scrape moments), as with Thanos Query's own replica dedup. Pushed-down aggregations
+> are not deduped and so not filled; with `cross_group_exact_aggregates: true` they are. It is off by default because
+> every series found in more than one group has all its copies read.
+
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
 `cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,
 `partial_response`, `max_source_resolution`, `replica_labels`), `victoriametrics:` (`nocache`, `extra_filters`,
