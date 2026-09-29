@@ -5,6 +5,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/common/model"
+
+	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
 func TestConfigFromFile(t *testing.T) {
@@ -71,6 +75,24 @@ func TestConfigFromBytesValidates(t *testing.T) {
 	}
 	if _, err := ConfigFromBytes([]byte("proxeus:\n  cross_group_dedup: true\n  cross_group_dedup_metadata: true\n")); err != nil {
 		t.Errorf("valid config was rejected: %v", err)
+	}
+}
+
+func TestConfigFromBytesValidatesIgnoreLabels(t *testing.T) {
+	if _, err := ConfigFromBytes([]byte(
+		"proxeus:\n  cross_group_dedup_ignore_labels: [tenant_id]\n",
+	)); err == nil {
+		t.Error("cross_group_dedup_ignore_labels without cross_group_dedup was accepted")
+	}
+	if _, err := ConfigFromBytes([]byte(
+		"proxeus:\n  cross_group_dedup: true\n  cross_group_dedup_ignore_labels: [__name__]\n",
+	)); err == nil {
+		t.Error("cross_group_dedup_ignore_labels containing __name__ was accepted")
+	}
+	if _, err := ConfigFromBytes([]byte(
+		"proxeus:\n  cross_group_dedup: true\n  cross_group_dedup_ignore_labels: [receive_replica, tenant_id]\n",
+	)); err != nil {
+		t.Errorf("valid cross_group_dedup_ignore_labels config was rejected: %v", err)
 	}
 }
 
@@ -220,6 +242,46 @@ func TestProxeusConfigValidate(t *testing.T) {
 		{name: "exact_aggregates with dedup", cfg: ProxeusConfig{CrossGroupDedup: true, CrossGroupExactAggregates: true}},
 		{name: "dedup_metadata without dedup", cfg: ProxeusConfig{CrossGroupDedupMetadata: true}, wantErr: true},
 		{name: "partial_response without dedup", cfg: ProxeusConfig{CrossGroupPartialResponse: true}, wantErr: true},
+		{
+			name:    "ignore_labels without dedup",
+			cfg:     ProxeusConfig{CrossGroupDedupIgnoreLabels: []string{"tenant_id"}},
+			wantErr: true,
+		},
+		{
+			name: "ignore_labels with dedup",
+			cfg:  ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{"receive_replica", "tenant_id"}},
+		},
+		{
+			name:    "ignore_labels rejects __name__",
+			cfg:     ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{"__name__"}},
+			wantErr: true,
+		},
+		{
+			name:    "ignore_labels rejects empty name",
+			cfg:     ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{""}},
+			wantErr: true,
+		},
+		{
+			name:    "ignore_labels rejects duplicates",
+			cfg:     ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{"tenant_id", "tenant_id"}},
+			wantErr: true,
+		},
+		{
+			name:    "ignore_labels rejects invalid label name",
+			cfg:     ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupIgnoreLabels: []string{"\xff"}},
+			wantErr: true,
+		},
+		{
+			name: "ignore_labels allows a name that overlaps a group labels key",
+			cfg: ProxeusConfig{
+				CrossGroupDedup:             true,
+				CrossGroupDedupIgnoreLabels: []string{"backend"},
+				ServerGroups: []*servergroup.Config{
+					{Labels: model.LabelSet{"backend": "sg0"}},
+					{Labels: model.LabelSet{"backend": "sg1"}},
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {

@@ -369,3 +369,145 @@ func TestNewCrossGroupMultiAPI_CollisionAttributionMiddleOrdinal(t *testing.T) {
 		t.Fatalf("collision misattributed to sg0 (which never served cpu): sg0/sg2=%v, want 0", got)
 	}
 }
+
+func TestNewCrossGroupMultiAPI_IgnoreLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		ignoreLabels []string
+		api0Extra    model.Metric
+		api1Extra    model.Metric
+		wantSeries   int
+		wantWinner   model.LabelValue
+	}{
+		{
+			name:         "extra labels on one side only still collide",
+			ignoreLabels: []string{"receive_replica", "tenant_id"},
+			api0Extra:    model.Metric{},
+			api1Extra:    model.Metric{"receive_replica": "0", "tenant_id": "default-tenant"},
+			wantSeries:   1,
+			wantWinner:   "sg0",
+		},
+		{
+			name:         "extra labels on both sides with different values still collide",
+			ignoreLabels: []string{"receive_replica", "tenant_id"},
+			api0Extra:    model.Metric{"receive_replica": "0", "tenant_id": "tenant-a"},
+			api1Extra:    model.Metric{"receive_replica": "1", "tenant_id": "tenant-b"},
+			wantSeries:   1,
+			wantWinner:   "sg0",
+		},
+		{
+			name:         "an empty ignore list is today's behavior: extras keep them distinct",
+			ignoreLabels: nil,
+			api0Extra:    model.Metric{},
+			api1Extra:    model.Metric{"tenant_id": "default-tenant"},
+			wantSeries:   2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api0 := &stubAPI{
+				query: func() model.Value {
+					m := model.Metric{"__name__": "cpu", "backend": "sg0"}
+					for k, v := range tc.api0Extra {
+						m[k] = v
+					}
+					return model.Vector{{Metric: m, Value: 1, Timestamp: 100}}
+				},
+			}
+			api1 := &stubAPI{
+				query: func() model.Value {
+					m := model.Metric{"__name__": "cpu", "backend": "sg1"}
+					for k, v := range tc.api1Extra {
+						m[k] = v
+					}
+					return model.Vector{{Metric: m, Value: 99, Timestamp: 100}}
+				},
+			}
+
+			m := newCrossGroupForTest(t, []CrossGroupBackend{
+				{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+				{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+			}, CrossGroupOpts{IgnoreLabels: tc.ignoreLabels})
+
+			mat, err := SeriesSetToMatrix(m.Query(context.Background(), "cpu", time.Now()))
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if len(mat) != tc.wantSeries {
+				t.Fatalf("expected %d series, got %d: %v", tc.wantSeries, len(mat), mat)
+			}
+			if tc.wantWinner != "" {
+				got := mat[0].Metric
+				if got["backend"] != tc.wantWinner {
+					t.Fatalf("winner backend = %q, want %q", got["backend"], tc.wantWinner)
+				}
+				wantExtra := tc.api0Extra
+				if tc.wantWinner == "sg1" {
+					wantExtra = tc.api1Extra
+				}
+				for k, v := range wantExtra {
+					if got[k] != v {
+						t.Fatalf("winner label %q = %q, want %q (ignored labels must be kept on output)", k, got[k], v)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestNewCrossGroupMultiAPI_IgnoreLabelsOverlapsGroupLabel(t *testing.T) {
+	api0 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{{Metric: model.Metric{"__name__": "cpu", "backend": "sg0"}, Value: 1, Timestamp: 100}}
+		},
+	}
+	api1 := &stubAPI{
+		query: func() model.Value {
+			return model.Vector{{Metric: model.Metric{"__name__": "cpu", "backend": "sg1"}, Value: 99, Timestamp: 100}}
+		},
+	}
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{IgnoreLabels: []string{"backend"}})
+
+	mat, err := SeriesSetToMatrix(m.Query(context.Background(), "cpu", time.Now()))
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(mat) != 1 {
+		t.Fatalf("expected 1 series (redundant ignore entry changes nothing), got %d: %v", len(mat), mat)
+	}
+}
+
+func TestNewCrossGroupMultiAPI_IgnoreLabelsMetadataDedup(t *testing.T) {
+	api0 := &stubAPI{
+		series: func() []model.LabelSet {
+			return []model.LabelSet{{"__name__": "up", "instance": "node:9100", "backend": "sg0"}}
+		},
+	}
+	api1 := &stubAPI{
+		series: func() []model.LabelSet {
+			return []model.LabelSet{{
+				"__name__": "up", "instance": "node:9100", "backend": "sg1",
+				"receive_replica": "0", "tenant_id": "default-tenant",
+			}}
+		},
+	}
+
+	m := newCrossGroupForTest(t, []CrossGroupBackend{
+		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
+		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
+	}, CrossGroupOpts{DedupMetadata: true, IgnoreLabels: []string{"receive_replica", "tenant_id"}})
+
+	got, _, err := m.Series(context.Background(), []string{"up"}, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Series: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 series (receive_replica/tenant_id ignored), got %d: %v", len(got), got)
+	}
+	if got[0]["backend"] != "sg0" {
+		t.Fatalf("expected sg0 (lower ordinal) to win, got backend=%q", got[0]["backend"])
+	}
+}

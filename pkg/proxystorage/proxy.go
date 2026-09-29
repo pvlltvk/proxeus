@@ -202,6 +202,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 			PartialResponse:    c.CrossGroupPartialResponse,
 			Collisions:         crossGroupDedupCollisions,
 			MetadataCollisions: crossGroupDedupMetadataCollisions,
+			IgnoreLabels:       c.CrossGroupDedupIgnoreLabels,
 		})
 	} else {
 		multiAPI, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, len(apis), false)

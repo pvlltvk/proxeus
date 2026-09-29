@@ -81,6 +81,26 @@ func ValidateUniqueServerGroupLabels(groups []*servergroup.Config) error {
 	return nil
 }
 
+func validateCrossGroupDedupIgnoreLabels(names []string) error {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: empty label name")
+		}
+		if name == model.MetricNameLabel {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: %q cannot be ignored", model.MetricNameLabel)
+		}
+		if !model.LabelName(name).IsValid() {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: %q is not a valid label name", name)
+		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("cross_group_dedup_ignore_labels: duplicate label name %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
 // ConfigFromFile loads a config file at path
 func ConfigFromFile(path string) (*Config, error) {
 	configBytes, err := os.ReadFile(path)
@@ -224,6 +244,12 @@ type ProxeusConfig struct {
 	// Thanos outage should not blank out VM-sourced series. Only affects the
 	// cross-group fan-out, so it requires CrossGroupDedup to also be true.
 	CrossGroupPartialResponse bool `yaml:"cross_group_partial_response"`
+
+	// CrossGroupDedupIgnoreLabels are labels the backends stamp themselves
+	// (Thanos Receive's receive_replica and tenant_id, say) that, like the
+	// server_group labels keys, do not count toward a series' identity. Kept on
+	// output. Requires CrossGroupDedup to also be true.
+	CrossGroupDedupIgnoreLabels []string `yaml:"cross_group_dedup_ignore_labels"`
 }
 
 // Validate checks the cross-group flag dependencies. CrossGroupDedupMetadata,
@@ -242,6 +268,12 @@ func (c *ProxeusConfig) Validate() error {
 	}
 	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")
+	}
+	if len(c.CrossGroupDedupIgnoreLabels) > 0 && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_dedup_ignore_labels: requires cross_group_dedup: true")
+	}
+	if err := validateCrossGroupDedupIgnoreLabels(c.CrossGroupDedupIgnoreLabels); err != nil {
+		return err
 	}
 	// Dedup keys series identity on these labels, so a collision would silently
 	// merge unrelated series. Checked here as well as in ApplyConfig so that
