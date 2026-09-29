@@ -110,6 +110,22 @@ func TestPriorityMergeSampleStream(t *testing.T) {
 			wantValues: []model.SamplePair{sp(0, 1), staleAt(10)},
 			wantFilled: []int{},
 		},
+		{
+			name:       "a StaleNaN forces a gap even when the next base sample arrives well inside the gap threshold",
+			base:       stream(sp(0, 1), staleAt(50), sp(65, 2)),
+			fillers:    []*model.SampleStream{stream(sp(57, 999))},
+			gap:        20,
+			wantValues: []model.SamplePair{sp(0, 1), staleAt(50), sp(57, 999), sp(65, 2)},
+			wantFilled: []int{1},
+		},
+		{
+			name:       "filler samples exactly on the margin boundary are excluded, one unit inside is kept",
+			base:       stream(sp(0, 1), sp(100, 2)),
+			fillers:    []*model.SampleStream{stream(sp(4, 901), sp(5, 902), sp(95, 903), sp(96, 904))},
+			gap:        16,
+			wantValues: []model.SamplePair{sp(0, 1), sp(5, 902), sp(95, 903), sp(100, 2)},
+			wantFilled: []int{2},
+		},
 	}
 
 	for _, tc := range tests {
@@ -162,6 +178,40 @@ func TestPriorityMergeSampleStream_Histograms(t *testing.T) {
 	if fmt.Sprint(stats.Filled) != "[3]" {
 		t.Fatalf("Filled = %v, want [3]", stats.Filled)
 	}
+}
+
+// Histogram series go stale through a float StaleNaN.
+func TestPriorityMergeSampleStream_HistogramGapOpenedByFloatStaleNaN(t *testing.T) {
+	base := &model.SampleStream{
+		Values:     []model.SamplePair{staleAt(6)},
+		Histograms: []model.SampleHistogramPair{hp(0, 1), hp(15, 2)},
+	}
+	filler := &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(7, 99)}}
+
+	got, stats := PriorityMergeSampleStream(base, []*model.SampleStream{filler}, 20)
+
+	want := []model.SampleHistogramPair{hp(0, 1), hp(7, 99), hp(15, 2)}
+	if len(got.Histograms) != len(want) {
+		t.Fatalf("Histograms = %v, want %v (filler's sample during the base's stale period should be pulled in)", got.Histograms, want)
+	}
+	if fmt.Sprint(stats.Filled) != "[1]" {
+		t.Fatalf("Filled = %v, want [1]", stats.Filled)
+	}
+}
+
+// A denser filler must not shrink the threshold below the base's own spacing.
+func TestGapThreshold_AutoIgnoresDenserFiller(t *testing.T) {
+	base := stream(sp(0, 1), sp(60000, 1), sp(120000, 1))
+	var fillerPairs []model.SamplePair
+	for ts := int64(0); ts <= 45000; ts += 5000 {
+		fillerPairs = append(fillerPairs, sp(ts, 999))
+	}
+	filler := &model.SampleStream{Values: fillerPairs}
+
+	threshold := GapThreshold(0, base, filler)
+	got, _ := PriorityMergeSampleStream(base, []*model.SampleStream{filler}, threshold)
+
+	assertSamplePairsEqual(t, got.Values, base.Values)
 }
 
 func TestPriorityMergeSampleStream_MixedFloatAndHistogram(t *testing.T) {
@@ -274,7 +324,7 @@ func TestPriorityMergeSampleStream_MatchesReference(t *testing.T) {
 		var fillers [][]model.SamplePair
 		fillerStreams := make([]*model.SampleStream, rnd.Intn(3))
 		for i := range fillerStreams {
-			f := randomSeries(rnd.Intn(10), 500, 0)
+			f := randomSeries(rnd.Intn(10), 500, 0.1)
 			fillers = append(fillers, f)
 			fillerStreams[i] = &model.SampleStream{Values: f}
 		}

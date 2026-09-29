@@ -1,6 +1,8 @@
 package promhttputil
 
 import (
+	"sort"
+
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/value"
 )
@@ -32,30 +34,75 @@ func PriorityMergeSampleStream(base *model.SampleStream, fillers []*model.Sample
 	values := fillFloats(nil, nil, floatSeqs, 0, gap, stats.Filled, make([]int, len(floatSeqs)))
 
 	histSeqs := make([][]model.SampleHistogramPair, len(fillers)+1)
-	histSeqs[0] = base.Histograms
+	staleSeqs := make([][]model.Time, len(fillers)+1)
+	histSeqs[0], staleSeqs[0] = base.Histograms, staleTimes(base.Values)
 	for i, f := range fillers {
-		histSeqs[i+1] = f.Histograms
+		histSeqs[i+1], staleSeqs[i+1] = f.Histograms, staleTimes(f.Values)
 	}
-	histograms := fillHistograms(nil, nil, histSeqs, 0, gap, stats.Filled, make([]int, len(histSeqs)))
+	histograms := fillHistograms(nil, nil, histSeqs, staleSeqs, 0, gap, stats.Filled, make([]int, len(histSeqs)))
 
 	return &model.SampleStream{Metric: base.Metric, Values: values, Histograms: histograms}, stats
 }
 
 // GapThreshold returns override if set, otherwise twice the median sample
-// interval (dynamicBufferForStream returns half of it), or 0 when there are
-// too few samples to estimate.
+// interval of base, or of fillerHint when base has fewer than two samples, or
+// 0 when neither does. Base's own spacing is never mixed with the filler's: a
+// denser filler would make the base's normal spacing look like gaps.
 func GapThreshold(override model.Time, base, fillerHint *model.SampleStream) model.Time {
 	if override > 0 {
 		return override
 	}
-	if fillerHint == nil {
-		fillerHint = &model.SampleStream{}
+	for _, s := range []*model.SampleStream{base, fillerHint} {
+		if s == nil {
+			continue
+		}
+		if m, ok := medianInterval(s); ok {
+			return 2 * m
+		}
 	}
-	half, ok := dynamicBufferForStream(base, fillerHint)
-	if !ok {
-		return 0
+	return 0
+}
+
+func medianInterval(s *model.SampleStream) (model.Time, bool) {
+	ts := make([]model.Time, 0, max(len(s.Values), len(s.Histograms)))
+	if len(s.Values) >= len(s.Histograms) {
+		for _, p := range s.Values {
+			ts = append(ts, p.Timestamp)
+		}
+	} else {
+		for _, p := range s.Histograms {
+			ts = append(ts, p.Timestamp)
+		}
 	}
-	return half * 4
+	var intervals []model.Time
+	for i := 1; i < len(ts); i++ {
+		if d := ts[i] - ts[i-1]; d > 0 {
+			intervals = append(intervals, d)
+		}
+	}
+	if len(intervals) == 0 {
+		return 0, false
+	}
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i] < intervals[j] })
+	return intervals[len(intervals)/2], true
+}
+
+func staleTimes(values []model.SamplePair) []model.Time {
+	var ts []model.Time
+	for _, p := range values {
+		if value.IsStaleNaN(float64(p.Value)) {
+			ts = append(ts, p.Timestamp)
+		}
+	}
+	return ts
+}
+
+func staleBetween(stale []model.Time, lo, hi *model.Time) bool {
+	i := 0
+	if lo != nil {
+		i = sort.Search(len(stale), func(k int) bool { return stale[k] >= *lo })
+	}
+	return i < len(stale) && (hi == nil || stale[i] < *hi)
 }
 
 // marginBounds keeps filled samples gap/4 away from a real neighbor, since
@@ -135,9 +182,9 @@ func fillFloats(lo, hi *model.Time, seqs [][]model.SamplePair, lvl int, gap mode
 	return out
 }
 
-// fillHistograms mirrors fillFloats. Staleness of a histogram series is
-// signaled by a float StaleNaN, so there is nothing to track here.
-func fillHistograms(lo, hi *model.Time, seqs [][]model.SampleHistogramPair, lvl int, gap model.Time, filled []int, cursors []int) []model.SampleHistogramPair {
+// fillHistograms mirrors fillFloats. A histogram series goes stale through a
+// float StaleNaN, so stale[lvl] holds those timestamps from the float side.
+func fillHistograms(lo, hi *model.Time, seqs [][]model.SampleHistogramPair, stale [][]model.Time, lvl int, gap model.Time, filled []int, cursors []int) []model.SampleHistogramPair {
 	effLo, effHi := marginBounds(lo, hi, gap)
 	seq := seqs[lvl]
 	i := cursors[lvl]
@@ -154,8 +201,8 @@ func fillHistograms(lo, hi *model.Time, seqs [][]model.SampleHistogramPair, lvl 
 			break
 		}
 
-		if needsFill(false, subLo, timePtr(p.Timestamp), gap) && lvl+1 < len(seqs) {
-			out = append(out, fillHistograms(subLo, timePtr(p.Timestamp), seqs, lvl+1, gap, filled, cursors)...)
+		if needsFill(staleBetween(stale[lvl], subLo, timePtr(p.Timestamp)), subLo, timePtr(p.Timestamp), gap) && lvl+1 < len(seqs) {
+			out = append(out, fillHistograms(subLo, timePtr(p.Timestamp), seqs, stale, lvl+1, gap, filled, cursors)...)
 		}
 
 		out = append(out, p)
@@ -166,8 +213,8 @@ func fillHistograms(lo, hi *model.Time, seqs [][]model.SampleHistogramPair, lvl 
 	}
 	cursors[lvl] = i
 
-	if needsFill(false, subLo, hi, gap) && lvl+1 < len(seqs) {
-		out = append(out, fillHistograms(subLo, hi, seqs, lvl+1, gap, filled, cursors)...)
+	if needsFill(staleBetween(stale[lvl], subLo, hi), subLo, hi, gap) && lvl+1 < len(seqs) {
+		out = append(out, fillHistograms(subLo, hi, seqs, stale, lvl+1, gap, filled, cursors)...)
 	}
 	return out
 }
