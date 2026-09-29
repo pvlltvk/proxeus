@@ -1,6 +1,9 @@
 package promclient
 
 import (
+	"sort"
+
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 
@@ -23,6 +26,18 @@ import (
 // ignore must be sorted ascending; it is the union of the per-group external
 // label names.
 func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttputil.DedupStats) storage.SeriesSet {
+	return dedupSeriesSetsFillGaps(sets, ignore, dedupGapOpts{}, stats, nil)
+}
+
+type dedupGapOpts struct {
+	fillGaps bool
+	gap      model.Time // 0 = auto, see promhttputil.GapThreshold
+}
+
+// dedupSeriesSetsFillGaps is dedupSeriesSets that, with opts.fillGaps, fills
+// the winner's gaps from the losers in ascending-ordinal order. Non-colliding
+// series still pass through untouched. fillStats may be nil.
+func dedupSeriesSetsFillGaps(sets []ordinalSeriesSet, ignore []string, opts dedupGapOpts, stats *promhttputil.DedupStats, fillStats *promhttputil.GapFillStats) storage.SeriesSet {
 	// A single backend is passed through whole. With nothing to collide
 	// against, two series of one group that share a reduced fingerprint are
 	// not duplicates of each other -- same as the old model.Value merge's
@@ -41,6 +56,9 @@ func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttput
 		// attribute a collision to a backend that a later, lower ordinal goes
 		// on to beat. nil unless the bucket actually collided.
 		losers []int
+		// members is only populated with opts.fillGaps; the winner isn't known
+		// until every set has been seen.
+		members []dedupBucketMember
 	}
 
 	// Buckets are keyed on the exact reduced labelset (the encoded labels minus
@@ -59,7 +77,11 @@ func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttput
 			existing, ok := buckets[string(buf)]
 			if !ok {
 				result = append(result, series)
-				buckets[string(buf)] = &entry{lbls: lbls, ordinal: set.ordinal, idx: len(result) - 1}
+				e := &entry{lbls: lbls, ordinal: set.ordinal, idx: len(result) - 1}
+				if opts.fillGaps {
+					e.members = append(e.members, dedupBucketMember{ordinal: set.ordinal, series: series})
+				}
+				buckets[string(buf)] = e
 				continue
 			}
 
@@ -77,17 +99,23 @@ func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttput
 			} else {
 				existing.losers = append(existing.losers, set.ordinal)
 			}
+			if opts.fillGaps {
+				existing.members = append(existing.members, dedupBucketMember{ordinal: set.ordinal, series: series})
+			}
 		}
 		if err := set.ss.Err(); err != nil {
 			return promapi.NewSeriesSet(nil, nil, err)
 		}
 	}
 
-	// Attribute every collision to the bucket's final winner. Map iteration
-	// order does not matter: Record only increments counters.
+	// Map iteration order does not matter: Record only increments counters, and
+	// each bucket's fill only touches its own result[idx] slot.
 	for _, e := range buckets {
 		for _, loser := range e.losers {
 			stats.Record(e.ordinal, loser)
+		}
+		if opts.fillGaps && len(e.members) > 1 {
+			result[e.idx] = fillBucketGaps(e.members, opts.gap, fillStats)
 		}
 	}
 
@@ -97,4 +125,39 @@ func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttput
 	// Warnings are attached by the caller (scatterMerge), which sees every
 	// backend's set, including the ones that failed.
 	return promapi.NewSeriesSet(result, nil, nil)
+}
+
+type dedupBucketMember struct {
+	ordinal int
+	series  storage.Series
+}
+
+// fillBucketGaps returns the lowest-ordinal member, with its labels, gap-filled
+// from the others.
+func fillBucketGaps(members []dedupBucketMember, gap model.Time, fillStats *promhttputil.GapFillStats) storage.Series {
+	sort.Slice(members, func(i, j int) bool { return members[i].ordinal < members[j].ordinal })
+
+	base := seriesToSampleStream(members[0].series)
+	fillers := make([]*model.SampleStream, len(members)-1)
+	for i, m := range members[1:] {
+		fillers[i] = seriesToSampleStream(m.series)
+	}
+
+	threshold := promhttputil.GapThreshold(gap, base, firstOrNil(fillers))
+	merged, fillStat := promhttputil.PriorityMergeSampleStream(base, fillers, threshold)
+
+	if fillStats != nil {
+		for i, n := range fillStat.Filled {
+			fillStats.Record(members[0].ordinal, members[i+1].ordinal, n)
+		}
+	}
+
+	return sampleStreamToSeries(merged, members[0].series.Labels())
+}
+
+func firstOrNil(s []*model.SampleStream) *model.SampleStream {
+	if len(s) == 0 {
+		return nil
+	}
+	return s[0]
 }

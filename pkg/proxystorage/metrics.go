@@ -39,6 +39,14 @@ var crossGroupDedupMetadataCollisions = promauto.NewCounterVec(
 	[]string{"winner", "loser", "endpoint"},
 )
 
+var crossGroupDedupFilledSamples = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "proxeus_cross_group_dedup_filled_samples_total",
+		Help: "Number of samples pulled from a lower-priority backend to fill a gap in the cross-server_group dedup winner.",
+	},
+	[]string{"winner", "filler"},
+)
+
 // pushdownNodes counts the NodeReplacer decisions proxeus makes while
 // preparing a query: one increment per visited AST node of a kind we consider
 // for pushdown. `result` is "pushed" when the node was answered by (or

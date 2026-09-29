@@ -432,6 +432,15 @@ func BenchmarkCrossGroupDedup(b *testing.B) {
 				drainSeriesSet(b, ss)
 			}
 		})
+
+		// Series are gapless, so this measures only the cost of reading losers.
+		b.Run(fmt.Sprintf("overlap=%dpct/path=native/fill_gaps_on", overlapPct), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				ss := dedupSeriesSetsFillGaps(setsOf(backends), ignoreNames, dedupGapOpts{fillGaps: true, gap: 500}, &promhttputil.DedupStats{}, &promhttputil.GapFillStats{})
+				drainSeriesSet(b, ss)
+			}
+		})
 	}
 }
 
