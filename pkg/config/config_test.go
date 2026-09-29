@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/common/model"
 
@@ -281,6 +282,40 @@ func TestProxeusConfigValidate(t *testing.T) {
 					{Labels: model.LabelSet{"backend": "sg1"}},
 				},
 			},
+		},
+		{
+			name:    "fill_gaps without dedup",
+			cfg:     ProxeusConfig{CrossGroupDedupFillGaps: true},
+			wantErr: true,
+		},
+		{
+			name: "fill_gaps with dedup",
+			cfg:  ProxeusConfig{CrossGroupDedup: true, CrossGroupDedupFillGaps: true},
+		},
+		{
+			name: "gap without fill_gaps",
+			cfg: ProxeusConfig{
+				CrossGroupDedup:    true,
+				CrossGroupDedupGap: 30 * time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "gap with fill_gaps",
+			cfg: ProxeusConfig{
+				CrossGroupDedup:         true,
+				CrossGroupDedupFillGaps: true,
+				CrossGroupDedupGap:      30 * time.Second,
+			},
+		},
+		{
+			name: "negative gap rejected",
+			cfg: ProxeusConfig{
+				CrossGroupDedup:         true,
+				CrossGroupDedupFillGaps: true,
+				CrossGroupDedupGap:      -time.Second,
+			},
+			wantErr: true,
 		},
 	}
 

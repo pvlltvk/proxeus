@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/exporter-toolkit/web"
@@ -250,6 +251,14 @@ type ProxeusConfig struct {
 	// server_group labels keys, do not count toward a series' identity. Kept on
 	// output. Requires CrossGroupDedup to also be true.
 	CrossGroupDedupIgnoreLabels []string `yaml:"cross_group_dedup_ignore_labels"`
+
+	// CrossGroupDedupFillGaps fills gaps in the dedup winner's samples from
+	// lower-priority backends. Requires CrossGroupDedup.
+	CrossGroupDedupFillGaps bool `yaml:"cross_group_dedup_fill_gaps"`
+
+	// CrossGroupDedupGap is the sample interval that counts as a gap; 0 derives
+	// it from the winner's own sample spacing. Requires CrossGroupDedupFillGaps.
+	CrossGroupDedupGap time.Duration `yaml:"cross_group_dedup_gap"`
 }
 
 // Validate checks the cross-group flag dependencies. CrossGroupDedupMetadata,
@@ -274,6 +283,15 @@ func (c *ProxeusConfig) Validate() error {
 	}
 	if err := validateCrossGroupDedupIgnoreLabels(c.CrossGroupDedupIgnoreLabels); err != nil {
 		return err
+	}
+	if c.CrossGroupDedupFillGaps && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_dedup_fill_gaps: requires cross_group_dedup: true")
+	}
+	if c.CrossGroupDedupGap != 0 && !c.CrossGroupDedupFillGaps {
+		return fmt.Errorf("cross_group_dedup_gap: requires cross_group_dedup_fill_gaps: true")
+	}
+	if c.CrossGroupDedupGap < 0 {
+		return fmt.Errorf("cross_group_dedup_gap: must not be negative")
 	}
 	// Dedup keys series identity on these labels, so a collision would silently
 	// merge unrelated series. Checked here as well as in ApplyConfig so that
