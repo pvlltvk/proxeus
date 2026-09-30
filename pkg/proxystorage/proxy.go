@@ -195,14 +195,17 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 				Labels: sg.Labels,
 			}
 		}
-		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t, exact_aggregates=%t)",
-			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse, c.CrossGroupExactAggregates)
+		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t, exact_aggregates=%t, fill_gaps=%t)",
+			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse, c.CrossGroupExactAggregates, c.CrossGroupDedupFillGaps)
 		multiAPI, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
 			DedupMetadata:      c.CrossGroupDedupMetadata,
 			PartialResponse:    c.CrossGroupPartialResponse,
 			Collisions:         crossGroupDedupCollisions,
 			MetadataCollisions: crossGroupDedupMetadataCollisions,
 			IgnoreLabels:       c.CrossGroupDedupIgnoreLabels,
+			FillGaps:           c.CrossGroupDedupFillGaps,
+			Gap:                model.Time(durationMilliseconds(c.CrossGroupDedupGap)),
+			FilledSamples:      crossGroupDedupFilledSamples,
 		})
 	} else {
 		multiAPI, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, len(apis), false)

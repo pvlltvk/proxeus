@@ -44,6 +44,13 @@ type CrossGroupOpts struct {
 
 	// IgnoreLabels are ignored for identity on top of each backend's Labels.
 	IgnoreLabels []string
+
+	// FillGaps fills the dedup winner's gaps from the losers.
+	FillGaps bool
+	// Gap is the interval that counts as a gap; 0 = auto.
+	Gap model.Time
+	// FilledSamples is labeled {winner, filler}.
+	FilledSamples *prometheus.CounterVec
 }
 
 // NewCrossGroupMultiAPI builds a MultiAPI that performs deterministic
@@ -125,10 +132,19 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 			return defaultMerge(ctx, sets)
 		}
 		stats := &promhttputil.DedupStats{}
-		merged := dedupSeriesSets(sets, ignoreNames, stats)
+		var fillStats *promhttputil.GapFillStats
+		if opts.FillGaps {
+			fillStats = &promhttputil.GapFillStats{}
+		}
+		merged := dedupSeriesSetsFillGaps(sets, ignoreNames, dedupGapOpts{fillGaps: opts.FillGaps, gap: opts.Gap}, stats, fillStats)
 		if opts.Collisions != nil {
 			for pair, count := range stats.Pairs {
 				opts.Collisions.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
+			}
+		}
+		if opts.FilledSamples != nil && fillStats != nil {
+			for pair, count := range fillStats.Pairs {
+				opts.FilledSamples.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
 			}
 		}
 		return merged
