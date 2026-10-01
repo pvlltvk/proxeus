@@ -97,6 +97,30 @@ func TestConfigFromBytesValidatesIgnoreLabels(t *testing.T) {
 	}
 }
 
+func TestConfigFromBytesFillGapsDefault(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want bool
+	}{
+		{"", true},
+		{"proxeus:\n  cross_group_dedup: true\n", true},
+		{"proxeus:\n  cross_group_dedup: true\n  cross_group_dedup_fill_gaps: false\n", false},
+	} {
+		cfg, err := ConfigFromBytes([]byte(tc.yaml))
+		if err != nil {
+			t.Fatalf("%q: %v", tc.yaml, err)
+		}
+		if cfg.CrossGroupDedupFillGaps != tc.want {
+			t.Errorf("%q: CrossGroupDedupFillGaps = %t, want %t", tc.yaml, cfg.CrossGroupDedupFillGaps, tc.want)
+		}
+	}
+	if _, err := ConfigFromBytes([]byte(
+		"proxeus:\n  cross_group_dedup: true\n  cross_group_dedup_fill_gaps: false\n  cross_group_dedup_gap: 30s\n",
+	)); err == nil {
+		t.Error("cross_group_dedup_gap with fill gaps turned off was accepted")
+	}
+}
+
 // TestRemoteWriteMaxSamplesPerSendDefault is a regression test for
 // https://github.com/jacksontj/promxy/issues/781. Upstream's default
 // max_samples_per_send (2000) can produce remote_write requests that decompress
@@ -284,9 +308,8 @@ func TestProxeusConfigValidate(t *testing.T) {
 			},
 		},
 		{
-			name:    "fill_gaps without dedup",
-			cfg:     ProxeusConfig{CrossGroupDedupFillGaps: true},
-			wantErr: true,
+			name: "fill_gaps without dedup",
+			cfg:  ProxeusConfig{CrossGroupDedupFillGaps: true},
 		},
 		{
 			name: "fill_gaps with dedup",

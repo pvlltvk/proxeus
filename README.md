@@ -87,23 +87,22 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > apart from each group's declared `labels`, so if a backend stamps anything else of its own (a Thanos
 > `prometheus_replica`, say) dedup won't collapse them and the aggregate still double-counts.
 
-> **Gap filling.** The dedup winner's series is returned as-is, so a hole in it stays a hole even when another group
-> has the data — typical during a migration, when the new backend lacks history or the old one stops first.
-> `cross_group_dedup_fill_gaps: true` fills those holes from the other groups in priority order; the winner's own
-> samples are never replaced. A `StaleNaN` in the winner also starts a gap.
+> **Gap filling.** A hole in the dedup winner's series is filled from the other groups in priority order — typical
+> during a migration, when the new backend lacks history or the old one stops first. The winner's own samples are
+> never replaced. A gap is the span before the winner's first sample or after its last, an interval of at least
+> `cross_group_dedup_gap`, or the span after a `StaleNaN`. It is on by default with `cross_group_dedup`:
 >
 > ```yaml
 > proxeus:
 >   cross_group_dedup: true
->   cross_group_dedup_fill_gaps: true
->   cross_group_dedup_gap: 0   # 0 = auto: twice the winner's median sample interval
+>   cross_group_dedup_fill_gaps: true   # default; false returns the winner whole
+>   cross_group_dedup_gap: 0            # 0 = auto: twice the winner's median sample interval
 > ```
 >
-> Filled samples are counted in `proxeus_cross_group_dedup_filled_samples_total{winner,filler}`; a steady rate means
-> the winner is missing data. Values can differ slightly at a filled seam (downsampled Thanos next to raw
-> VictoriaMetrics, or different scrape moments), as with Thanos Query's own replica dedup. Pushed-down aggregations
-> are not deduped and so not filled; with `cross_group_exact_aggregates: true` they are. It is off by default because
-> every series found in more than one group has all its copies read.
+> Values can differ slightly at a filled seam (downsampled Thanos next to raw VictoriaMetrics, or different scrape
+> moments), as with Thanos Query's own replica dedup. Pushed-down aggregations are not deduped and so not filled; with
+> `cross_group_exact_aggregates: true` they are. Every series found in more than one group has all its copies read,
+> which costs memory when most series overlap.
 
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,
 `cortex`, `mimir`) unlocks a typed block of that backend's own query options — `thanos:` (`dedup`,
@@ -391,8 +390,8 @@ series across the network.
 **Layering** works — proxeus in front of proxeus is fine, since it is itself a Prometheus-compatible API endpoint.
 
 **Monitoring proxeus itself:** scrape its `/metrics` and import
-[`deploy/grafana/proxeus-dashboard.json`](deploy/grafana/proxeus-dashboard.json) — per-backend request rate, latency and
-errors, `proxeus_server_group_targets` (alert on `== 0`), and cross-group dedup collisions.
+[`deploy/grafana/proxeus-dashboard.json`](deploy/grafana/proxeus-dashboard.json) — per-backend request rate, latency
+percentiles and errors, `proxeus_server_group_targets` (alert on `== 0`), and cross-group dedup collisions.
 
 **Pushdown metrics** show how much of a query the backends answer, and how much proxeus drags across the network:
 

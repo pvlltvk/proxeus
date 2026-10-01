@@ -17,7 +17,7 @@ import (
 
 // DefaultProxeusConfig is the default proxeus config that the config file
 // is loaded into
-var DefaultProxeusConfig = ProxeusConfig{}
+var DefaultProxeusConfig = ProxeusConfig{CrossGroupDedupFillGaps: true}
 
 // DefaultMaxSamplesPerSend is proxeus's default remote_write batch size when the
 // user does not set queue_config.max_samples_per_send explicitly.
@@ -253,7 +253,7 @@ type ProxeusConfig struct {
 	CrossGroupDedupIgnoreLabels []string `yaml:"cross_group_dedup_ignore_labels"`
 
 	// CrossGroupDedupFillGaps fills gaps in the dedup winner's samples from
-	// lower-priority backends. Requires CrossGroupDedup.
+	// lower-priority backends. On by default; no effect without CrossGroupDedup.
 	CrossGroupDedupFillGaps bool `yaml:"cross_group_dedup_fill_gaps"`
 
 	// CrossGroupDedupGap is the sample interval that counts as a gap; 0 derives
@@ -283,9 +283,6 @@ func (c *ProxeusConfig) Validate() error {
 	}
 	if err := validateCrossGroupDedupIgnoreLabels(c.CrossGroupDedupIgnoreLabels); err != nil {
 		return err
-	}
-	if c.CrossGroupDedupFillGaps && !c.CrossGroupDedup {
-		return fmt.Errorf("cross_group_dedup_fill_gaps: requires cross_group_dedup: true")
 	}
 	if c.CrossGroupDedupGap != 0 && !c.CrossGroupDedupFillGaps {
 		return fmt.Errorf("cross_group_dedup_gap: requires cross_group_dedup_fill_gaps: true")
