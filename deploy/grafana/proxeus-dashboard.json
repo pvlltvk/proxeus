@@ -142,17 +142,14 @@
     {
       "type": "timeseries",
       "id": 11,
-      "title": "Backend mean latency",
-      "description": "proxeus_server_group_request_duration_seconds is a Summary without quantiles, so this is rate(sum)/rate(count) - a mean, not a percentile.",
+      "title": "Backend latency",
+      "description": "p50 and p99 per server_group. The first expression reads native histograms, the second classic buckets, whichever the scraper ingests.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
       "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (server_group) (rate(proxeus_server_group_request_duration_seconds_sum{instance=~\"$instance\"}[5m]))\n/\nsum by (server_group) (rate(proxeus_server_group_request_duration_seconds_count{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{server_group}}"
-        }
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (server_group) (rate(proxeus_server_group_request_duration_seconds{instance=~\"$instance\"}[5m])))\nor\nhistogram_quantile(0.50, sum by (server_group, le) (rate(proxeus_server_group_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "{{server_group}} p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.99, sum by (server_group) (rate(proxeus_server_group_request_duration_seconds{instance=~\"$instance\"}[5m])))\nor\nhistogram_quantile(0.99, sum by (server_group, le) (rate(proxeus_server_group_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "{{server_group}} p99" }
       ]
     },
     {
@@ -183,12 +180,7 @@
         {
           "refId": "A",
           "expr": "sum by (winner, loser) (rate(proxeus_cross_group_dedup_collisions_total{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "series: {{winner}} beats {{loser}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum by (winner, loser, endpoint) (rate(proxeus_cross_group_dedup_metadata_collisions_total{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "metadata {{endpoint}}: {{winner}} beats {{loser}}"
+          "legendFormat": "{{winner}} beats {{loser}}"
         }
       ]
     },

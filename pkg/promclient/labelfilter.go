@@ -24,11 +24,11 @@ var (
 	}, []string{"status"})
 	syncSummary = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "proxeus_label_filter_sync_duration_seconds",
-		Help: "Latency of sync process from a proxeus label_fitler",
+		Help: "Latency of sync process from a proxeus label_filter",
 	}, []string{"status"})
 	filteredCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "proxeus_label_filter_filtered_count_total",
-		Help: "How many requests have been filtered from the downstream,, partitioned by query type",
+		Help: "How many requests have been filtered from the downstream, partitioned by query type",
 	}, []string{"type"})
 )
 

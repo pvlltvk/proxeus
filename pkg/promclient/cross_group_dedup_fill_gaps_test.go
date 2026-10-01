@@ -49,7 +49,7 @@ func TestDedupSeriesSetsFillGaps_FlagOffIsUnchanged(t *testing.T) {
 	ssOld := dedupSeriesSets(build(), []string{"backend"}, statsOld)
 
 	statsNew := &promhttputil.DedupStats{}
-	ssNew := dedupSeriesSetsFillGaps(build(), []string{"backend"}, dedupGapOpts{}, statsNew, nil)
+	ssNew := dedupSeriesSetsFillGaps(build(), []string{"backend"}, dedupGapOpts{}, statsNew)
 
 	if !ssOld.Next() || !ssNew.Next() {
 		t.Fatal("expected one surviving series from both paths")
@@ -70,8 +70,7 @@ func TestDedupSeriesSetsFillGaps_FillsFromLoser(t *testing.T) {
 
 	sets := []ordinalSeriesSet{setOf(0, base), setOf(1, filler)}
 	stats := &promhttputil.DedupStats{}
-	fillStats := &promhttputil.GapFillStats{}
-	ss := dedupSeriesSetsFillGaps(sets, []string{"backend"}, dedupGapOpts{fillGaps: true, gap: 15}, stats, fillStats)
+	ss := dedupSeriesSetsFillGaps(sets, []string{"backend"}, dedupGapOpts{fillGaps: true, gap: 15}, stats)
 
 	if !ss.Next() {
 		t.Fatal("expected one merged series")
@@ -89,9 +88,6 @@ func TestDedupSeriesSetsFillGaps_FillsFromLoser(t *testing.T) {
 	}
 	if stats.Collisions != 1 {
 		t.Fatalf("Collisions = %d, want 1", stats.Collisions)
-	}
-	if n := fillStats.Pairs[[2]int{0, 1}]; n != 3 {
-		t.Fatalf("GapFillStats.Pairs[{0,1}] = %d, want 3", n)
 	}
 }
 
@@ -118,8 +114,7 @@ func TestDedupSeriesSetsFillGaps_OrdinalOrderIndependence(t *testing.T) {
 				sets = append(sets, setOf(ordinal, cpu(sg, bySG[sg])))
 			}
 			stats := &promhttputil.DedupStats{}
-			fillStats := &promhttputil.GapFillStats{}
-			ss := dedupSeriesSetsFillGaps(sets, []string{"backend"}, dedupGapOpts{fillGaps: true, gap: 8}, stats, fillStats)
+			ss := dedupSeriesSetsFillGaps(sets, []string{"backend"}, dedupGapOpts{fillGaps: true, gap: 8}, stats)
 
 			if !ss.Next() {
 				t.Fatal("expected one surviving series")
@@ -135,10 +130,6 @@ func TestDedupSeriesSetsFillGaps_OrdinalOrderIndependence(t *testing.T) {
 			if fmt.Sprint(drainFloats(t, got)) != want {
 				t.Fatalf("perm %v: got %v, want %s", perm, drainFloats(t, got), want)
 			}
-			wantFilled := map[[2]int]int{{0, 1}: 1, {0, 2}: 2}
-			if fmt.Sprint(fillStats.Pairs) != fmt.Sprint(wantFilled) {
-				t.Fatalf("perm %v: GapFillStats.Pairs = %v, want %v", perm, fillStats.Pairs, wantFilled)
-			}
 		})
 	}
 }
@@ -152,8 +143,7 @@ func TestDedupSeriesSetsFillGaps_AutoThreshold(t *testing.T) {
 	filler := series(floats([2]int64{20, 9}), "__name__", "up", "backend", "sg1")
 
 	sets := []ordinalSeriesSet{setOf(0, base), setOf(1, filler)}
-	fillStats := &promhttputil.GapFillStats{}
-	ss := dedupSeriesSetsFillGaps(sets, []string{"backend"}, dedupGapOpts{fillGaps: true}, &promhttputil.DedupStats{}, fillStats)
+	ss := dedupSeriesSetsFillGaps(sets, []string{"backend"}, dedupGapOpts{fillGaps: true}, &promhttputil.DedupStats{})
 
 	if !ss.Next() {
 		t.Fatal("expected one merged series")

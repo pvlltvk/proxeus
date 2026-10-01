@@ -32,25 +32,22 @@ load 1m
 
 func TestSeriesDedup_HTTP(t *testing.T) {
 	cases := []struct {
-		name             string
-		dedupMetadata    bool
-		wantRows         int
-		wantAzValues     map[string]struct{} // values of "az" label expected in response
-		wantCounterDelta float64
+		name          string
+		dedupMetadata bool
+		wantRows      int
+		wantAzValues  map[string]struct{} // values of "az" label expected in response
 	}{
 		{
-			name:             "dedup_off — both backends visible (4 rows)",
-			dedupMetadata:    false,
-			wantRows:         4,
-			wantAzValues:     map[string]struct{}{"a": {}, "b": {}},
-			wantCounterDelta: 0,
+			name:          "dedup_off — both backends visible (4 rows)",
+			dedupMetadata: false,
+			wantRows:      4,
+			wantAzValues:  map[string]struct{}{"a": {}, "b": {}},
 		},
 		{
-			name:             "dedup_on — collapsed to 2 rows, lowest ordinal wins",
-			dedupMetadata:    true,
-			wantRows:         2,
-			wantAzValues:     map[string]struct{}{"a": {}}, // lowest-ordinal group keeps its label
-			wantCounterDelta: 2,                            // one collision per logical series (up{job=x}, up{job=y})
+			name:          "dedup_on — collapsed to 2 rows, lowest ordinal wins",
+			dedupMetadata: true,
+			wantRows:      2,
+			wantAzValues:  map[string]struct{}{"a": {}}, // lowest-ordinal group keeps its label
 		},
 	}
 
@@ -96,8 +93,6 @@ proxeus:
 				<-stopP
 			}()
 
-			counterBefore := counterValue(t, "proxeus_cross_group_dedup_metadata_collisions_total")
-
 			q := url.Values{}
 			q.Set("match[]", "up")
 			q.Set("start", "0")
@@ -135,11 +130,6 @@ proxeus:
 			}
 			if !sameKeySet(gotAz, tc.wantAzValues) {
 				t.Errorf("az label values = %v, want %v", gotAz, tc.wantAzValues)
-			}
-
-			counterAfter := counterValue(t, "proxeus_cross_group_dedup_metadata_collisions_total")
-			if got := counterAfter - counterBefore; got != tc.wantCounterDelta {
-				t.Errorf("collision counter delta = %v, want %v", got, tc.wantCounterDelta)
 			}
 		})
 	}

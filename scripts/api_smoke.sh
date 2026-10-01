@@ -149,8 +149,7 @@ section "/metrics (proxeus's own scrape endpoint)"
 fetch "/metrics"
 assert_200 metrics && \
     grep -q '^proxeus_cross_group_dedup_collisions_total' <<<"${RESP_BODY}" && \
-    grep -q '^proxeus_cross_group_dedup_metadata_collisions_total' <<<"${RESP_BODY}" && \
-    ok "metrics: B1 + F2 collision counters exposed"
+    ok "metrics: collision counter exposed"
 
 # --- summary ---------------------------------------------------------------
 echo

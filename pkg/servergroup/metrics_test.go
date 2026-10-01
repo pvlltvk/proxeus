@@ -35,17 +35,20 @@ func hasLabel(mf *dto.MetricFamily, labelName, labelValue string) bool {
 	return false
 }
 
-// TestServerGroupSummaryHasServerGroupLabel verifies that the
-// proxeus_server_group_request_duration_seconds metric carries a "server_group" label.
-func TestServerGroupSummaryHasServerGroupLabel(t *testing.T) {
+// TestServerGroupDurationHasServerGroupLabel verifies that the
+// proxeus_server_group_request_duration_seconds histogram carries a "server_group" label.
+func TestServerGroupDurationHasServerGroupLabel(t *testing.T) {
 	const sgName = "sg-label-test"
 
 	// Emit a sample so the metric family appears in the gather output.
-	serverGroupSummary.WithLabelValues(sgName, "host:9090", "query", "success").Observe(0.001)
+	serverGroupDuration.WithLabelValues(sgName, "host:9090", "query", "success").Observe(0.001)
 
 	mf := gatherFamily(t, "proxeus_server_group_request_duration_seconds")
 	if mf == nil {
 		t.Fatal("metric family proxeus_server_group_request_duration_seconds not found in registry")
+	}
+	if mf.GetType() != dto.MetricType_HISTOGRAM {
+		t.Errorf("type = %v, want HISTOGRAM", mf.GetType())
 	}
 
 	if !hasLabel(mf, "server_group", sgName) {

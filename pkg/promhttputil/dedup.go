@@ -22,19 +22,3 @@ func (s *DedupStats) Record(winner, loser int) {
 	}
 	s.Pairs[[2]int{winner, loser}]++
 }
-
-// GapFillStats counts samples filled into a winner, keyed by {winner, filler}
-// ordinal.
-type GapFillStats struct {
-	Pairs map[[2]int]int
-}
-
-func (s *GapFillStats) Record(winner, filler, n int) {
-	if n == 0 {
-		return
-	}
-	if s.Pairs == nil {
-		s.Pairs = make(map[[2]int]int)
-	}
-	s.Pairs[[2]int{winner, filler}] += n
-}

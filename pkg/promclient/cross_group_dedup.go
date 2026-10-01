@@ -26,7 +26,7 @@ import (
 // ignore must be sorted ascending; it is the union of the per-group external
 // label names.
 func dedupSeriesSets(sets []ordinalSeriesSet, ignore []string, stats *promhttputil.DedupStats) storage.SeriesSet {
-	return dedupSeriesSetsFillGaps(sets, ignore, dedupGapOpts{}, stats, nil)
+	return dedupSeriesSetsFillGaps(sets, ignore, dedupGapOpts{}, stats)
 }
 
 type dedupGapOpts struct {
@@ -36,8 +36,8 @@ type dedupGapOpts struct {
 
 // dedupSeriesSetsFillGaps is dedupSeriesSets that, with opts.fillGaps, fills
 // the winner's gaps from the losers in ascending-ordinal order. Non-colliding
-// series still pass through untouched. fillStats may be nil.
-func dedupSeriesSetsFillGaps(sets []ordinalSeriesSet, ignore []string, opts dedupGapOpts, stats *promhttputil.DedupStats, fillStats *promhttputil.GapFillStats) storage.SeriesSet {
+// series still pass through untouched.
+func dedupSeriesSetsFillGaps(sets []ordinalSeriesSet, ignore []string, opts dedupGapOpts, stats *promhttputil.DedupStats) storage.SeriesSet {
 	// A single backend is passed through whole. With nothing to collide
 	// against, two series of one group that share a reduced fingerprint are
 	// not duplicates of each other -- same as the old model.Value merge's
@@ -115,7 +115,7 @@ func dedupSeriesSetsFillGaps(sets []ordinalSeriesSet, ignore []string, opts dedu
 			stats.Record(e.ordinal, loser)
 		}
 		if opts.fillGaps && len(e.members) > 1 {
-			result[e.idx] = fillBucketGaps(e.members, opts.gap, fillStats)
+			result[e.idx] = fillBucketGaps(e.members, opts.gap)
 		}
 	}
 
@@ -134,7 +134,7 @@ type dedupBucketMember struct {
 
 // fillBucketGaps returns the lowest-ordinal member, with its labels, gap-filled
 // from the others.
-func fillBucketGaps(members []dedupBucketMember, gap model.Time, fillStats *promhttputil.GapFillStats) storage.Series {
+func fillBucketGaps(members []dedupBucketMember, gap model.Time) storage.Series {
 	sort.Slice(members, func(i, j int) bool { return members[i].ordinal < members[j].ordinal })
 
 	base := seriesToSampleStream(members[0].series)
@@ -144,14 +144,7 @@ func fillBucketGaps(members []dedupBucketMember, gap model.Time, fillStats *prom
 	}
 
 	threshold := promhttputil.GapThreshold(gap, base, firstOrNil(fillers))
-	merged, fillStat := promhttputil.PriorityMergeSampleStream(base, fillers, threshold)
-
-	if fillStats != nil {
-		for i, n := range fillStat.Filled {
-			fillStats.Record(members[0].ordinal, members[i+1].ordinal, n)
-		}
-	}
-
+	merged, _ := promhttputil.PriorityMergeSampleStream(base, fillers, threshold)
 	return sampleStreamToSeries(merged, members[0].series.Labels())
 }
 
