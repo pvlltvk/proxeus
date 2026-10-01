@@ -35,9 +35,15 @@ import (
 )
 
 var (
-	serverGroupSummary = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "proxeus_server_group_request_duration_seconds",
-		Help: "Summary of calls to servergroup instances",
+	// Classic buckets for scrapers without native histogram support; the
+	// native form gives finer resolution without per-bucket series.
+	serverGroupDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:                            "proxeus_server_group_request_duration_seconds",
+		Help:                            "Duration of calls to servergroup instances.",
+		Buckets:                         []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  100,
+		NativeHistogramMinResetDuration: time.Hour,
 	}, []string{"server_group", "host", "call", "status"})
 
 	serverGroupRequestErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -56,7 +62,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(serverGroupSummary)
+	prometheus.MustRegister(serverGroupDuration)
 	prometheus.MustRegister(serverGroupRequestErrors)
 	prometheus.MustRegister(serverGroupTargets)
 }
@@ -228,7 +234,7 @@ func (s *ServerGroup) Sync() {
 // tagging each observation with the target host at index i in targets.
 func apiClientMetricFunc(sgName string, targets []string) promclient.MultiAPIMetricFunc {
 	return func(i int, api, status string, took float64) {
-		serverGroupSummary.WithLabelValues(sgName, targets[i], api, status).Observe(took)
+		serverGroupDuration.WithLabelValues(sgName, targets[i], api, status).Observe(took)
 		if status == "error" {
 			serverGroupRequestErrors.WithLabelValues(sgName, targets[i], api).Inc()
 		}

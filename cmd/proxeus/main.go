@@ -71,11 +71,6 @@ var (
 		Name: "prometheus_config_last_reload_success_timestamp_seconds",
 		Help: "Timestamp of the last successful configuration reload.",
 	})
-
-	reloadTime = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "process_reload_time_seconds",
-		Help: "Last reload (SIGHUP) time of the process since unix epoch in seconds.",
-	})
 )
 
 func init() {
@@ -169,7 +164,6 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, notif
 		return fmt.Errorf("one or more errors occurred while applying new configuration")
 	}
 	noStepSuqueryInterval.Set(cfg.PromConfig.GlobalConfig.EvaluationInterval)
-	reloadTime.Set(float64(time.Now().Unix()))
 	return nil
 }
 

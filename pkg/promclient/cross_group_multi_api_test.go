@@ -233,14 +233,10 @@ func TestNewCrossGroupMultiAPI_SeriesDedup(t *testing.T) {
 		},
 	}
 
-	metaCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "test_series_dedup_metadata_collisions_total",
-	}, []string{"winner", "loser", "endpoint"})
-
 	m := newCrossGroupForTest(t, []CrossGroupBackend{
 		{API: api0, Name: "sg0", Labels: model.LabelSet{"backend": "sg0"}},
 		{API: api1, Name: "sg1", Labels: model.LabelSet{"backend": "sg1"}},
-	}, CrossGroupOpts{DedupMetadata: true, MetadataCollisions: metaCounter})
+	}, CrossGroupOpts{DedupMetadata: true})
 
 	got, _, err := m.Series(context.Background(), []string{"up"}, time.Time{}, time.Time{})
 	if err != nil {
@@ -264,12 +260,6 @@ func TestNewCrossGroupMultiAPI_SeriesDedup(t *testing.T) {
 	}
 	if shared["backend"] != "sg0" {
 		t.Fatalf("expected shared series to come from sg0, got backend=%q", shared["backend"])
-	}
-
-	// Collision counter must record exactly one collision for sg0 winning over sg1.
-	wantCollisions := testutil.ToFloat64(metaCounter.WithLabelValues("sg0", "sg1", "series"))
-	if wantCollisions != 1 {
-		t.Fatalf("expected metadata collision counter sg0/sg1/series=1, got %v", wantCollisions)
 	}
 }
 

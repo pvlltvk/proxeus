@@ -22,8 +22,7 @@ type CrossGroupBackend struct {
 }
 
 // CrossGroupOpts configures the cross-group dedup behavior of
-// NewCrossGroupMultiAPI. Collisions and MetadataCollisions may be nil to skip
-// the corresponding metric.
+// NewCrossGroupMultiAPI. Collisions may be nil to skip the metric.
 type CrossGroupOpts struct {
 	// DedupMetadata, when true, additionally wires reduced-fingerprint dedup
 	// into MultiAPI.Series so /api/v1/series collapses series that differ only
@@ -38,10 +37,6 @@ type CrossGroupOpts struct {
 	// collisions with label values {winner, loser} identifying the group names.
 	Collisions *prometheus.CounterVec
 
-	// MetadataCollisions mirrors Collisions for the /api/v1/series dedup path
-	// (only used when DedupMetadata is true).
-	MetadataCollisions *prometheus.CounterVec
-
 	// IgnoreLabels are ignored for identity on top of each backend's Labels.
 	IgnoreLabels []string
 
@@ -49,8 +44,6 @@ type CrossGroupOpts struct {
 	FillGaps bool
 	// Gap is the interval that counts as a gap; 0 = auto.
 	Gap model.Time
-	// FilledSamples is labeled {winner, filler}.
-	FilledSamples *prometheus.CounterVec
 }
 
 // NewCrossGroupMultiAPI builds a MultiAPI that performs deterministic
@@ -132,19 +125,10 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 			return defaultMerge(ctx, sets)
 		}
 		stats := &promhttputil.DedupStats{}
-		var fillStats *promhttputil.GapFillStats
-		if opts.FillGaps {
-			fillStats = &promhttputil.GapFillStats{}
-		}
-		merged := dedupSeriesSetsFillGaps(sets, ignoreNames, dedupGapOpts{fillGaps: opts.FillGaps, gap: opts.Gap}, stats, fillStats)
+		merged := dedupSeriesSetsFillGaps(sets, ignoreNames, dedupGapOpts{fillGaps: opts.FillGaps, gap: opts.Gap}, stats)
 		if opts.Collisions != nil {
 			for pair, count := range stats.Pairs {
 				opts.Collisions.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
-			}
-		}
-		if opts.FilledSamples != nil && fillStats != nil {
-			for pair, count := range fillStats.Pairs {
-				opts.FilledSamples.WithLabelValues(names[pair[0]], names[pair[1]]).Add(float64(count))
 			}
 		}
 		return merged
@@ -156,12 +140,7 @@ func NewCrossGroupMultiAPI(backends []CrossGroupBackend, opts CrossGroupOpts) (*
 			for i, r := range results {
 				inputs[i] = OrdinalLabelSets{Ordinal: r.ordinal, Sets: r.value}
 			}
-			merged, stats := mergeLabelSetsDeterministic(inputs, ignoreLabels)
-			if opts.MetadataCollisions != nil {
-				for pair, count := range stats.Pairs {
-					opts.MetadataCollisions.WithLabelValues(names[pair[0]], names[pair[1]], "series").Add(float64(count))
-				}
-			}
+			merged, _ := mergeLabelSetsDeterministic(inputs, ignoreLabels)
 			return merged
 		}
 	}

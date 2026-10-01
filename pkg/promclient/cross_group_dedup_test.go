@@ -437,7 +437,7 @@ func BenchmarkCrossGroupDedup(b *testing.B) {
 		b.Run(fmt.Sprintf("overlap=%dpct/path=native/fill_gaps_on", overlapPct), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				ss := dedupSeriesSetsFillGaps(setsOf(backends), ignoreNames, dedupGapOpts{fillGaps: true, gap: 500}, &promhttputil.DedupStats{}, &promhttputil.GapFillStats{})
+				ss := dedupSeriesSetsFillGaps(setsOf(backends), ignoreNames, dedupGapOpts{fillGaps: true, gap: 500}, &promhttputil.DedupStats{})
 				drainSeriesSet(b, ss)
 			}
 		})
