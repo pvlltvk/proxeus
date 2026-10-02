@@ -101,7 +101,6 @@ type cliOpts struct {
 	QueryLookbackDelta  time.Duration `long:"query.lookback-delta" description:"The maximum lookback duration for retrieving metrics during expression evaluations." default:"5m"`
 	QueryMaxConcurrency int           `long:"query.max-concurrency" default:"-1" description:"Maximum number of queries executed concurrently."`
 	StoragePath         string        `long:"storage.path" description:"Base directory for proxeus's local working state (active query tracker file)."`
-	LegacyStoragePath   string        `long:"storage.tsdb.path" description:"DEPRECATED: use --storage.path instead. (Proxeus has no TSDB; this flag is misnamed.)"`
 
 	RemoteReadMaxConcurrency int `long:"remote-read.max-concurrency" description:"Maximum number of concurrent remote read calls." default:"10"`
 
@@ -324,14 +323,6 @@ func main() {
 	if opts.Version {
 		fmt.Println(version.Print("proxeus"))
 		os.Exit(0)
-	}
-
-	if opts.LegacyStoragePath != "" {
-		if opts.StoragePath != "" {
-			logrus.Fatalf("--storage.tsdb.path and --storage.path are mutually exclusive; --storage.tsdb.path is deprecated, use --storage.path")
-		}
-		logrus.Warnf("--storage.tsdb.path is deprecated; use --storage.path instead")
-		opts.StoragePath = opts.LegacyStoragePath
 	}
 
 	// CheckConfig simply will load the config, check for errors, and exit
