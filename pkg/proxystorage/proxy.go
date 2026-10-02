@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"os"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -13,24 +12,18 @@ import (
 	jsoniter "github.com/json-iterator/go"
 	"github.com/pkg/errors"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/promql/parser"
-	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/tsdb"
-	"github.com/prometheus/prometheus/tsdb/agent"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/sirupsen/logrus"
-
-	"github.com/pvlltvk/proxeus/pkg/logging"
 
 	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
 	"github.com/pvlltvk/proxeus/pkg/promapi"
@@ -39,30 +32,13 @@ import (
 	"github.com/pvlltvk/proxeus/pkg/servergroup"
 )
 
-// noopScrapeManager satisfies remote.ReadyScrapeManager for proxeus, which has
-// no local scrape manager. Returning an error here causes upstream's
-// remote_write to skip metadata sending, which is the behavior we want.
-type noopScrapeManager struct{}
-
-func (noopScrapeManager) Get() (*scrape.Manager, error) {
-	return nil, errors.New("proxeus has no scrape manager")
-}
-
 // metricNameWorkaroundLabel is a workaround from https://github.com/jacksontj/promxy/issues/274
 const metricNameWorkaroundLabel = "__name"
 
 type proxyStorageState struct {
-	sgs           []*servergroup.ServerGroup
-	client        promclient.API
-	cfg           *proxyconfig.Config
-	remoteStorage *remote.Storage
-	// agentDB writes the remote_write WAL that remoteStorage's queue managers
-	// tail. It is nil when no remote_write endpoint is configured.
-	agentDB *agent.DB
-	// appendable hands out appenders for the rule manager. Backed by agentDB
-	// when remote_write is configured, otherwise by a no-op stub.
-	appendable     storage.Appendable
-	appenderCloser func() error
+	sgs    []*servergroup.ServerGroup
+	client promclient.API
+	cfg    *proxyconfig.Config
 }
 
 // Ready blocks until all servergroups are ready
@@ -81,33 +57,21 @@ func (p *proxyStorageState) Ready() {
 
 // Cancel this state
 func (p *proxyStorageState) Cancel(n *proxyStorageState) {
-	if p.sgs != nil {
-		for _, sg := range p.sgs {
-			sg.Cancel()
-		}
-	}
-	// Close the remote_write storage (agent WAL + queue managers) unless the
-	// new state is reusing the same instance.
-	if p.appenderCloser != nil && (n == nil || p.remoteStorage != n.remoteStorage) {
-		p.appenderCloser()
+	for _, sg := range p.sgs {
+		sg.Cancel()
 	}
 }
 
-// NewProxyStorage creates a new ProxyStorage. If localStoragePath is
-// non-empty, it is used as the base directory for the remote_write WAL
-// (durable across restarts); otherwise a temporary directory is created
-// per remote_write configuration and removed on shutdown.
-func NewProxyStorage(NoStepSubqueryIntervalFn func(rangeMillis int64) int64, localStoragePath string) (*ProxyStorage, error) {
+// NewProxyStorage creates a new ProxyStorage.
+func NewProxyStorage(NoStepSubqueryIntervalFn func(rangeMillis int64) int64) (*ProxyStorage, error) {
 	return &ProxyStorage{
 		NoStepSubqueryIntervalFn: NoStepSubqueryIntervalFn,
-		localStoragePath:         localStoragePath,
 	}, nil
 }
 
 // ProxyStorage implements prometheus' Storage interface
 type ProxyStorage struct {
 	NoStepSubqueryIntervalFn func(rangeMillis int64) int64
-	localStoragePath         string
 	state                    atomic.Value
 }
 
@@ -214,78 +178,6 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	}
 
 	newState.client = promclient.NewTimeTruncate(multiAPI)
-
-	// Check for remote_write (for appender)
-	if c.PromConfig.RemoteWriteConfigs != nil {
-		if oldState.remoteStorage != nil {
-			if err := oldState.remoteStorage.ApplyConfig(&c.PromConfig); err != nil {
-				return err
-			}
-			newState.remoteStorage = oldState.remoteStorage
-			newState.agentDB = oldState.agentDB
-			newState.appendable = oldState.appendable
-			newState.appenderCloser = oldState.appenderCloser
-		} else {
-			walDir := p.localStoragePath
-			ephemeral := walDir == ""
-			if ephemeral {
-				dir, err := os.MkdirTemp("", "proxeus-remote-wal-")
-				if err != nil {
-					// Minimal images (scratch/distroless) have no writable
-					// temp dir, so this fails with a bare "stat /tmp: no such
-					// file or directory" that says nothing about the fix.
-					return fmt.Errorf("creating a temporary remote_write WAL dir failed (%w); set --storage.path to a writable directory, which is required for remote_write in containers without a writable temp dir", err)
-				}
-				walDir = dir
-			}
-			rwLogger := logging.NewLogger(logrus.WithField("component", "remote_write").Logger)
-			rs := remote.NewStorage(
-				rwLogger,
-				prometheus.DefaultRegisterer,
-				func() (int64, error) { return 0, nil },
-				walDir,
-				1*time.Second,
-				noopScrapeManager{},
-			)
-			// proxeus has no local TSDB writing a WAL, so remote.Storage's queue
-			// managers have nothing to tail. Run an agent-mode WAL-only DB whose
-			// appender writes the WAL that those queue managers consume. Without
-			// this the WAL watcher fails with "error tailing WAL ... no such file
-			// or directory" and no samples are ever shipped (see issue #771).
-			db, err := agent.Open(rwLogger, prometheus.DefaultRegisterer, rs, walDir, agent.DefaultOptions())
-			if err != nil {
-				if ephemeral {
-					os.RemoveAll(walDir)
-				}
-				return fmt.Errorf("creating remote_write WAL: %w", err)
-			}
-			// Wake the queue managers' WAL watchers as soon as samples are committed.
-			db.SetWriteNotified(rs)
-			if err := rs.ApplyConfig(&c.PromConfig); err != nil {
-				db.Close()
-				if ephemeral {
-					os.RemoveAll(walDir)
-				}
-				return err
-			}
-			newState.remoteStorage = rs
-			newState.agentDB = db
-			newState.appendable = db
-			newState.appenderCloser = func() error {
-				dbErr := db.Close()
-				rsErr := rs.Close()
-				if ephemeral {
-					os.RemoveAll(walDir)
-				}
-				if dbErr != nil {
-					return dbErr
-				}
-				return rsErr
-			}
-		}
-	} else {
-		newState.appendable = appendableStub{}
-	}
 
 	newState.Ready()        // Wait for the newstate to be ready
 	p.state.Store(newState) // Store the new state
@@ -429,11 +321,9 @@ func (p *ProxyStorage) StartTime() (int64, error) {
 	return 0, nil
 }
 
-// Appender returns a new appender against the storage. When remote_write is
-// configured this is backed by the agent WAL (single-use, pooled appender), so
-// a fresh appender is returned on every call rather than a shared instance.
-func (p *ProxyStorage) Appender(ctx context.Context) storage.Appender {
-	return p.GetState().appendable.Appender(ctx)
+// Appender returns an appender that rejects every write: proxeus is read-only.
+func (p *ProxyStorage) Appender(context.Context) storage.Appender {
+	return readOnlyAppender{}
 }
 
 // Close releases the resources of the Querier.

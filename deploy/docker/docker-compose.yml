@@ -35,19 +35,6 @@ services:
     networks:
       - vm_net
     restart: always
-  alertmanager:
-    container_name: alertmanager
-    image: prom/alertmanager
-    volumes:
-      - ./../../cmd:/cmd
-      - ./data/alertmanager:/data
-    command:
-      - '--config.file=/cmd/proxeus/alertmanager.yml'
-      - '--storage.path=/data'
-    ports:
-      - 9093:9093
-    networks:
-      - vm_net
 volumes:
   logvolume01: {}
   vmdata: {}

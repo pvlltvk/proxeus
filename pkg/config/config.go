@@ -19,19 +19,6 @@ import (
 // is loaded into
 var DefaultProxeusConfig = ProxeusConfig{CrossGroupDedupFillGaps: true}
 
-// DefaultMaxSamplesPerSend is proxeus's default remote_write batch size when the
-// user does not set queue_config.max_samples_per_send explicitly.
-//
-// Upstream Prometheus defaults this to 2000. proxeus historically (in its old
-// vendored remote_write fork) used 100, and shipping recording-rule output with
-// large/high-cardinality series in 2000-sample batches can decompress to more
-// than the 32 MiB snappy limit that Prometheus 3.5.3+ enforces on the
-// remote-write receiver (GHSA-8rm2-7qqf-34qm). When that happens the receiver
-// rejects the request with "snappy: decoded length N exceeds limit 33554432"
-// and the queue manager drops the batch. Restoring the historical default keeps
-// proxeus's requests comfortably under that limit. See issue #781.
-const DefaultMaxSamplesPerSend = 100
-
 // ValidateUniqueServerGroupLabels ensures that every server_group carries a
 // non-empty labels set and that no two groups share the same label fingerprint.
 // It uses the same model.LabelSet.FastFingerprint algorithm that NewMultiAPI uses
@@ -121,8 +108,8 @@ func ConfigFromBytes(configBytes []byte) (*Config, error) {
 		return nil, fmt.Errorf("error unmarshaling config: %v", err)
 	}
 
-	if err := applyRemoteWriteDefaults(cfg, configBytes); err != nil {
-		return nil, fmt.Errorf("error applying remote_write defaults: %v", err)
+	if err := rejectWriteSide(&cfg.PromConfig); err != nil {
+		return nil, err
 	}
 
 	// Validate here rather than only in ProxyStorage.ApplyConfig so --check-config
@@ -135,37 +122,17 @@ func ConfigFromBytes(configBytes []byte) (*Config, error) {
 	return cfg, nil
 }
 
-// applyRemoteWriteDefaults lowers the remote_write max_samples_per_send default
-// from upstream's 2000 to proxeus's DefaultMaxSamplesPerSend, but only for
-// remote_write entries where the user did not set it explicitly. The base
-// unmarshal always populates QueueConfig from Prometheus' DefaultQueueConfig, so
-// an explicit value is indistinguishable from the upstream default after the
-// fact; we re-parse the raw YAML to detect which entries set it.
-func applyRemoteWriteDefaults(cfg *Config, configBytes []byte) error {
-	if len(cfg.PromConfig.RemoteWriteConfigs) == 0 {
-		return nil
+// rejectWriteSide refuses the Prometheus sections proxeus does not act on, so
+// a config that expects rules or remote_write fails at load, not silently.
+func rejectWriteSide(c *config.Config) error {
+	switch {
+	case len(c.RuleFiles) > 0:
+		return fmt.Errorf("rule_files is not supported: proxeus evaluates no rules; run a ruler that queries proxeus")
+	case len(c.RemoteWriteConfigs) > 0:
+		return fmt.Errorf("remote_write is not supported: proxeus is read-only")
+	case len(c.AlertingConfig.AlertmanagerConfigs) > 0 || len(c.AlertingConfig.AlertRelabelConfigs) > 0:
+		return fmt.Errorf("alerting is not supported: proxeus sends no alerts")
 	}
-
-	var probe struct {
-		RemoteWrite []struct {
-			QueueConfig *struct {
-				MaxSamplesPerSend *int `yaml:"max_samples_per_send"`
-			} `yaml:"queue_config"`
-		} `yaml:"remote_write"`
-	}
-	if err := yaml.Unmarshal(configBytes, &probe); err != nil {
-		return err
-	}
-
-	for i, rwcfg := range cfg.PromConfig.RemoteWriteConfigs {
-		explicit := i < len(probe.RemoteWrite) &&
-			probe.RemoteWrite[i].QueueConfig != nil &&
-			probe.RemoteWrite[i].QueueConfig.MaxSamplesPerSend != nil
-		if !explicit {
-			rwcfg.QueueConfig.MaxSamplesPerSend = DefaultMaxSamplesPerSend
-		}
-	}
-
 	return nil
 }
 
@@ -173,8 +140,7 @@ func applyRemoteWriteDefaults(cfg *Config, configBytes []byte) error {
 // as well as the Proxeus config. This is done by "inline-ing" the proxeus
 // config into the prometheus config under the "proxeus" key
 type Config struct {
-	// Prometheus configs -- this includes configurations for
-	// recording rules, alerting rules, etc.
+	// Prometheus configs: global settings and tracing.
 	PromConfig config.Config `yaml:",inline"`
 
 	// Proxeus specific configuration -- under its own namespace

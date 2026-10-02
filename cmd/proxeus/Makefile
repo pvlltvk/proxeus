@@ -1,5 +1,5 @@
 test-demo:
-	go build -race -tags netgo && ./proxeus --rules.alertbackfill --log-level=debug --http.shutdown-delay=0s --config=demo.conf --web.external-url=http://localhost:8082/proxeus
+	go build -race -tags netgo && ./proxeus --log-level=debug --http.shutdown-delay=0s --config=demo.conf --web.external-url=http://localhost:8082/proxeus
 
 
 test-local:

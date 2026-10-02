@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,7 +30,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/prometheus/config"
-	"github.com/prometheus/prometheus/discovery"
 	_ "github.com/prometheus/prometheus/discovery/install" // Register service discovery implementations.
 	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/prometheus/prometheus/notifier"
@@ -41,13 +39,11 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	promlogging "github.com/prometheus/prometheus/util/logging"
 	"github.com/prometheus/prometheus/util/notifications"
-	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/atomic"
 	"k8s.io/klog"
 
-	"github.com/pvlltvk/proxeus/pkg/alertbackfill"
 	"github.com/pvlltvk/proxeus/pkg/auth"
 	proxyconfig "github.com/pvlltvk/proxeus/pkg/config"
 	"github.com/pvlltvk/proxeus/pkg/federate"
@@ -104,17 +100,12 @@ type cliOpts struct {
 	QueryMaxSamples     int           `long:"query.max-samples" description:"Maximum number of samples a single query can load into memory. Note that queries will fail if they would load more samples than this into memory, so this also limits the number of samples a query can return." default:"50000000"`
 	QueryLookbackDelta  time.Duration `long:"query.lookback-delta" description:"The maximum lookback duration for retrieving metrics during expression evaluations." default:"5m"`
 	QueryMaxConcurrency int           `long:"query.max-concurrency" default:"-1" description:"Maximum number of queries executed concurrently."`
-	StoragePath         string        `long:"storage.path" description:"Base directory for proxeus's local working state (active query tracker file, remote_write WAL)."`
+	StoragePath         string        `long:"storage.path" description:"Base directory for proxeus's local working state (active query tracker file)."`
 	LegacyStoragePath   string        `long:"storage.tsdb.path" description:"DEPRECATED: use --storage.path instead. (Proxeus has no TSDB; this flag is misnamed.)"`
 
 	RemoteReadMaxConcurrency int `long:"remote-read.max-concurrency" description:"Maximum number of concurrent remote read calls." default:"10"`
 
-	NotificationQueueCapacity int           `long:"alertmanager.notification-queue-capacity" description:"The capacity of the queue for pending alert manager notifications." default:"10000"`
-	AccessLogDestination      string        `long:"access-log-destination" description:"where to log access logs, options (none, stderr, stdout)" default:"stdout"`
-	ForOutageTolerance        time.Duration `long:"rules.alert.for-outage-tolerance" description:"Max time to tolerate prometheus outage for restoring for state of alert." default:"1h"`
-	ForGracePeriod            time.Duration `long:"rules.alert.for-grace-period" description:"Minimum duration between alert and restored for state. This is maintained only for alerts with configured for time greater than grace period." default:"10m"`
-	ResendDelay               time.Duration `long:"rules.alert.resend-delay" description:"Minimum amount of time to wait before resending an alert to Alertmanager." default:"1m"`
-	AlertBackfill             bool          `long:"rules.alertbackfill" description:"Enable proxeus to recalculate alert state on startup when the downstream datastore doesn't have an ALERTS_FOR_STATE"`
+	AccessLogDestination string `long:"access-log-destination" description:"where to log access logs, options (none, stderr, stdout)" default:"stdout"`
 
 	MCPEnable       bool          `long:"mcp.enable" description:"Enable the MCP (Model Context Protocol) endpoint at <route-prefix>/mcp. Read-only; it must not be exposed without authentication."`
 	MCPMaxSeries    int           `long:"mcp.max-series" description:"Maximum number of series (or label names/values) an MCP tool call returns. A per-call truncation_limit may lower it, never raise it. 0 disables the cap." default:"100"`
@@ -389,13 +380,10 @@ func main() {
 	noStepSubqueryInterval := &safePromQLNoStepSubqueryInterval{}
 	noStepSubqueryInterval.Set(config.DefaultGlobalConfig.EvaluationInterval)
 
-	// Reload ready -- channel to close once we are ready to start reloaders
-	reloadReady := make(chan struct{})
-
 	// Create the proxy storage
 	var proxyStorage storage.Storage
 
-	ps, err := proxystorage.NewProxyStorage(noStepSubqueryInterval.Get, opts.StoragePath)
+	ps, err := proxystorage.NewProxyStorage(noStepSubqueryInterval.Get)
 	if err != nil {
 		logrus.Fatalf("Error creating proxy: %v", err)
 	}
@@ -437,106 +425,11 @@ func main() {
 		logrus.Fatalf("Unable to parse external URL %s", "tmp")
 	}
 
-	// Alert notifier
-	notifierManager := notifier.NewManager(
-		&notifier.Options{
-			Registerer:    prometheus.DefaultRegisterer,
-			QueueCapacity: opts.NotificationQueueCapacity,
-		},
-		logger.With("component", "notifier"),
-	)
-	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(notifierManager))
-
-	notifyDiscoverySDMetrics, err := discovery.RegisterSDMetrics(prometheus.DefaultRegisterer, discovery.NewRefreshMetrics(prometheus.DefaultRegisterer))
-	if err != nil {
-		logrus.Fatalf("Error registering SD metrics: %v", err)
-	}
-	discoveryManagerNotify := discovery.NewManager(ctx, logger.With("component", "discovery manager notify"), prometheus.DefaultRegisterer, notifyDiscoverySDMetrics)
-	if discoveryManagerNotify == nil {
-		logrus.Fatalf("Error creating notify discovery manager")
-	}
-
-	reloadables = append(reloadables,
-		proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{func(cfg *config.Config) error {
-			c := make(map[string]discovery.Configs)
-			for k, v := range cfg.AlertingConfig.AlertmanagerConfigs.ToMap() {
-				c[k] = v.ServiceDiscoveryConfigs
-			}
-			return discoveryManagerNotify.ApplyConfig(c)
-		}}),
-	)
-
-	go func() {
-		if err := discoveryManagerNotify.Run(); err != nil {
-			logrus.Errorf("Error running Notify discovery manager: %v", err)
-		} else {
-			logrus.Infof("Notify discovery manager stopped")
-		}
-	}()
-	go func() {
-		<-reloadReady
-		notifierManager.Run(discoveryManagerNotify.SyncCh())
-		logrus.Infof("Notifier manager stopped")
-	}()
-
-	var ruleQueryable storage.Queryable
-	// If alertbackfill is enabled; wire it up!
-	if opts.AlertBackfill {
-		ruleQueryable = alertbackfill.NewAlertBackfillQueryable(engine, proxyStorage)
-	} else {
-		ruleQueryable = proxyStorage
-	}
-	ruleManager := rules.NewManager(&rules.ManagerOptions{
-		Context:         ctx,         // base context for all background tasks
-		ExternalURL:     externalUrl, // URL listed as URL for "who fired this alert"
-		QueryFunc:       rules.EngineQueryFunc(engine, proxyStorage),
-		NotifyFunc:      sendAlerts(notifierManager, externalUrl.String()),
-		Appendable:      proxyStorage,
-		Queryable:       ruleQueryable,
-		Logger:          logger,
-		Registerer:      prometheus.DefaultRegisterer,
-		OutageTolerance: opts.ForOutageTolerance,
-		ForGracePeriod:  opts.ForGracePeriod,
-		ResendDelay:     opts.ResendDelay,
-	})
-
-	if q, ok := ruleQueryable.(*alertbackfill.AlertBackfillQueryable); ok {
-		q.SetRuleGroupFetcher(ruleManager.RuleGroups)
-	}
-
-	go ruleManager.Run()
-
-	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{func(cfg *config.Config) error {
-		// Get all rule files matching the configuration oaths.
-		var files []string
-		for _, pat := range cfg.RuleFiles {
-			fs, err := filepath.Glob(pat)
-			if err != nil {
-				// The only error can be a bad pattern.
-				return fmt.Errorf("error retrieving rule files for %s: %s", pat, err)
-			}
-			files = append(files, fs...)
-		}
-		if err := ruleManager.Update(time.Duration(cfg.GlobalConfig.EvaluationInterval), files, cfg.GlobalConfig.ExternalLabels, externalUrl.String(), nil); err != nil {
-			return err
-		}
-
-		if cfg.RemoteWriteConfigs == nil {
-			ruleList := ruleManager.Rules()
-			// check for any recording rules, if we find any lets log a fatal and stop
-			for _, rule := range ruleList {
-				if _, ok := rule.(*rules.RecordingRule); ok {
-					return fmt.Errorf("proxeus doesn't support recording rules: %s", rule)
-				}
-			}
-
-			if len(ruleList) > 0 {
-				logrus.Warning("Alerting rules are configured but no remote_write endpoint is configured.")
-			}
-		}
-
-		return nil
-	}}))
+	// proxeus evaluates no rules and sends no alerts. Idle, empty managers keep
+	// /api/v1/rules and /api/v1/alertmanagers (polled by Grafana and the UI)
+	// answering with empty lists instead of dereferencing nil.
+	notifierManager := notifier.NewManager(&notifier.Options{}, logger.With("component", "notifier"))
+	ruleManager := rules.NewManager(&rules.ManagerOptions{Context: ctx, Logger: logger})
 
 	// PromQL query engine reloadable
 	reloadables = append(reloadables, proxyconfig.WrapPromReloadable(&proxyconfig.ApplyConfigFunc{func(cfg *config.Config) error {
@@ -751,8 +644,6 @@ func main() {
 	configSuccess.Set(1)
 	configSuccessTime.SetToCurrentTime()
 
-	close(reloadReady)
-
 	// Set up access logger
 	var accessLogOut io.Writer
 	switch strings.ToLower(opts.AccessLogDestination) {
@@ -821,9 +712,7 @@ func main() {
 				notifs.AddNotification(notifications.ShuttingDown)
 
 				// Stop all services we are running
-				stopping = true        // start failing healthchecks
-				notifierManager.Stop() // stop alert notifier
-				ruleManager.Stop()     // Stop rule manager
+				stopping = true // start failing healthchecks
 
 				if opts.ShutdownDelay > 0 {
 					logrus.Infof("proxeus delaying shutdown by %v", opts.ShutdownDelay)
@@ -841,35 +730,6 @@ func main() {
 				logrus.Errorf("Uncaught signal: %v", sig)
 			}
 
-		}
-	}
-}
-
-// sendAlerts implements the rules.NotifyFunc for a Notifier.
-// It filters any non-firing alerts from the input.
-func sendAlerts(n *notifier.Manager, externalURL string) rules.NotifyFunc {
-	return func(ctx context.Context, expr string, alerts ...*rules.Alert) {
-		var res []*notifier.Alert
-
-		for _, alert := range alerts {
-			// Only send actually firing alerts.
-			if alert.State == rules.StatePending {
-				continue
-			}
-			a := &notifier.Alert{
-				StartsAt:     alert.FiredAt,
-				Labels:       alert.Labels,
-				Annotations:  alert.Annotations,
-				GeneratorURL: externalURL + strutil.TableLinkForExpression(expr),
-			}
-			if !alert.ResolvedAt.IsZero() {
-				a.EndsAt = alert.ResolvedAt
-			}
-			res = append(res, a)
-		}
-
-		if len(alerts) > 0 {
-			n.Send(res...)
 		}
 	}
 }

@@ -81,11 +81,9 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > nothing to dedup. The gate counts *configured* groups, not overlapping ones, so a deployment whose groups hold
 > disjoint data pays the cost for no correctness gain.
 >
-> Two things to know before enabling it. Recording and alerting rules run through the same engine, so their recorded
-> values and alert thresholds change with the flag (a 2× overlap halves a `sum`) and the raw-series cost is paid every
-> evaluation interval. And "exact" means exact modulo dedup's fingerprint: overlapping series have to be identical
-> apart from each group's declared `labels`, so if a backend stamps anything else of its own (a Thanos
-> `prometheus_replica`, say) dedup won't collapse them and the aggregate still double-counts.
+> "Exact" means exact modulo dedup's fingerprint: overlapping series have to be identical apart from each group's
+> declared `labels`, so if a backend stamps anything else of its own (a Thanos `prometheus_replica`, say) dedup won't
+> collapse them and the aggregate still double-counts.
 
 > **Gap filling.** A hole in the dedup winner's series is filled from the other groups in priority order — typical
 > during a migration, when the new backend lacks history or the old one stops first. The winner's own samples are
@@ -323,34 +321,16 @@ proxeus client). Without that step proxeus rejects every forwarded token as the 
 
 ## High availability
 
-The read path is stateless: run as many replicas as you like behind one Service, each answers queries on its own, and
-nothing is shared between them. One thing does not scale that way — **rule evaluation**.
+proxeus is stateless: run as many replicas as you like behind one Service, each answers queries on its own, and
+nothing is shared between them.
 
-Rules from `rule_files` are evaluated in-process, and proxeus has no leader election, so every replica evaluates every
-rule:
+**Rules and alerts** are not evaluated by proxeus; a config with `rule_files`, `alerting` or `remote_write` is
+rejected at load. Point a ruler at proxeus as its query endpoint instead, and its rules span every backend:
 
-- **alerting rules** are fine. Alertmanager deduplicates by label set, exactly as it does for a pair of HA Prometheus
-  servers.
-- **recording rules** are not. Each replica `remote_write`s the same series, so the write target receives one copy per
-  replica.
-
-That leaves two shapes, and the choice is which of the two you need:
-
-**In-process rules, a single replica.** The simple one. Keep `rule_files` in the proxeus config, run one replica, and
-accept that rule evaluation stops while it restarts. The Helm chart refuses `config.rule_files` with more than one
-possible replica for exactly this reason — see
-[the chart README](deploy/k8s/helm-charts/proxeus/README.md#rule-evaluation-and-replicas).
-
-**An external ruler, replicas as you like.** The scale-out one, and the recommended path. Drop `rule_files` from proxeus
-and hand rule evaluation to a component built for it, pointed at proxeus as its query endpoint:
-
-- **Thanos Ruler** — `thanos rule --query=http://proxeus:8082`, writing to its own object store or `remote_write`.
-- **A rules-only Prometheus** — no scrape targets, `rule_files` of its own, and `remote_read` against proxeus
+- **Thanos Ruler**: `thanos rule --query=http://proxeus:8082`, writing to its own object store or `remote_write`.
+- **vmalert**: `-datasource.url=http://proxeus:8082`.
+- **A rules-only Prometheus**: no scrape targets, `rule_files` of its own, and `remote_read` against proxeus
   (`/api/v1/read`, with `read_recent: true` so evaluation actually reaches it).
-
-The federated view survives the move, because the ruler's queries still go through proxeus: a rule spanning Thanos and
-VictoriaMetrics keeps working, and proxeus stays stateless. This needs no proxeus-side configuration beyond removing
-`rule_files` — the rulers just see a Prometheus API endpoint.
 
 ## Prometheus fork
 
@@ -369,20 +349,6 @@ Grafana Mimir takes with `grafana/mimir-prometheus`.
 > above into your own `go.mod`.
 
 ## Notes
-
-**Recording and alerting rules** work, and execute across your entire federated view — a global error-rate alert that no
-single backend could evaluate. Proxeus has no local TSDB, so rule output needs a `remote_write` target defined in the
-config; that is where the resulting series are written. Rule evaluation is per-replica, so see
-[High availability](#high-availability) before running more than one.
-
-> **In containers:** `remote_write` needs a writable directory for its WAL. The published image is built `FROM scratch`
-> and runs as `nobody`, so there is nothing writable by default — pass `--storage.path` pointed at a mounted volume:
-> ```sh
-> docker run -p 8082:8082 --tmpfs /data:rw,mode=1777 \
->   -v $PWD/config.yaml:/etc/proxeus/config.yaml:ro \
->   ghcr.io/pvlltvk/proxeus:latest --config=/etc/proxeus/config.yaml --storage.path=/data
-> ```
-> Without `remote_write` configured, no storage path is needed.
 
 **Query performance** targets the slowest backend in the fan-out. Pushdown keeps aggregate queries from dragging raw
 series across the network.

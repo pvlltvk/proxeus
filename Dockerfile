@@ -33,11 +33,6 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
         -X github.com/prometheus/common/version.BuildUser=${BUILD_USER} \
         -X github.com/prometheus/common/version.BuildDate=${BUILD_DATE}"
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    cd cmd/remote_write_exporter && \
-    CGO_ENABLED=0 go build \
-      -ldflags="-s -w"
-
 # ── Final image ───────────────────────────────────────────────────────────────
 # Binaries are fully static (CGO_ENABLED=0, netgo); scratch is viable.
 # /etc/passwd is inlined so USER nobody resolves at runtime.
@@ -45,7 +40,6 @@ FROM scratch
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /go/src/github.com/pvlltvk/proxeus/cmd/proxeus/proxeus               /bin/proxeus
-COPY --from=builder /go/src/github.com/pvlltvk/proxeus/cmd/remote_write_exporter/remote_write_exporter /bin/remote_write_exporter
 
 # Minimal /etc/passwd so nobody (uid 65534) resolves inside scratch.
 COPY --from=builder /etc/passwd /etc/passwd

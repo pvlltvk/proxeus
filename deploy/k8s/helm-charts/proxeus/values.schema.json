@@ -4,12 +4,6 @@
   "type": "object",
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 0 },
-    "rules": {
-      "type": "object",
-      "properties": {
-        "alertingOnly": { "type": "boolean" }
-      }
-    },
     "nameOverride": { "type": ["string", "null"] },
     "fullnameOverride": { "type": ["string", "null"] },
     "deployment": {
@@ -133,21 +127,7 @@
       "required": ["path"],
       "properties": {
         "path": { "type": "string", "pattern": "^/.+" },
-        "emptyDir": { "type": ["object", "null"] },
-        "persistence": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "existingClaim": { "type": "string" },
-            "storageClassName": { "type": "string" },
-            "accessModes": {
-              "type": "array",
-              "items": { "type": "string", "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"] }
-            },
-            "size": { "type": "string" },
-            "annotations": { "type": "object" }
-          }
-        }
+        "emptyDir": { "type": ["object", "null"] }
       }
     },
     "shutdownDelay": { "$ref": "#/definitions/duration" },

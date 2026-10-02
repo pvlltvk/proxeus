@@ -138,17 +138,6 @@ requests for up to shutdown-timeout. Kubernetes' 30s default SIGKILLs that.
 {{- end -}}
 
 {{/*
-Name of the claim backing storage.path
-*/}}
-{{- define "chart.storageClaimName" -}}
-{{- if .Values.storage.persistence.existingClaim -}}
-{{- .Values.storage.persistence.existingClaim -}}
-{{- else -}}
-{{- include "chart.fullname" . -}}-storage
-{{- end -}}
-{{- end -}}
-
-{{/*
 Volumes shared by proxeus, the config-check init container and the reloader
 */}}
 {{- define "chart.volumes" -}}
@@ -156,10 +145,7 @@ Volumes shared by proxeus, the config-check init container and the reloader
   configMap:
     name: {{ include "chart.configname" . }}
 - name: storage
-{{- if .Values.storage.persistence.enabled }}
-  persistentVolumeClaim:
-    claimName: {{ include "chart.storageClaimName" . }}
-{{- else if .Values.storage.emptyDir }}
+{{- if .Values.storage.emptyDir }}
   emptyDir:
     {{- toYaml .Values.storage.emptyDir | nindent 4 }}
 {{- else }}
@@ -284,12 +270,5 @@ Refuse the combinations that are broken or unsafe instead of shipping them.
 {{- end -}}
 {{- if and .Values.hpa.enabled .Values.verticalAutoscaler.enabled (not (eq (default "Off" .Values.verticalAutoscaler.updateMode) "Off")) -}}
 {{- fail "hpa.enabled with an actuating verticalAutoscaler.updateMode fights itself: both resize the same Deployment on the same CPU signal. Keep updateMode: \"Off\" to use the VPA for recommendations only" -}}
-{{- end -}}
-{{- if and .Values.storage.persistence.enabled (gt (int .Values.replicaCount) 1) (not (has "ReadWriteMany" .Values.storage.persistence.accessModes)) -}}
-{{- fail "storage.persistence with replicaCount > 1 needs a ReadWriteMany access mode -- every replica mounts the same claim" -}}
-{{- end -}}
-{{- $manyReplicas := or (gt (int .Values.replicaCount) 1) (and .Values.hpa.enabled (gt (int .Values.hpa.maxReplicas) 1)) -}}
-{{- if and $manyReplicas (not .Values.rules.alertingOnly) (not .Values.configMap) (dig "rule_files" false (default dict .Values.config)) -}}
-{{- fail "config.rule_files with more than one replica evaluates every rule on every replica: proxeus has no leader election, so a recording rule remote_writes the same series once per replica. Keep replicaCount: 1 with hpa disabled (or hpa.maxReplicas: 1), move evaluation to an external ruler querying proxeus, or set rules.alertingOnly: true if the rule files hold no recording rules -- Alertmanager deduplicates alerts by label set, so duplicate alerting-rule evaluation is safe" -}}
 {{- end -}}
 {{- end -}}
