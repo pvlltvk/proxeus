@@ -56,7 +56,7 @@ func (p *proxyStorageState) Ready() {
 }
 
 // Cancel this state
-func (p *proxyStorageState) Cancel(n *proxyStorageState) {
+func (p *proxyStorageState) Cancel() {
 	for _, sg := range p.sgs {
 		sg.Cancel()
 	}
@@ -142,7 +142,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 
 	// If there was a failure anywhere, we need to cancel the newState and return an error
 	if failed {
-		newState.Cancel(nil)
+		newState.Cancel()
 		return fmt.Errorf("error applying config to one or more server group(s)")
 	}
 
@@ -173,7 +173,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 		multiAPI, err = promclient.NewMultiAPI(apis, model.TimeFromUnix(0), false, nil, len(apis), false)
 	}
 	if err != nil {
-		newState.Cancel(nil)
+		newState.Cancel()
 		return err
 	}
 
@@ -182,7 +182,7 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 	newState.Ready()        // Wait for the newstate to be ready
 	p.state.Store(newState) // Store the new state
 	if oldState != nil {
-		oldState.Cancel(newState) // Cancel the old one
+		oldState.Cancel() // Cancel the old one
 	}
 
 	return nil
