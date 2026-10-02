@@ -2,7 +2,6 @@
 *.test
 *.prof
 cmd/proxeus/proxeus
-cmd/remote_write_exporter/remote_write_exporter
 cmd/fakeprom/fakeprom
 build/*
 .idea

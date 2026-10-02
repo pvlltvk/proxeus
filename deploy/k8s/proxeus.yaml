@@ -43,12 +43,6 @@ data:
       external_labels:
         source: proxeus
 
-    # remote_write configuration is used by proxeus as its local Appender, meaning all
-    # metrics proxeus would "write" (not export) would be sent to this. Examples
-    # of this include: recording rules, metrics on alerting rules, etc.
-    remote_write:
-      - url: http://localhost:8083/receive
-
     ##
     ### Proxeus configuration
     ##

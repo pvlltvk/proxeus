@@ -7,25 +7,6 @@ global:
   external_labels:
     source: proxeus-1
 
-# Rule files specifies a list of globs. Rules and alerts are read from
-# all matching files.
-rule_files:
-- "*rule"
-
-# Alerting specifies settings related to the Alertmanager.
-alerting:
-  alertmanagers:
-  - scheme: http
-    static_configs:
-    - targets:
-      - "127.0.0.1:12345"
-
-# remote_write configuration is used by proxeus as its local Appender, meaning all
-# metrics proxeus would "write" (not export) would be sent to this. Examples
-# of this include: recording rules, metrics on alerting rules, etc.
-remote_write:
-  - url: http://localhost:8083/receive
-
 ##
 ### Proxeus configuration
 ##

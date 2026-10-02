@@ -1,15 +1,5 @@
 replicaCount: 1
 
-rules:
-  # config.rule_files is evaluated in-process and proxeus has no leader
-  # election, so every replica evaluates every rule and a recording rule
-  # remote_writes the same series once per replica. The chart refuses rule_files
-  # with more than one possible replica unless this says the rule files only
-  # alert -- Alertmanager deduplicates alerts by label set, so evaluating them
-  # everywhere is the usual Prometheus HA pattern. Recording rules plus
-  # scale-out belong in an external ruler that queries proxeus.
-  alertingOnly: false
-
 # ref: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
 deployment:
   enabled: true
@@ -187,26 +177,14 @@ securityContext:
       - ALL
 
 storage:
-  # --storage.path. proxeus keeps its remote_write WAL and the active query
-  # tracker here; it is not a TSDB. Mandatory in practice: the image has no
-  # writable directory at all, not even /tmp, so remote_write and
-  # --query.max-concurrency both fail without it.
+  # --storage.path, where --query.max-concurrency keeps its active query
+  # tracker; it is not a TSDB. The image has no writable directory at all, not
+  # even /tmp, so the tracker fails without it.
   path: /var/lib/proxeus
-  # Used unless persistence.enabled; sizeLimit and medium are optional.
+  # sizeLimit and medium are optional.
   emptyDir: {}
     # medium: Memory
     # sizeLimit: 1Gi
-  persistence:
-    # Only worth it to keep the remote_write WAL across restarts. A
-    # ReadWriteOnce claim is shared by every replica of the Deployment, so
-    # replicaCount > 1 needs a ReadWriteMany class or no persistence.
-    enabled: false
-    existingClaim: ""
-    storageClassName: ""
-    accessModes:
-      - ReadWriteOnce
-    size: 10Gi
-    annotations: {}
 
 # proxeus stops advertising itself as ready, waits shutdownDelay so upstream
 # load balancers notice, then drains in-flight requests for up to
@@ -324,11 +302,6 @@ config:
       evaluation_interval: 5s
       external_labels:
         source: proxeus
-    # remote_write configuration is used by proxeus as its local Appender, meaning all
-    # metrics proxeus would "write" (not export) would be sent to this. Examples
-    # of this include: recording rules, metrics on alerting rules, etc.
-    remote_write:
-      - url: http://localhost:8083/receive
     ##
     ### Proxeus configuration
     ##

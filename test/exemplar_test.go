@@ -139,7 +139,7 @@ proxeus:
 		t.Fatalf("yaml.Unmarshal: %v", err)
 	}
 
-	ps, err := proxystorage.NewProxyStorage(func(int64) int64 { return 60000 }, "")
+	ps, err := proxystorage.NewProxyStorage(func(int64) int64 { return 60000 })
 	if err != nil {
 		t.Fatalf("NewProxyStorage: %v", err)
 	}

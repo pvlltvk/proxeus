@@ -74,7 +74,6 @@ bench-e2e:
 .PHONY: release
 release:
 	./build.bash github.com/pvlltvk/proxeus/cmd/proxeus $(BUILD)
-	./build.bash github.com/pvlltvk/proxeus/cmd/remote_write_exporter $(BUILD)
 
 testlocal-build:
 	docker build -t 127.0.0.1:32000/proxeus:latest .

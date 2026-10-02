@@ -121,89 +121,18 @@ func TestConfigFromBytesFillGapsDefault(t *testing.T) {
 	}
 }
 
-// TestRemoteWriteMaxSamplesPerSendDefault is a regression test for
-// https://github.com/jacksontj/promxy/issues/781. Upstream's default
-// max_samples_per_send (2000) can produce remote_write requests that decompress
-// past the 32 MiB snappy limit Prometheus 3.5.3+ enforces on the receiver, so
-// proxeus lowers the default to DefaultMaxSamplesPerSend when the user does not
-// set it explicitly -- while still honoring an explicit value.
-func TestRemoteWriteMaxSamplesPerSendDefault(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want []int
-	}{
-		{
-			name: "unset uses proxeus default",
-			raw: `
-remote_write:
-  - url: http://localhost:1/api/v1/write
-`,
-			want: []int{DefaultMaxSamplesPerSend},
-		},
-		{
-			name: "explicit value honored",
-			raw: `
-remote_write:
-  - url: http://localhost:1/api/v1/write
-    queue_config:
-      max_samples_per_send: 2000
-`,
-			want: []int{2000},
-		},
-		{
-			name: "explicit value matching proxeus default honored",
-			raw: `
-remote_write:
-  - url: http://localhost:1/api/v1/write
-    queue_config:
-      max_samples_per_send: 100
-`,
-			want: []int{100},
-		},
-		{
-			name: "per-entry: only unset entries get the default",
-			raw: `
-remote_write:
-  - url: http://localhost:1/api/v1/write
-  - url: http://localhost:2/api/v1/write
-    queue_config:
-      max_samples_per_send: 1500
-`,
-			want: []int{DefaultMaxSamplesPerSend, 1500},
-		},
-		{
-			name: "queue_config set without max_samples_per_send still gets default",
-			raw: `
-remote_write:
-  - url: http://localhost:1/api/v1/write
-    queue_config:
-      max_shards: 10
-`,
-			want: []int{DefaultMaxSamplesPerSend},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := ConfigFromBytes([]byte(tc.raw))
-			if err != nil {
-				t.Fatalf("ConfigFromBytes: %v", err)
-			}
-			if got := len(cfg.PromConfig.RemoteWriteConfigs); got != len(tc.want) {
-				t.Fatalf("got %d remote_write configs, want %d", got, len(tc.want))
-			}
-			for i, want := range tc.want {
-				if got := cfg.PromConfig.RemoteWriteConfigs[i].QueueConfig.MaxSamplesPerSend; got != want {
-					t.Errorf("remote_write[%d] MaxSamplesPerSend = %d, want %d", i, got, want)
-				}
-			}
-		})
+func TestConfigFromBytesRejectsWriteSide(t *testing.T) {
+	for _, raw := range []string{
+		"rule_files: ['*.rules']\n",
+		"remote_write:\n  - url: http://localhost:8083/receive\n",
+		"alerting:\n  alertmanagers:\n    - static_configs:\n        - targets: ['am:9093']\n",
+	} {
+		if _, err := ConfigFromBytes([]byte(raw)); err == nil {
+			t.Errorf("%q was accepted", raw)
+		}
 	}
 }
 
-// The `auth` block is optional: absent means every request is anonymous, which
-// is what proxeus has always done.
 func TestAuthConfig(t *testing.T) {
 	cfg, err := ConfigFromBytes([]byte("proxeus:\n  server_groups: []\n"))
 	if err != nil {

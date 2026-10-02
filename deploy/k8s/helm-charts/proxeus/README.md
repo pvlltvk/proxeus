@@ -57,7 +57,7 @@ namespace scope and a port filter, e.g.
 
 | key | default | notes |
 |---|---|---|
-| `replicaCount` | `1` | proxeus is stateless unless `storage.persistence` is on, but see [Rule evaluation and replicas](#rule-evaluation-and-replicas) before scaling out |
+| `replicaCount` | `1` | proxeus is stateless, so replicas are interchangeable |
 | `image.repository` | `ghcr.io/pvlltvk/proxeus` | `image.tag` empty means the chart's `appVersion`; `image.digest` pins by content |
 | `service` | ClusterIP on 8082 | |
 | `ingress` | disabled | authenticate proxeus (see below) before exposing it |
@@ -66,7 +66,6 @@ namespace scope and a port filter, e.g.
 | `serviceMonitor` / `podMonitor` | disabled | need the Prometheus Operator CRDs; skipped, with a warning in NOTES, when absent |
 | `probes` | plain HTTP, no headers | scheme and headers for the liveness/readiness probes, see [Secrets](#secrets) |
 | `hpa` / `verticalAutoscaler` | disabled | an actuating VPA `updateMode` together with the HPA is refused; the VPA needs its own CRDs and is skipped, with a warning, when absent |
-| `rules.alertingOnly` | `false` | states that `config.rule_files` records nothing, which is what makes more than one replica safe — see [Rule evaluation and replicas](#rule-evaluation-and-replicas) |
 | `podDisruptionBudget` | disabled | `maxUnavailable: 1` unless you set a field yourself |
 | `serviceAccount` | created | |
 | `rbac.create` | `true` | ClusterRole reading pods/services/endpoints, for `kubernetes_sd_configs` |
@@ -84,55 +83,9 @@ every change.
 
 ## Storage
 
-proxeus has no TSDB, but it does need a writable directory: the remote_write WAL behind recording rules and the
-active query tracker behind `--query.max-concurrency` both live under `--storage.path`. The image is built
-`FROM scratch`, so there is no writable `/tmp` to fall back on, and `readOnlyRootFilesystem` removes the last
-one. The chart therefore always sets `--storage.path` and mounts something there — an `emptyDir` by default:
-
-```yaml
-storage:
-  path: /var/lib/proxeus
-  persistence:
-    enabled: true      # only to keep the WAL across restarts
-    size: 10Gi
-```
-
-Every replica of the Deployment mounts the same claim, so `storage.persistence` with `replicaCount > 1` is
-refused unless the access mode is `ReadWriteMany`.
-
-## Rule evaluation and replicas
-
-proxeus evaluates `config.rule_files` itself, in-process, and has **no leader election**. Every replica therefore
-evaluates every rule:
-
-- alerting rules are fine — Alertmanager deduplicates by label set, the same as a pair of HA Prometheus servers;
-- recording rules are not — each replica `remote_write`s the same series, so the write target receives one copy per
-  replica.
-
-So `config.rule_files` together with more than one possible replica (`replicaCount > 1`, or `hpa.enabled` with
-`maxReplicas > 1`) is refused. Three ways out:
-
-```yaml
-# 1. one replica, rules evaluated in proxeus -- see ci/rules-values.yaml
-replicaCount: 1
-hpa:
-  enabled: false
-
-# 2. rule files that only alert, never record
-replicaCount: 3
-rules:
-  alertingOnly: true
-
-# 3. no rules here at all: an external ruler (Thanos Ruler, a rules-only
-#    Prometheus) queries proxeus and writes its own output
-replicaCount: 3
-```
-
-Option 3 is the one that scales, and it keeps the federated view: the ruler's queries go through proxeus, so its rules
-still span every backend. See [High availability](../../../../README.md#high-availability).
-
-With `configMap: <name>` the chart cannot read the config, so it cannot tell whether your ConfigMap has `rule_files`
-and the check does not run. Multiple replicas with an external ConfigMap are on you.
+proxeus has no TSDB, but `--query.max-concurrency` keeps its active query tracker under `--storage.path`. The image
+is built `FROM scratch`, so there is no writable `/tmp` to fall back on, and `readOnlyRootFilesystem` removes the
+last one. The chart therefore always sets `--storage.path` and mounts an `emptyDir` there.
 
 ## Shutdown
 
@@ -241,12 +194,6 @@ the API server rejects or ignores it, and the release looks fine:
 | value | what happens |
 |---|---|
 | `service.clusterIP` | immutable on an existing Service; the upgrade fails. Delete and recreate the Service, or the release |
-| `storage.persistence.size` | only grows, and only on a StorageClass with `allowVolumeExpansion: true`; ignored otherwise |
-| `storage.persistence.storageClassName` | immutable on an existing claim. A claim that never bound (a class that does not exist) cannot be fixed by an upgrade either — delete the PVC, then upgrade |
-
-Pick the storage values before the first install, and check `kubectl get storageclass` for a class that actually
-exists: naming one that does not leaves the claim `Pending` and the pod unschedulable, with no way out through
-`helm upgrade`.
 
 ## Upgrading to chart 0.3.0
 
