@@ -1,7 +1,9 @@
 package promclient
 
 import (
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/histogram"
@@ -174,6 +176,37 @@ func TestSeriesIteratorEmitsConstHistogramSequence(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("expected 3 samples, got %d", count)
+	}
+}
+
+// TestPinnedHistogramsAreReleased guards against the side channel retaining
+// SampleHistograms: once callers drop them, the pin entries must go away.
+func TestPinnedHistogramsAreReleased(t *testing.T) {
+	const n = 1000
+	pinned := func() int {
+		c := 0
+		rawHistograms.Range(func(_, _ any) bool { c++; return true })
+		return c
+	}
+
+	original := &histogram.FloatHistogram{Count: 1, Sum: 1}
+	sh := floatHistogramToSampleHistogram(original)
+	if got := sampleHistogramToFloatHistogram(sh); got != original {
+		t.Fatalf("pin lost while SampleHistogram is alive: got %p want %p", got, original)
+	}
+	runtime.KeepAlive(sh)
+
+	for i := 0; i < n; i++ {
+		floatHistogramToSampleHistogram(&histogram.FloatHistogram{Count: float64(i)})
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for pinned() > 0 && time.Now().Before(deadline) {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := pinned(); got != 0 {
+		t.Fatalf("expected pin map to drain after GC, %d entries remain", got)
 	}
 }
 
