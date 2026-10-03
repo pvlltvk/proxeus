@@ -216,6 +216,12 @@ proxeus:
       # options for proxeus's HTTP client when talking to hosts in server_groups
 
       http_client:
+        # besides dial_timeout, the usual prometheus http_client options apply:
+        # basic_auth (username_file/password_file), authorization, bearer_token(_file),
+        # tls_config, follow_redirects and enable_http2 (both default true), proxy_url,
+        # no_proxy, proxy_from_environment, proxy_connect_header and http_headers.
+        # oauth2 and the *_ref secret fields are rejected. Group-level http_headers
+        # win over http_client.http_headers on conflict.
         # dial_timeout controls how long proxeus will wait for a connection to the downstream
         # the default is 200ms.
         dial_timeout: 1s

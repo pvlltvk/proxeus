@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -572,5 +573,216 @@ func TestCancelStopsLabelFilterPolling(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if got := requests.Load(); got != settled {
 		t.Errorf("label filter kept polling after Cancel: %d requests, was %d", got, settled)
+	}
+}
+
+func newConfiguredGroup(t *testing.T, yamlConfig string) *ServerGroup {
+	t.Helper()
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(yamlConfig), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	sg, err := NewServerGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sg.Cancel)
+	if err := sg.ApplyConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	return sg
+}
+
+func roundTrip(sg *ServerGroup, url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := sg.RoundTrip(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+	return resp, err
+}
+
+func TestFollowRedirects(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		wantFollow bool
+	}{
+		{name: "followed by default", config: "http_client: {}\n", wantFollow: true},
+		{name: "followed when true", config: "http_client: {follow_redirects: true}\n", wantFollow: true},
+		{name: "not followed when false", config: "http_client: {follow_redirects: false}\n", wantFollow: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/final" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"status":"success","data":["a"]}`))
+					return
+				}
+				http.Redirect(w, r, "/final", http.StatusFound)
+			}))
+			defer server.Close()
+
+			sg := newConfiguredGroup(t, tt.config)
+			groups := map[string][]*targetgroup.Group{
+				"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(server.URL, "http://"))}}}},
+			}
+			if err := sg.loadTargetGroupMap(groups); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := sg.LabelNames(t.Context(), nil, time.Time{}, time.Time{})
+			if followed := err == nil; followed != tt.wantFollow {
+				t.Errorf("redirect followed = %v (err = %v), want %v", followed, err, tt.wantFollow)
+			}
+		})
+	}
+}
+
+func TestProxyOnTheWire(t *testing.T) {
+	var proxied atomic.Int64
+	var connectHeader atomic.Value
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied.Add(1)
+		if r.Method == http.MethodConnect {
+			connectHeader.Store(r.Header.Get("X-Proxy-Token"))
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("X-Via", "proxy")
+	}))
+	defer proxy.Close()
+
+	sg := newConfiguredGroup(t, "http_client:\n  proxy_url: "+proxy.URL+"\n  no_proxy: direct.test\n  proxy_connect_header:\n    X-Proxy-Token: [secret]\n")
+
+	t.Run("proxied", func(t *testing.T) {
+		resp, err := roundTrip(sg, "http://proxied.test/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resp.Header.Get("X-Via"); got != "proxy" {
+			t.Errorf("X-Via = %q, want proxy", got)
+		}
+	})
+
+	t.Run("no_proxy bypasses", func(t *testing.T) {
+		before := proxied.Load()
+		if _, err := roundTrip(sg, "http://direct.test/"); err == nil {
+			t.Fatal("expected a direct dial failure")
+		}
+		if proxied.Load() != before {
+			t.Error("request to a no_proxy host reached the proxy")
+		}
+	})
+
+	t.Run("proxy_connect_header", func(t *testing.T) {
+		_, _ = roundTrip(sg, "https://secure.test/")
+		if got, _ := connectHeader.Load().(string); got != "secret" {
+			t.Errorf("CONNECT X-Proxy-Token = %q, want secret", got)
+		}
+	})
+}
+
+func TestEnableHTTP2OnTheWire(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   int
+	}{
+		{name: "default", config: "{}", want: 2},
+		{name: "disabled", config: "{enable_http2: false}", want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got int
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.ProtoMajor
+			}))
+			server.EnableHTTP2 = true
+			server.StartTLS()
+			defer server.Close()
+
+			sg := newConfiguredGroup(t, "http_client: "+tt.config+"\n")
+			sg.Cfg.HTTPConfig.HTTPConfig.TLSConfig.InsecureSkipVerify = true
+			if err := sg.ApplyConfig(sg.Cfg); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := roundTrip(sg, server.URL); err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("protocol major = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHTTPHeadersOnTheWire(t *testing.T) {
+	headerFile := filepath.Join(t.TempDir(), "header")
+	if err := os.WriteFile(headerFile, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var got http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer server.Close()
+
+	sg := newConfiguredGroup(t, `
+http_headers:
+  x-shared: group
+http_client:
+  http_headers:
+    X-Plain:
+      values: [plain]
+    X-Secret:
+      secrets: [hidden]
+    X-File:
+      files: [`+headerFile+`]
+    X-SHARED:
+      values: [client]
+`)
+	if _, err := roundTrip(sg, server.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string][]string{
+		"X-Plain":  {"plain"},
+		"X-Secret": {"hidden"},
+		"X-File":   {"from-file"},
+		"X-Shared": {"group"},
+	}
+	for name, values := range want {
+		if !slices.Equal(got[name], values) {
+			t.Errorf("%s = %q, want %q", name, got[name], values)
+		}
+	}
+}
+
+func TestBasicAuthUsernameFile(t *testing.T) {
+	usernameFile := filepath.Join(t.TempDir(), "username")
+	if err := os.WriteFile(usernameFile, []byte("alice\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var user, password string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, _ = r.BasicAuth()
+	}))
+	defer server.Close()
+
+	sg := newConfiguredGroup(t, "http_client:\n  basic_auth: {username_file: "+usernameFile+", password: s3cret}\n")
+	if _, err := roundTrip(sg, server.URL); err != nil {
+		t.Fatal(err)
+	}
+	if user != "alice" || password != "s3cret" {
+		t.Errorf("basic auth = %q:%q, want alice:s3cret", user, password)
 	}
 }
