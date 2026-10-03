@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -447,6 +449,77 @@ func TestSigV4RoundTripperErrorHandling(t *testing.T) {
 			}
 
 			t.Logf("SigV4 round tripper configured successfully for test: %s", tt.name)
+		})
+	}
+}
+
+func TestAuthorizationOnTheWire(t *testing.T) {
+	credentialsFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(credentialsFile, []byte("from-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name:   "credentials with explicit type",
+			config: "authorization: {type: Token, credentials: abc}",
+			want:   "Token abc",
+		},
+		{
+			name:   "type defaults to Bearer",
+			config: "authorization: {credentials: abc}",
+			want:   "Bearer abc",
+		},
+		{
+			name:   "credentials_file",
+			config: "authorization: {credentials_file: " + credentialsFile + "}",
+			want:   "Bearer from-file",
+		},
+		{
+			name:   "bearer_token",
+			config: "bearer_token: legacy",
+			want:   "Bearer legacy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Authorization")
+			}))
+			defer server.Close()
+
+			var cfg Config
+			if err := yaml.Unmarshal([]byte("http_client:\n  "+tt.config+"\n"), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			sg, err := NewServerGroup()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sg.Cancel()
+			if err := sg.ApplyConfig(&cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := sg.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if got != tt.want {
+				t.Errorf("Authorization = %q, want %q", got, tt.want)
+			}
 		})
 	}
 }

@@ -508,6 +508,18 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 		rt = config_util.NewAuthorizationCredentialsRoundTripper("Bearer", config_util.NewFileSecret(cfg.HTTPConfig.HTTPConfig.BearerTokenFile), rt)
 	}
 
+	if a := cfg.HTTPConfig.HTTPConfig.Authorization; a != nil {
+		authType := a.Type
+		if authType == "" {
+			authType = "Bearer"
+		}
+		var credentials config_util.SecretReader = config_util.NewInlineSecret(string(a.Credentials))
+		if a.CredentialsFile != "" {
+			credentials = config_util.NewFileSecret(a.CredentialsFile)
+		}
+		rt = config_util.NewAuthorizationCredentialsRoundTripper(authType, credentials, rt)
+	}
+
 	if cfg.HTTPConfig.HTTPConfig.BasicAuth != nil {
 		var passwordSecret config_util.SecretReader
 		switch {

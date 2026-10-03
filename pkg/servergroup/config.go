@@ -374,6 +374,13 @@ func (c *Config) validateAuthConfig() error {
 		return fmt.Errorf("at most one of basic_auth, authorization, bearer_token, bearer_token_file, sigv4 must be configured")
 	}
 
+	if c.HTTPConfig.HTTPConfig.OAuth2 != nil {
+		return fmt.Errorf("http_client.oauth2 is not supported")
+	}
+	if a := c.HTTPConfig.HTTPConfig.Authorization; a != nil && a.CredentialsRef != "" {
+		return fmt.Errorf("http_client.authorization.credentials_ref is not supported")
+	}
+
 	return nil
 }
 
