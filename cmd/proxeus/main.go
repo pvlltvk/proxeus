@@ -206,6 +206,29 @@ func isReactRoute(routePrefix, urlPath string) bool {
 	return reactRouteSet[rel]
 }
 
+// registerOverrides serves each override at GET only, like the upstream route
+// it replaces. OPTIONS goes to upstream, which answers the CORS preflight
+// without reading any data; other methods get the router's 405.
+func registerOverrides(r *httprouter.Router, upstream http.Handler, overrides map[string]http.HandlerFunc) {
+	for p, h := range overrides {
+		r.HandlerFunc(http.MethodGet, p, h)
+		r.Handler(http.MethodOptions, p, upstream)
+	}
+}
+
+// upstreamOptions sends every OPTIONS request that no route claimed to
+// upstream, so a CORS preflight, which the auth middleware lets through
+// unauthenticated, never reaches the proxeus UI or debug handlers.
+func upstreamOptions(next, upstream http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			upstream.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // checkedReplaceAll behaves like bytes.ReplaceAll, but if marker is not
 // present in src it logs a loud warning naming the missing marker before
 // returning src unchanged. This guards against a future upstream Mantine
@@ -590,8 +613,15 @@ func main() {
 		logrus.Infof("MCP endpoint enabled at %s", mcpPath)
 	}
 
+	registerOverrides(r, promHandler, map[string]http.HandlerFunc{
+		configPath:    ps.ConfigHandler,
+		metadataPath:  ps.MetadataHandler,
+		walReplayPath: ps.WalReplayHandler,
+		flagsPath:     ps.FlagsHandler,
+	})
+
 	stopping := false
-	r.NotFound = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Have our fallback rules
 		if strings.HasPrefix(r.URL.Path, debugPathPrefix) {
 			http.StripPrefix(debugStripPrefix, http.DefaultServeMux).ServeHTTP(w, r)
@@ -602,14 +632,6 @@ func main() {
 			} else {
 				promHandler.ServeHTTP(w, r)
 			}
-		} else if r.URL.Path == configPath {
-			ps.ConfigHandler(w, r)
-		} else if r.URL.Path == metadataPath {
-			ps.MetadataHandler(w, r)
-		} else if r.URL.Path == walReplayPath {
-			ps.WalReplayHandler(w, r)
-		} else if r.URL.Path == flagsPath {
-			ps.FlagsHandler(w, r)
 		} else if isReactRoute(webOptions.RoutePrefix, r.URL.Path) {
 			// Serve Mantine index.html with our nav injection.
 			// This must come before the /proxeus prefix check so that
@@ -627,6 +649,7 @@ func main() {
 			promHandler.ServeHTTP(w, r)
 		}
 	})
+	r.NotFound = upstreamOptions(notFound, promHandler)
 
 	if err := reloadConfig(noStepSubqueryInterval, notifs, reloadables...); err != nil {
 		logrus.Fatalf("Error loading config: %s", err)
