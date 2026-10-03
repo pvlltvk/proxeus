@@ -203,6 +203,18 @@ func (s *ServerGroup) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.client.Transport.RoundTrip(r)
 }
 
+// queryClient is the client the downstream API clients are built on; the
+// redirect policy lives here because only an http.Client applies it.
+func (s *ServerGroup) queryClient() *http.Client {
+	client := &http.Client{Transport: s}
+	if !s.Cfg.HTTPConfig.HTTPConfig.FollowRedirects {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	return client
+}
+
 // Sync updates the targets from our discovery manager
 func (s *ServerGroup) Sync() {
 	syncCh := s.targetManager.SyncCh()
@@ -300,7 +312,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 
 				targets = append(targets, u.Host)
 
-				client, err := api.NewClient(api.Config{Address: u.String(), RoundTripper: s})
+				client, err := api.NewClient(api.Config{Address: u.String(), Client: s.queryClient()})
 				if err != nil {
 					return err
 				}
@@ -479,8 +491,10 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 	}
 	// The only timeout we care about is the configured scrape timeout.
 	// It is applied on request. So we leave out any timings here.
-	var rt http.RoundTripper = &http.Transport{
-		Proxy:               http.ProxyURL(cfg.HTTPConfig.HTTPConfig.ProxyURL.URL),
+	httpCfg := &cfg.HTTPConfig.HTTPConfig
+	transport := &http.Transport{
+		Proxy:               httpCfg.Proxy(),
+		ProxyConnectHeader:  httpCfg.GetProxyConnectHeader(),
 		MaxIdleConns:        cfg.MaxIdleConns,
 		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost, // see https://github.com/golang/go/issues/13801
 		DisableKeepAlives:   false,
@@ -490,7 +504,13 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 		IdleConnTimeout:       cfg.IdleConnTimeout,
 		DialContext:           (&net.Dialer{Timeout: cfg.HTTPConfig.DialTimeout}).DialContext,
 		ResponseHeaderTimeout: cfg.Timeout,
+		ForceAttemptHTTP2:     httpCfg.EnableHTTP2,
 	}
+	if httpCfg.EnableHTTP2 {
+		// Same dead-connection guard as prometheus/common (ReadIdleTimeout there).
+		transport.HTTP2 = &http.HTTP2Config{SendPingTimeout: time.Minute}
+	}
+	var rt http.RoundTripper = transport
 
 	// If SigV4 is configured, wrap the transport with SigV4 round tripper
 	if cfg.HTTPConfig.SigV4Config != nil {
@@ -520,19 +540,36 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 		rt = config_util.NewAuthorizationCredentialsRoundTripper(authType, credentials, rt)
 	}
 
-	if cfg.HTTPConfig.HTTPConfig.BasicAuth != nil {
+	if b := httpCfg.BasicAuth; b != nil {
+		var usernameSecret config_util.SecretReader = config_util.NewInlineSecret(b.Username)
+		if b.UsernameFile != "" {
+			usernameSecret = config_util.NewFileSecret(b.UsernameFile)
+		}
 		var passwordSecret config_util.SecretReader
 		switch {
-		case len(cfg.HTTPConfig.HTTPConfig.BasicAuth.Password) > 0:
-			passwordSecret = config_util.NewInlineSecret(string(cfg.HTTPConfig.HTTPConfig.BasicAuth.Password))
-		case len(cfg.HTTPConfig.HTTPConfig.BasicAuth.PasswordFile) > 0:
-			passwordSecret = config_util.NewFileSecret(cfg.HTTPConfig.HTTPConfig.BasicAuth.PasswordFile)
+		case len(b.Password) > 0:
+			passwordSecret = config_util.NewInlineSecret(string(b.Password))
+		case len(b.PasswordFile) > 0:
+			passwordSecret = config_util.NewFileSecret(b.PasswordFile)
 		}
-		rt = config_util.NewBasicAuthRoundTripper(
-			config_util.NewInlineSecret(cfg.HTTPConfig.HTTPConfig.BasicAuth.Username),
-			passwordSecret,
-			rt,
-		)
+		rt = config_util.NewBasicAuthRoundTripper(usernameSecret, passwordSecret, rt)
+	}
+
+	if httpCfg.HTTPHeaders != nil {
+		// ServerGroup.RoundTrip sets the group-level headers first and the
+		// upstream round tripper only adds, so drop the names the group sets
+		// to keep a single value, the group-level one.
+		groupHeaders := make(map[string]struct{}, len(s.headers))
+		for name := range s.headers {
+			groupHeaders[http.CanonicalHeaderKey(name)] = struct{}{}
+		}
+		headers := config_util.Headers{Headers: make(map[string]config_util.Header, len(httpCfg.HTTPHeaders.Headers))}
+		for name, h := range httpCfg.HTTPHeaders.Headers {
+			if _, ok := groupHeaders[http.CanonicalHeaderKey(name)]; !ok {
+				headers.Headers[name] = h
+			}
+		}
+		rt = config_util.NewHeadersRoundTripper(&headers, rt)
 	}
 
 	s.client = &http.Client{Transport: rt}

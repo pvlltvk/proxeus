@@ -556,6 +556,46 @@ func TestUnsupportedHTTPClientAuthRejected(t *testing.T) {
 			config: "authorization: {credentials_ref: name}",
 			errMsg: "credentials_ref is not supported",
 		},
+		{
+			name:   "basic_auth username_ref",
+			config: "basic_auth: {username_ref: name, password: p}",
+			errMsg: "username_ref is not supported",
+		},
+		{
+			name:   "basic_auth password_ref",
+			config: "basic_auth: {username: u, password_ref: name}",
+			errMsg: "password_ref is not supported",
+		},
+		{
+			name:   "tls ca_ref",
+			config: "tls_config: {ca_ref: name}",
+			errMsg: "ca_ref, cert_ref and key_ref are not supported",
+		},
+		{
+			name:   "tls cert_ref and key_ref",
+			config: "tls_config: {cert_ref: a, key_ref: b}",
+			errMsg: "ca_ref, cert_ref and key_ref are not supported",
+		},
+		{
+			name:   "no_proxy without proxy_url",
+			config: "no_proxy: example.com",
+			errMsg: "no_proxy is configured, proxy_url must also be configured",
+		},
+		{
+			name:   "proxy_connect_header without proxy",
+			config: "proxy_connect_header: {X-A: [b]}",
+			errMsg: "proxy_connect_header is configured",
+		},
+		{
+			name:   "reserved header",
+			config: "http_headers: {Authorization: {values: [x]}}",
+			errMsg: "is not allowed",
+		},
+		{
+			name:   "basic_auth username and username_file",
+			config: "basic_auth: {username: u, username_file: /f}",
+			errMsg: "username & username_file",
+		},
 	}
 
 	for _, tt := range tests {
