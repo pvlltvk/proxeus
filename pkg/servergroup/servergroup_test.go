@@ -7,11 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/sigv4"
 	"gopkg.in/yaml.v2"
+
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
 func TestHTTPClientIntegration(t *testing.T) {
@@ -521,5 +526,51 @@ func TestAuthorizationOnTheWire(t *testing.T) {
 				t.Errorf("Authorization = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCancelStopsLabelFilterPolling(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":["a"]}`))
+	}))
+	defer server.Close()
+
+	cfg := DefaultConfig
+	cfg.LabelFilterConfig = &promclient.LabelFilterConfig{
+		DynamicLabels: []string{"job"},
+		SyncInterval:  10 * time.Millisecond,
+	}
+	sg, err := NewServerGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sg.Cancel()
+	if err := sg.ApplyConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string][]*targetgroup.Group{
+		"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(server.URL, "http://"))}}}},
+	}
+	if err := sg.loadTargetGroupMap(groups); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for requests.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("label filter made %d requests, want polling", requests.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	sg.Cancel()
+	time.Sleep(50 * time.Millisecond) // let an in-flight poll finish
+	settled := requests.Load()
+	time.Sleep(200 * time.Millisecond)
+	if got := requests.Load(); got != settled {
+		t.Errorf("label filter kept polling after Cancel: %d requests, was %d", got, settled)
 	}
 }

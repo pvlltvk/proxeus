@@ -246,7 +246,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 	apiClients := make([]promclient.API, 0)
 	queryParams := s.Cfg.queryParams()
 
-	ctx, ctxCancel := context.WithCancel(context.Background())
+	ctx, ctxCancel := context.WithCancel(s.ctx)
 	oldState := s.State()
 	oldCount := 0
 	if oldState != nil {
