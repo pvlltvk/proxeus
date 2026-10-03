@@ -4,6 +4,7 @@ import (
 	"math"
 	"runtime"
 	"sync"
+	"weak"
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/histogram"
@@ -18,12 +19,11 @@ import (
 // in a pointer-keyed side channel. The iterator's AtFloatHistogram consults
 // this channel before falling back to the best-effort reconstructor.
 //
-// Entries are removed via a finalizer when the SampleHistogram is GC'd,
-// which happens once the engine releases the model.Matrix.
-var (
-	rawHistograms   sync.Map // map[*model.SampleHistogram]*histogram.FloatHistogram
-	rawHistogramsMu sync.Mutex
-)
+// The key is a weak pointer: a strong *SampleHistogram key would keep the
+// carrier reachable forever and its cleanup would never run. The entry is
+// deleted by a runtime cleanup once the SampleHistogram is collected, which
+// happens after the engine releases the model.Matrix.
+var rawHistograms sync.Map // map[weak.Pointer[model.SampleHistogram]]*histogram.FloatHistogram
 
 // pinFloatHistogram associates fh with sh so a later AtFloatHistogram call
 // can return the high-fidelity histogram instead of lossily reconstructing
@@ -32,10 +32,11 @@ func pinFloatHistogram(sh *model.SampleHistogram, fh *histogram.FloatHistogram) 
 	if sh == nil || fh == nil {
 		return
 	}
-	rawHistograms.Store(sh, fh)
-	runtime.SetFinalizer(sh, func(p *model.SampleHistogram) {
-		rawHistograms.Delete(p)
-	})
+	key := weak.Make(sh)
+	rawHistograms.Store(key, fh)
+	runtime.AddCleanup(sh, func(k weak.Pointer[model.SampleHistogram]) {
+		rawHistograms.Delete(k)
+	}, key)
 }
 
 // pinnedFloatHistogram returns the histogram.FloatHistogram previously
@@ -44,7 +45,7 @@ func pinnedFloatHistogram(sh *model.SampleHistogram) *histogram.FloatHistogram {
 	if sh == nil {
 		return nil
 	}
-	if v, ok := rawHistograms.Load(sh); ok {
+	if v, ok := rawHistograms.Load(weak.Make(sh)); ok {
 		return v.(*histogram.FloatHistogram)
 	}
 	return nil
@@ -152,11 +153,6 @@ func sampleHistogramToFloatHistogram(sh *model.SampleHistogram) *histogram.Float
 	fh.PositiveSpans = []histogram.Span{{Offset: offset, Length: uint32(len(counts))}}
 	return fh
 }
-
-// rawHistogramsMu is reserved for future per-querier scoping if the global
-// cache becomes a bottleneck under heavy concurrent histogram traffic. The
-// finalizer-driven cleanup is sufficient for typical proxeus workloads.
-var _ = rawHistogramsMu
 
 // TestPinFloatHistogramRoundTrip is exposed as a package-level helper for
 // histogram_convert_test.go.
