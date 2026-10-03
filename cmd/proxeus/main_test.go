@@ -1,10 +1,18 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
+	"github.com/julienschmidt/httprouter"
+	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/prometheus/util/notifications"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/pvlltvk/proxeus/pkg/auth"
 )
 
 // hasNotification reports whether an active notification with the given text
@@ -75,4 +83,89 @@ func TestIsReactRoute(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOverrideRoutesAuthAndMethods(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := auth.New(context.Background(), &auth.Config{
+		Basic: &auth.BasicConfig{Users: map[string]config_util.Secret{"alice": config_util.Secret(hash)}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var overrideCalls, uiCalls, upstreamCalls int
+	count := func(n *int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) { *n++ }
+	}
+	paths := []string{
+		"/api/v1/status/config",
+		"/api/v1/metadata",
+		"/api/v1/status/walreplay",
+		"/api/v1/status/flags",
+	}
+	overrides := map[string]http.HandlerFunc{}
+	for _, p := range paths {
+		overrides[p] = count(&overrideCalls)
+	}
+
+	router := httprouter.New()
+	registerOverrides(router, count(&upstreamCalls), overrides)
+	router.NotFound = upstreamOptions(count(&uiCalls), count(&upstreamCalls))
+	handler := authenticator.Middleware(router)
+
+	tests := []struct {
+		name         string
+		method       string
+		preflight    bool
+		authed       bool
+		status       int
+		wantOverride int
+		wantUpstream int
+	}{
+		{name: "GET without credentials", method: http.MethodGet, status: http.StatusUnauthorized},
+		{name: "GET with credentials", method: http.MethodGet, authed: true, status: http.StatusOK, wantOverride: 1},
+		{name: "preflight without credentials", method: http.MethodOptions, preflight: true, status: http.StatusOK, wantUpstream: 1},
+		{name: "plain OPTIONS without credentials", method: http.MethodOptions, status: http.StatusUnauthorized},
+		{name: "POST without credentials", method: http.MethodPost, status: http.StatusUnauthorized},
+		{name: "POST with credentials", method: http.MethodPost, authed: true, status: http.StatusMethodNotAllowed},
+		{name: "DELETE with credentials", method: http.MethodDelete, authed: true, status: http.StatusMethodNotAllowed},
+	}
+	for _, p := range paths {
+		for _, tt := range tests {
+			t.Run(tt.method+" "+p+" "+tt.name, func(t *testing.T) {
+				overrideCalls, uiCalls, upstreamCalls = 0, 0, 0
+				req := httptest.NewRequest(tt.method, p, nil)
+				if tt.preflight {
+					req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+				}
+				if tt.authed {
+					req.SetBasicAuth("alice", "s3cret")
+				}
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+
+				if rec.Code != tt.status {
+					t.Errorf("status = %d, want %d", rec.Code, tt.status)
+				}
+				if overrideCalls != tt.wantOverride || upstreamCalls != tt.wantUpstream || uiCalls != 0 {
+					t.Errorf("calls override/upstream/ui = %d/%d/%d, want %d/%d/0",
+						overrideCalls, upstreamCalls, uiCalls, tt.wantOverride, tt.wantUpstream)
+				}
+			})
+		}
+	}
+
+	t.Run("preflight on an unrouted path never reaches the fallback", func(t *testing.T) {
+		overrideCalls, uiCalls, upstreamCalls = 0, 0, 0
+		req := httptest.NewRequest(http.MethodOptions, "/proxeus/api/inventory", nil)
+		req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+		if uiCalls != 0 || upstreamCalls != 1 {
+			t.Errorf("ui/upstream calls = %d/%d, want 0/1", uiCalls, upstreamCalls)
+		}
+	})
 }

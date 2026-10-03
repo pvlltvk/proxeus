@@ -84,6 +84,10 @@ type nodeReplacer struct {
 	atTimestampFinder *promclient.TimestampFinder
 	atUnsafeFinder    *promclient.BooleanFinder
 
+	// offsets holds the selector offsets removeOffset cleared, so a declined
+	// pushdown can hand the engine the AST it was given.
+	offsets map[*parser.VectorSelector]time.Duration
+
 	reason  string
 	revisit bool
 }
@@ -218,8 +222,16 @@ func (r *nodeReplacer) removeOffset() error {
 	if r.subtreeHasAt {
 		return nil
 	}
-	_, err := parser.Walk(r.ctx, &promclient.OffsetRemover{}, r.s, r.node, nil, nil)
+	remover := &promclient.OffsetRemover{Removed: map[*parser.VectorSelector]time.Duration{}}
+	_, err := parser.Walk(r.ctx, remover, r.s, r.node, nil, nil)
+	r.offsets = remover.Removed
 	return err
+}
+
+func (r *nodeReplacer) restoreOffset() {
+	for vs, offset := range r.offsets {
+		vs.OriginalOffset = offset
+	}
 }
 
 // queryRangeAt issues a step-aware downstream request for queryStr. When
@@ -257,6 +269,14 @@ func (r *nodeReplacer) queryRangeAt(queryStr string) storage.SeriesSet {
 // replace dispatches on the node type: each arm either returns the replacement
 // subtree or declines the pushdown, recording r.reason.
 func (r *nodeReplacer) replace() (parser.Node, error) {
+	node, err := r.replaceNode()
+	if node == nil {
+		r.restoreOffset()
+	}
+	return node, err
+}
+
+func (r *nodeReplacer) replaceNode() (parser.Node, error) {
 	switch n := r.node.(type) {
 	case *parser.AggregateExpr:
 		return r.replaceAggregate(n)
@@ -748,6 +768,7 @@ func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) 
 		_ = r.removeOffset()
 
 		var result storage.SeriesSet
+		origLookback := vs.LookbackDelta
 		if r.s.Interval > 0 {
 			vs.LookbackDelta = r.s.Interval - time.Duration(1)
 			result = r.client.QueryRange(r.ctx, n.String(), v1.Range{
@@ -764,6 +785,7 @@ func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) 
 		}
 		result, lossy := containsLossyHistogram(result)
 		if lossy {
+			vs.LookbackDelta = origLookback
 			r.reason = reasonLossyHistogram
 			return nil, nil
 		}

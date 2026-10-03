@@ -4,12 +4,19 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/sigv4"
 	"gopkg.in/yaml.v2"
+
+	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
 func TestHTTPClientIntegration(t *testing.T) {
@@ -448,5 +455,122 @@ func TestSigV4RoundTripperErrorHandling(t *testing.T) {
 
 			t.Logf("SigV4 round tripper configured successfully for test: %s", tt.name)
 		})
+	}
+}
+
+func TestAuthorizationOnTheWire(t *testing.T) {
+	credentialsFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(credentialsFile, []byte("from-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name:   "credentials with explicit type",
+			config: "authorization: {type: Token, credentials: abc}",
+			want:   "Token abc",
+		},
+		{
+			name:   "type defaults to Bearer",
+			config: "authorization: {credentials: abc}",
+			want:   "Bearer abc",
+		},
+		{
+			name:   "credentials_file",
+			config: "authorization: {credentials_file: " + credentialsFile + "}",
+			want:   "Bearer from-file",
+		},
+		{
+			name:   "bearer_token",
+			config: "bearer_token: legacy",
+			want:   "Bearer legacy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Authorization")
+			}))
+			defer server.Close()
+
+			var cfg Config
+			if err := yaml.Unmarshal([]byte("http_client:\n  "+tt.config+"\n"), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			sg, err := NewServerGroup()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sg.Cancel()
+			if err := sg.ApplyConfig(&cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := sg.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if got != tt.want {
+				t.Errorf("Authorization = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCancelStopsLabelFilterPolling(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":["a"]}`))
+	}))
+	defer server.Close()
+
+	cfg := DefaultConfig
+	cfg.LabelFilterConfig = &promclient.LabelFilterConfig{
+		DynamicLabels: []string{"job"},
+		SyncInterval:  10 * time.Millisecond,
+	}
+	sg, err := NewServerGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sg.Cancel()
+	if err := sg.ApplyConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string][]*targetgroup.Group{
+		"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(server.URL, "http://"))}}}},
+	}
+	if err := sg.loadTargetGroupMap(groups); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for requests.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("label filter made %d requests, want polling", requests.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	sg.Cancel()
+	time.Sleep(50 * time.Millisecond) // let an in-flight poll finish
+	settled := requests.Load()
+	time.Sleep(200 * time.Millisecond)
+	if got := requests.Load(); got != settled {
+		t.Errorf("label filter kept polling after Cancel: %d requests, was %d", got, settled)
 	}
 }

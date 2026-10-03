@@ -539,3 +539,32 @@ static_configs:
 		})
 	}
 }
+
+func TestUnsupportedHTTPClientAuthRejected(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		errMsg string
+	}{
+		{
+			name:   "oauth2",
+			config: "oauth2: {client_id: id, client_secret: s, token_url: http://idp/token}",
+			errMsg: "oauth2 is not supported",
+		},
+		{
+			name:   "authorization credentials_ref",
+			config: "authorization: {credentials_ref: name}",
+			errMsg: "credentials_ref is not supported",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg Config
+			err := yaml.Unmarshal([]byte("http_client:\n  "+tt.config+"\n"), &cfg)
+			if err == nil || !contains(err.Error(), tt.errMsg) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.errMsg)
+			}
+		})
+	}
+}

@@ -246,7 +246,7 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 	apiClients := make([]promclient.API, 0)
 	queryParams := s.Cfg.queryParams()
 
-	ctx, ctxCancel := context.WithCancel(context.Background())
+	ctx, ctxCancel := context.WithCancel(s.ctx)
 	oldState := s.State()
 	oldCount := 0
 	if oldState != nil {
@@ -506,6 +506,18 @@ func (s *ServerGroup) ApplyConfig(cfg *Config) error {
 		rt = config_util.NewAuthorizationCredentialsRoundTripper("Bearer", config_util.NewInlineSecret(string(cfg.HTTPConfig.HTTPConfig.BearerToken)), rt)
 	} else if len(cfg.HTTPConfig.HTTPConfig.BearerTokenFile) > 0 {
 		rt = config_util.NewAuthorizationCredentialsRoundTripper("Bearer", config_util.NewFileSecret(cfg.HTTPConfig.HTTPConfig.BearerTokenFile), rt)
+	}
+
+	if a := cfg.HTTPConfig.HTTPConfig.Authorization; a != nil {
+		authType := a.Type
+		if authType == "" {
+			authType = "Bearer"
+		}
+		var credentials config_util.SecretReader = config_util.NewInlineSecret(string(a.Credentials))
+		if a.CredentialsFile != "" {
+			credentials = config_util.NewFileSecret(a.CredentialsFile)
+		}
+		rt = config_util.NewAuthorizationCredentialsRoundTripper(authType, credentials, rt)
 	}
 
 	if cfg.HTTPConfig.HTTPConfig.BasicAuth != nil {

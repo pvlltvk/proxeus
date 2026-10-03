@@ -41,7 +41,7 @@ collapse to one. Ties break on `server_groups[]` order — lowest index wins —
 racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 
 > **Identity rule:** two series from different `server_groups` are the same series if their labels match once you
-> remove `__name__` and the union of every group's own `labels:` keys. Real backends stamp labels of their own on top
+> remove the union of every group's own `labels:` keys; `__name__` is part of the identity. Real backends stamp labels of their own on top
 > of that — Thanos Receive adds `receive_replica` and `tenant_id` to everything it stores, vmagent's
 > `-remoteWrite.label` and Prometheus's own `external_labels` commonly add things like `prometheus_replica` — and
 > those are *not* covered by a group's `labels:` key unless you list them explicitly. `cross_group_dedup_ignore_labels`
@@ -338,7 +338,7 @@ Aggregation pushdown needs a hook inside the PromQL engine that upstream Prometh
 depends on a patched fork, pinned in `go.mod`:
 
 ```
-replace github.com/prometheus/prometheus => github.com/pvlltvk/proxeus-prometheus v0.305.0-proxeus.2
+replace github.com/prometheus/prometheus => github.com/pvlltvk/proxeus-prometheus v0.305.0-proxeus.4
 ```
 
 The patch and its rebase procedure are documented in
