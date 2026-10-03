@@ -710,3 +710,48 @@ func TestNodeReplacerDecisions_HandBuiltAggregations(t *testing.T) {
 		})
 	}
 }
+
+// A pushdown that strips the selector offsets and then finds a native
+// histogram in the response must hand the engine the query it was given: the
+// raw fallback evaluates the AST, so a leftover edit changes the answer.
+func TestNodeReplacerLossyHistogramRestoresAST(t *testing.T) {
+	for _, query := range []string{
+		"foo offset 1m",
+		"sum(foo offset 1m)",
+		"count_values(\"v\", foo offset 1m)",
+		"foo offset 1m > 1",
+		"min(foo offset 1m) > 1",
+		"rate(foo[1m] offset 1m)",
+	} {
+		t.Run(query, func(t *testing.T) {
+			expr, err := parser.ParseExpr(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			api := &recordingAPI{response: "histogram"}
+			ps := newDecisionStorage(api, decisionSGs(2))
+			stmt := &parser.EvalStmt{
+				Expr:     expr,
+				Start:    time.Unix(decisionNow, 0),
+				End:      time.Unix(decisionNow, 0).Add(10 * time.Minute),
+				Interval: time.Minute,
+			}
+			if _, _, err := inspectDecisions(t, ps, api, expr, stmt); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := expr.String(); got != query {
+				t.Errorf("AST after fallback = %s, want %s", got, query)
+			}
+			_, err = parser.Inspect(context.Background(), stmt, func(n parser.Node, _ []parser.Node) error {
+				if vs, ok := n.(*parser.VectorSelector); ok && vs.LookbackDelta != 0 {
+					t.Errorf("selector %s kept LookbackDelta %s", vs, vs.LookbackDelta)
+				}
+				return nil
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

@@ -87,12 +87,16 @@ func (o *OffsetFinder) Visit(node parser.Node, path []parser.Node) (parser.Visit
 
 // OffsetRemover removes any offset found in the node tree
 // This is required when we send the queries below as we want to actually *remove* the offset.
-type OffsetRemover struct{}
+type OffsetRemover struct {
+	// Removed receives each selector's offset before it is cleared.
+	Removed map[*parser.VectorSelector]time.Duration
+}
 
 // Visit runs on each node in the tree
 func (o *OffsetRemover) Visit(node parser.Node, _ []parser.Node) (parser.Visitor, error) {
 	switch n := node.(type) {
 	case *parser.VectorSelector:
+		o.Removed[n] = n.OriginalOffset
 		n.OriginalOffset = 0
 	}
 	return o, nil
