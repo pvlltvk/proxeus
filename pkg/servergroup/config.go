@@ -30,6 +30,7 @@ var (
 		PreferMax:           false,
 		HTTPConfig: HTTPClientConfig{
 			DialTimeout: time.Millisecond * 200, // Default dial timeout of 200ms
+			HTTPConfig:  config_util.DefaultHTTPClientConfig,
 		},
 	}
 )
@@ -374,11 +375,38 @@ func (c *Config) validateAuthConfig() error {
 		return fmt.Errorf("at most one of basic_auth, authorization, bearer_token, bearer_token_file, sigv4 must be configured")
 	}
 
-	if c.HTTPConfig.HTTPConfig.OAuth2 != nil {
+	httpCfg := &c.HTTPConfig.HTTPConfig
+	if httpCfg.OAuth2 != nil {
 		return fmt.Errorf("http_client.oauth2 is not supported")
 	}
-	if a := c.HTTPConfig.HTTPConfig.Authorization; a != nil && a.CredentialsRef != "" {
+	if a := httpCfg.Authorization; a != nil && a.CredentialsRef != "" {
 		return fmt.Errorf("http_client.authorization.credentials_ref is not supported")
+	}
+	if b := httpCfg.BasicAuth; b != nil {
+		if b.UsernameRef != "" {
+			return fmt.Errorf("http_client.basic_auth.username_ref is not supported")
+		}
+		if b.PasswordRef != "" {
+			return fmt.Errorf("http_client.basic_auth.password_ref is not supported")
+		}
+		if b.Username != "" && b.UsernameFile != "" {
+			return fmt.Errorf("at most one of basic_auth username & username_file must be configured")
+		}
+		if len(b.Password) > 0 && b.PasswordFile != "" {
+			return fmt.Errorf("at most one of basic_auth password & password_file must be configured")
+		}
+	}
+	tls := &httpCfg.TLSConfig
+	if tls.CARef != "" || tls.CertRef != "" || tls.KeyRef != "" {
+		return fmt.Errorf("http_client.tls_config ca_ref, cert_ref and key_ref are not supported")
+	}
+	if err := httpCfg.ProxyConfig.Validate(); err != nil {
+		return err
+	}
+	if httpCfg.HTTPHeaders != nil {
+		if err := httpCfg.HTTPHeaders.Validate(); err != nil {
+			return err
+		}
 	}
 
 	return nil
