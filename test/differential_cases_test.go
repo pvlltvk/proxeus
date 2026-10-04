@@ -89,6 +89,10 @@ var (
 		"histogram_count(foo)", "sum(histogram_count(foo))", "histogram_sum(foo)", "foo", "count(foo)",
 	}
 
+	// crossGroupJoinQueries join foo and bar series that live in different
+	// groups.
+	crossGroupJoinQueries = []string{"foo + bar", "foo + ignoring(az) bar", "foo or ignoring(az) bar", `foo{id="d"} * on(id) group_left bar`}
+
 	// rangeExprs also run as range queries; a representative cut, not all.
 	rangeExprs = toSet(
 		"sum(foo)", "max(foo) < 5", "max(foo) * -1", "topk(1, foo) * -1", "sum(rate(foo[5m]))", "rate(foo[5m])",
@@ -119,6 +123,22 @@ var (
 		"load 1m\n  foo{id=\"a\"} {{schema:0 sum:1 count:1 buckets:[1]}}x2\n",
 	}
 	transitionReference = "load 1m\n  foo{id=\"a\"} 1 2 3\n"
+)
+
+// One large group (a Thanos holding most of the infra) and smaller ones (VMs
+// with mostly their own data). Each small group also scrapes one node endpoint
+// the large group has, with values off enough that a double count or the wrong
+// winner shows.
+var (
+	largeSmallGroups = []string{
+		"load 1m\n  foo{id=\"a\",job=\"node\"} 0+10x10\n  foo{id=\"b\",job=\"node\"} 0+20x10\n  foo{id=\"c\",job=\"app\"} 5x10\n" +
+			"  bar{id=\"c\",job=\"app\"} 100x10\n  bar{id=\"d\",job=\"vm1\"} 200x10\n  meta{team=\"x\"} 1x10\n",
+		"load 1m\n  foo{id=\"a\",job=\"node\"} 0+11x10\n  foo{id=\"d\",job=\"vm1\"} 7x10\n",
+		"load 1m\n  foo{id=\"b\",job=\"node\"} 0+25x10\n  foo{id=\"e\",job=\"vm2\"} 0+30x10\n",
+	}
+	largeSmallReference = "load 1m\n  foo{id=\"a\",job=\"node\"} 0+10x10\n  foo{id=\"b\",job=\"node\"} 0+20x10\n" +
+		"  foo{id=\"c\",job=\"app\"} 5x10\n  foo{id=\"d\",job=\"vm1\"} 7x10\n  foo{id=\"e\",job=\"vm2\"} 0+30x10\n" +
+		"  bar{id=\"c\",job=\"app\"} 100x10\n  bar{id=\"d\",job=\"vm1\"} 200x10\n  meta{team=\"x\"} 1x10\n"
 )
 
 // Group order is dedup priority. Both the series ids and the loser's values are
@@ -239,6 +259,27 @@ var diffScenarios = []diffScenario{
 		instants:  []int64{600, 840},
 		queries:   slices.Concat(modifierQueries, functionQueries[:5], scalarQueries[len(scalarQueries)-2:]),
 	},
+	// The overlap is known and excluded from the small groups, which leaves
+	// the groups disjoint: everything matches without exact mode.
+	{
+		name:           "large_small_excluded",
+		groups:         largeSmallGroups,
+		reference:      largeSmallReference,
+		modes:          allDiffModes,
+		instants:       []int64{300, 540},
+		queries:        slices.Concat(aggregateQueries, literalQueries, scalarQueries, functionQueries, modifierQueries, subqueryQueries, joinQueries, crossGroupJoinQueries),
+		injectMatchers: map[int][]string{1: {`job!="node"`}, 2: {`job!="node"`}},
+	},
+	// The same overlap left in: dedup still answers per-series queries
+	// correctly (aggregates double count; see README).
+	{
+		name:      "large_small_overlap",
+		groups:    largeSmallGroups,
+		reference: largeSmallReference,
+		modes:     []diffMode{modeDefault, modeRR},
+		instants:  []int64{300, 540},
+		queries:   perSeriesQueries,
+	},
 }
 
 // knownDiv attributes diverging queries to a review finding or a documented
@@ -251,6 +292,13 @@ type knownDiv struct {
 }
 
 var knownDivergences = []knownDiv{
+	{
+		// Each group's labels stay on its series, so a vector match between
+		// series from different groups fails unless it ignores them. Documented.
+		id:        "group label in cross-group matching",
+		scenarios: []string{"large_small_excluded"},
+		exprs:     []string{"foo + bar", "foo or bar"},
+	},
 	{
 		// Without cross_group_exact_aggregates per-series calls and selectors are
 		// evaluated in each group, so a series split at a migration seam is
