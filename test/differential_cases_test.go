@@ -319,16 +319,6 @@ var knownDivergences = []knownDiv{
 			"rate(foo[5m])",
 		},
 	},
-	{
-		id:        "R8",
-		scenarios: []string{"float_hist_transition"},
-		modes:     []string{"exact", "rr_exact"},
-		exprs: []string{
-			"count_over_time(foo[3m])",
-			"rate(foo[3m])",
-			"sum(rate(foo[3m]))",
-		},
-	},
 }
 
 func knownDivergence(scenario, mode, expr string) (string, bool) {

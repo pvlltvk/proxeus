@@ -180,17 +180,18 @@ func TestPriorityMergeSampleStream_Histograms(t *testing.T) {
 	}
 }
 
-// Histogram series go stale through a float StaleNaN.
+// Histogram series go stale through a float StaleNaN. Without it the 30 between
+// the base's histograms would be below the threshold.
 func TestPriorityMergeSampleStream_HistogramGapOpenedByFloatStaleNaN(t *testing.T) {
 	base := &model.SampleStream{
 		Values:     []model.SamplePair{staleAt(6)},
-		Histograms: []model.SampleHistogramPair{hp(0, 1), hp(15, 2)},
+		Histograms: []model.SampleHistogramPair{hp(0, 1), hp(30, 2)},
 	}
-	filler := &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(7, 99)}}
+	filler := &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(18, 99)}}
 
-	got, stats := PriorityMergeSampleStream(base, []*model.SampleStream{filler}, 20)
+	got, stats := PriorityMergeSampleStream(base, []*model.SampleStream{filler}, 40)
 
-	want := []model.SampleHistogramPair{hp(0, 1), hp(7, 99), hp(15, 2)}
+	want := []model.SampleHistogramPair{hp(0, 1), hp(18, 99), hp(30, 2)}
 	if len(got.Histograms) != len(want) {
 		t.Fatalf("Histograms = %v, want %v (filler's sample during the base's stale period should be pulled in)", got.Histograms, want)
 	}
@@ -232,6 +233,61 @@ func TestPriorityMergeSampleStream_MixedFloatAndHistogram(t *testing.T) {
 	}
 	if fmt.Sprint(stats.Filled) != "[6]" {
 		t.Fatalf("Filled = %v, want [6] (3 float + 3 histogram)", stats.Filled)
+	}
+}
+
+// A sample of either type occupies its slot: the filler's other type must not
+// land next to it.
+func TestPriorityMergeSampleStream_SharedTimeline(t *testing.T) {
+	tests := []struct {
+		name           string
+		base, filler   *model.SampleStream
+		wantValues     []int64
+		wantHistograms []int64
+	}{
+		{
+			name:   "gapless floats, histogram filler",
+			base:   &model.SampleStream{Values: []model.SamplePair{sp(0, 1), sp(10, 2), sp(20, 3)}},
+			filler: &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(0, 9), hp(10, 9), hp(20, 9)}},
+
+			wantValues: []int64{0, 10, 20},
+		},
+		{
+			name:   "gapless histograms, float filler",
+			base:   &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(0, 1), hp(10, 2), hp(20, 3)}},
+			filler: &model.SampleStream{Values: []model.SamplePair{sp(0, 9), sp(10, 9), sp(20, 9)}},
+
+			wantHistograms: []int64{0, 10, 20},
+		},
+		{
+			name: "base turns from floats to histograms, filler the other way",
+			base: &model.SampleStream{
+				Values:     []model.SamplePair{sp(0, 1), sp(10, 2)},
+				Histograms: []model.SampleHistogramPair{hp(20, 3), hp(30, 4)},
+			},
+			filler: &model.SampleStream{
+				Values:     []model.SamplePair{sp(20, 9), sp(30, 9), sp(40, 9)},
+				Histograms: []model.SampleHistogramPair{hp(0, 9), hp(10, 9)},
+			},
+
+			wantValues:     []int64{0, 10, 40},
+			wantHistograms: []int64{20, 30},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, _ := PriorityMergeSampleStream(test.base, []*model.SampleStream{test.filler}, 15)
+			var values, histograms []int64
+			for _, p := range got.Values {
+				values = append(values, int64(p.Timestamp))
+			}
+			for _, p := range got.Histograms {
+				histograms = append(histograms, int64(p.Timestamp))
+			}
+			if fmt.Sprint(values) != fmt.Sprint(test.wantValues) || fmt.Sprint(histograms) != fmt.Sprint(test.wantHistograms) {
+				t.Fatalf("floats at %v, histograms at %v; want floats at %v, histograms at %v", values, histograms, test.wantValues, test.wantHistograms)
+			}
+		})
 	}
 }
 

@@ -26,22 +26,48 @@ func PriorityMergeSampleStream(base *model.SampleStream, fillers []*model.Sample
 		gap = 1
 	}
 
-	floatSeqs := make([][]model.SamplePair, len(fillers)+1)
-	floatSeqs[0] = base.Values
+	// Floats and histograms share one timeline per stream, so a base sample of
+	// either type keeps a filler's sample of the other type out of its slot.
+	seqs := make([][]timelineSample, len(fillers)+1)
+	seqs[0] = timeline(base)
 	for i, f := range fillers {
-		floatSeqs[i+1] = f.Values
+		seqs[i+1] = timeline(f)
 	}
-	values := fillFloats(nil, nil, floatSeqs, 0, gap, stats.Filled, make([]int, len(floatSeqs)))
+	merged := fill(nil, nil, seqs, 0, gap, stats.Filled, make([]int, len(seqs)))
 
-	histSeqs := make([][]model.SampleHistogramPair, len(fillers)+1)
-	staleSeqs := make([][]model.Time, len(fillers)+1)
-	histSeqs[0], staleSeqs[0] = base.Histograms, staleTimes(base.Values)
-	for i, f := range fillers {
-		histSeqs[i+1], staleSeqs[i+1] = f.Histograms, staleTimes(f.Values)
+	out := &model.SampleStream{Metric: base.Metric}
+	for _, p := range merged {
+		if p.h != nil {
+			out.Histograms = append(out.Histograms, model.SampleHistogramPair{Timestamp: p.t, Histogram: p.h})
+		} else {
+			out.Values = append(out.Values, model.SamplePair{Timestamp: p.t, Value: p.f})
+		}
 	}
-	histograms := fillHistograms(nil, nil, histSeqs, staleSeqs, 0, gap, stats.Filled, make([]int, len(histSeqs)))
+	return out, stats
+}
 
-	return &model.SampleStream{Metric: base.Metric, Values: values, Histograms: histograms}, stats
+// timelineSample is a float sample, or a histogram one when h is set.
+type timelineSample struct {
+	t model.Time
+	f model.SampleValue
+	h *model.SampleHistogram
+}
+
+func (p timelineSample) stale() bool { return p.h == nil && value.IsStaleNaN(float64(p.f)) }
+
+func timeline(s *model.SampleStream) []timelineSample {
+	out := make([]timelineSample, 0, len(s.Values)+len(s.Histograms))
+	i, j := 0, 0
+	for i < len(s.Values) || j < len(s.Histograms) {
+		if j == len(s.Histograms) || (i < len(s.Values) && s.Values[i].Timestamp <= s.Histograms[j].Timestamp) {
+			out = append(out, timelineSample{t: s.Values[i].Timestamp, f: s.Values[i].Value})
+			i++
+		} else {
+			out = append(out, timelineSample{t: s.Histograms[j].Timestamp, h: s.Histograms[j].Histogram})
+			j++
+		}
+	}
+	return out
 }
 
 // GapThreshold returns override if set, otherwise twice the median sample
@@ -64,19 +90,10 @@ func GapThreshold(override model.Time, base, fillerHint *model.SampleStream) mod
 }
 
 func medianInterval(s *model.SampleStream) (model.Time, bool) {
-	ts := make([]model.Time, 0, max(len(s.Values), len(s.Histograms)))
-	if len(s.Values) >= len(s.Histograms) {
-		for _, p := range s.Values {
-			ts = append(ts, p.Timestamp)
-		}
-	} else {
-		for _, p := range s.Histograms {
-			ts = append(ts, p.Timestamp)
-		}
-	}
+	ts := timeline(s)
 	var intervals []model.Time
 	for i := 1; i < len(ts); i++ {
-		if d := ts[i] - ts[i-1]; d > 0 {
+		if d := ts[i].t - ts[i-1].t; d > 0 {
 			intervals = append(intervals, d)
 		}
 	}
@@ -85,24 +102,6 @@ func medianInterval(s *model.SampleStream) (model.Time, bool) {
 	}
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i] < intervals[j] })
 	return intervals[len(intervals)/2], true
-}
-
-func staleTimes(values []model.SamplePair) []model.Time {
-	var ts []model.Time
-	for _, p := range values {
-		if value.IsStaleNaN(float64(p.Value)) {
-			ts = append(ts, p.Timestamp)
-		}
-	}
-	return ts
-}
-
-func staleBetween(stale []model.Time, lo, hi *model.Time) bool {
-	i := 0
-	if lo != nil {
-		i = sort.Search(len(stale), func(k int) bool { return stale[k] >= *lo })
-	}
-	return i < len(stale) && (hi == nil || stale[i] < *hi)
 }
 
 // marginBounds keeps filled samples gap/4 away from a real neighbor, since
@@ -132,19 +131,19 @@ func needsFill(stale bool, subLo, upper *model.Time, gap model.Time) bool {
 
 func timePtr(t model.Time) *model.Time { return &t }
 
-// fillFloats emits seqs[lvl]'s samples within (lo, hi) and recurses into
+// fill emits seqs[lvl]'s samples within (lo, hi) and recurses into
 // seqs[lvl+1] for the gaps between them. Calls at one level move forward in
 // time, so cursors[lvl] lets each resume where the last stopped instead of
 // rescanning.
-func fillFloats(lo, hi *model.Time, seqs [][]model.SamplePair, lvl int, gap model.Time, filled []int, cursors []int) []model.SamplePair {
+func fill(lo, hi *model.Time, seqs [][]timelineSample, lvl int, gap model.Time, filled []int, cursors []int) []timelineSample {
 	effLo, effHi := marginBounds(lo, hi, gap)
 	seq := seqs[lvl]
 	i := cursors[lvl]
-	for i < len(seq) && effLo != nil && seq[i].Timestamp <= *effLo {
+	for i < len(seq) && effLo != nil && seq[i].t <= *effLo {
 		i++
 	}
 
-	var out []model.SamplePair
+	var out []timelineSample
 	// Gap sizes are measured from the real neighbor lo, not effLo; using effLo
 	// would count the margin twice.
 	subLo := lo
@@ -152,15 +151,15 @@ func fillFloats(lo, hi *model.Time, seqs [][]model.SamplePair, lvl int, gap mode
 
 	for ; i < len(seq); i++ {
 		p := seq[i]
-		if effHi != nil && p.Timestamp >= *effHi {
+		if effHi != nil && p.t >= *effHi {
 			break
 		}
 
-		if needsFill(stale, subLo, timePtr(p.Timestamp), gap) && lvl+1 < len(seqs) {
-			out = append(out, fillFloats(subLo, timePtr(p.Timestamp), seqs, lvl+1, gap, filled, cursors)...)
+		if needsFill(stale, subLo, timePtr(p.t), gap) && lvl+1 < len(seqs) {
+			out = append(out, fill(subLo, timePtr(p.t), seqs, lvl+1, gap, filled, cursors)...)
 		}
 
-		if value.IsStaleNaN(float64(p.Value)) {
+		if p.stale() {
 			if lvl == 0 {
 				out = append(out, p)
 			}
@@ -172,49 +171,12 @@ func fillFloats(lo, hi *model.Time, seqs [][]model.SamplePair, lvl int, gap mode
 			}
 			stale = false
 		}
-		subLo = timePtr(p.Timestamp)
+		subLo = timePtr(p.t)
 	}
 	cursors[lvl] = i
 
 	if needsFill(stale, subLo, hi, gap) && lvl+1 < len(seqs) {
-		out = append(out, fillFloats(subLo, hi, seqs, lvl+1, gap, filled, cursors)...)
-	}
-	return out
-}
-
-// fillHistograms mirrors fillFloats. A histogram series goes stale through a
-// float StaleNaN, so stale[lvl] holds those timestamps from the float side.
-func fillHistograms(lo, hi *model.Time, seqs [][]model.SampleHistogramPair, stale [][]model.Time, lvl int, gap model.Time, filled []int, cursors []int) []model.SampleHistogramPair {
-	effLo, effHi := marginBounds(lo, hi, gap)
-	seq := seqs[lvl]
-	i := cursors[lvl]
-	for i < len(seq) && effLo != nil && seq[i].Timestamp <= *effLo {
-		i++
-	}
-
-	var out []model.SampleHistogramPair
-	subLo := lo
-
-	for ; i < len(seq); i++ {
-		p := seq[i]
-		if effHi != nil && p.Timestamp >= *effHi {
-			break
-		}
-
-		if needsFill(staleBetween(stale[lvl], subLo, timePtr(p.Timestamp)), subLo, timePtr(p.Timestamp), gap) && lvl+1 < len(seqs) {
-			out = append(out, fillHistograms(subLo, timePtr(p.Timestamp), seqs, stale, lvl+1, gap, filled, cursors)...)
-		}
-
-		out = append(out, p)
-		if lvl > 0 {
-			filled[lvl-1]++
-		}
-		subLo = timePtr(p.Timestamp)
-	}
-	cursors[lvl] = i
-
-	if needsFill(staleBetween(stale[lvl], subLo, hi), subLo, hi, gap) && lvl+1 < len(seqs) {
-		out = append(out, fillHistograms(subLo, hi, seqs, stale, lvl+1, gap, filled, cursors)...)
+		out = append(out, fill(subLo, hi, seqs, lvl+1, gap, filled, cursors)...)
 	}
 	return out
 }
