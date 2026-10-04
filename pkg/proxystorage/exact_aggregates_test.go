@@ -36,12 +36,12 @@ func newExactAggregatesStorage(client promclient.API, n int, exact bool) *ProxyS
 }
 
 // TestNodeReplacerExactAggregates pins the pushdown decision for
-// cross_group_exact_aggregates: with more than one server_group the
-// aggregation is not pushed down (so the engine computes it over deduped raw
-// series), with one server_group it still is.
+// cross_group_exact_aggregates: with more than one server_group nothing is
+// pushed down (so the engine evaluates over deduped raw series), with one
+// server_group it still is.
 func TestNodeReplacerExactAggregates(t *testing.T) {
-	// One expression per branch of the aggregation switch, plus the
-	// AggregateExpr-under-BinaryExpr path (node label "binary").
+	// One expression per branch of the aggregation switch, plus one per
+	// other node kind that pushes down without the flag.
 	tests := []struct {
 		expr string
 		node string
@@ -55,7 +55,10 @@ func TestNodeReplacerExactAggregates(t *testing.T) {
 		{expr: "avg(foo)", node: "aggregate"},
 		{expr: "count(foo)", node: "aggregate"},
 		{expr: `count_values("v", foo)`, node: "aggregate"},
-		{expr: "min(foo) > 1", node: "binary"},
+		{expr: "foo", node: "vector_selector"},
+		{expr: "foo > 1", node: "binary"},
+		{expr: "rate(foo[5m])", node: "call"},
+		{expr: "rate(foo[5m])[10m:1m]", node: "subquery"},
 	}
 
 	now := time.Unix(10000, 0)

@@ -182,18 +182,18 @@ type ProxeusConfig struct {
 	// groups matter, enable CrossGroupExactAggregates.
 	CrossGroupDedup bool `yaml:"cross_group_dedup"`
 
-	// CrossGroupExactAggregates, when true, makes aggregations exact over
-	// overlapping server_groups: proxeus declines aggregation pushdown while
-	// more than one server_group is configured, so the engine computes the
-	// aggregation locally over deduplicated raw series instead of re-combining
-	// per-group partials. `count(up)` then matches `up`. Requires
-	// CrossGroupDedup to also be true; proxeus will refuse to start otherwise.
-	// Default false preserves historical behavior.
+	// CrossGroupExactAggregates, when true, makes queries exact over
+	// overlapping server_groups and migration seams: proxeus declines all
+	// pushdown while more than one server_group is configured, so the engine
+	// evaluates the whole query over deduplicated, gap-filled raw series
+	// instead of re-combining per-group results. `count(up)` then matches `up`,
+	// and rate() across a seam sees both sides. Requires CrossGroupDedup to
+	// also be true; proxeus will refuse to start otherwise. Default false
+	// preserves historical behavior.
 	//
-	// Cost: raw series cross the network instead of per-group aggregate
-	// partials, which is the expensive path — a wide range that used to come
-	// back as a handful of partials now transfers every series it aggregates
-	// over.
+	// Cost: raw samples cross the network instead of per-group partials and
+	// step-aligned results, which is the expensive path — a wide range now
+	// transfers every sample of every series the query reads.
 	CrossGroupExactAggregates bool `yaml:"cross_group_exact_aggregates"`
 
 	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to

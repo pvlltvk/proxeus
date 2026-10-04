@@ -69,15 +69,18 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 
 > **Scope:** dedup applies to raw selector results. Pushed-down aggregations fan out per-group *partials* that the
 > engine re-combines, so those are unioned, never deduped. A series present in two groups appears once in `up`, but
-> contributes to both partials in `count(up)`.
+> contributes to both partials in `count(up)`. Pushed-down selectors and per-series functions such as `rate()` are
+> evaluated in each group and their results deduped, so a series split across groups at a migration seam is evaluated
+> per piece: `rate()` over a window that straddles the seam sees only one side, and a group that stopped receiving
+> the series can still win with its last sample for the 5m lookback.
 >
-> **Exact aggregates:** `cross_group_exact_aggregates: true` (requires `cross_group_dedup`) fixes that count. With more
-> than one `server_group` proxeus declines aggregation pushdown, so the engine computes the aggregation locally over
-> the deduplicated raw series and `count(up)` matches `up`. The decision is visible as
-> `proxeus_pushdown_nodes_total{result="fallback",reason="exact_aggregates"}`. The cost is the point of the trade: raw
-> series cross the network instead of a handful of per-group partials, which hurts most on wide ranges and high
-> cardinality, and a query that used to fit under `--query.max-samples` as a few partials can now exceed it and fail
-> outright. A single-`server_group` deployment is unaffected — one backend sees the whole series set, so there is
+> **Exact aggregates:** `cross_group_exact_aggregates: true` (requires `cross_group_dedup`) fixes both. With more
+> than one `server_group` proxeus pushes nothing down, so the engine evaluates the whole query over the deduplicated,
+> gap-filled raw series: `count(up)` matches `up`, and `rate()` across a seam matches a single store holding the full
+> history. The decision is visible as `proxeus_pushdown_nodes_total{result="fallback",reason="exact_aggregates"}`.
+> The cost is the point of the trade: raw samples cross the network instead of per-group partials and step-aligned
+> results, which hurts most on wide ranges and high cardinality, and a query that used to fit under
+> `--query.max-samples` can now exceed it and fail outright. A single-`server_group` deployment is unaffected — one backend sees the whole series set, so there is
 > nothing to dedup. The gate counts *configured* groups, not overlapping ones, so a deployment whose groups hold
 > disjoint data pays the cost for no correctness gain.
 >
