@@ -55,15 +55,23 @@ type diffScenario struct {
 	// instants are unix seconds; the range query spans first to last at 1m.
 	instants []int64
 	queries  []string
+	// injectMatchers holds each group's inject_matchers, by group index.
+	injectMatchers map[int][]string
 }
 
-func diffConfig(addrs []string, m diffMode) string {
+func diffConfig(addrs []string, m diffMode, inject map[int][]string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "proxeus:\n  cross_group_dedup: true\n  cross_group_exact_aggregates: %t\n  cross_group_dedup_fill_gaps: %t\n  server_groups:\n",
 		m.exact, m.fillGaps)
 	for i, addr := range addrs {
 		fmt.Fprintf(&b, "    - static_configs:\n        - targets:\n          - %s\n      labels:\n        az: g%d\n      remote_read: %t\n",
 			addr, i+1, m.remoteRead)
+		if len(inject[i]) > 0 {
+			b.WriteString("      inject_matchers:\n")
+			for _, matcher := range inject[i] {
+				fmt.Fprintf(&b, "        - '%s'\n", matcher)
+			}
+		}
 	}
 	return b.String()
 }
@@ -185,7 +193,7 @@ func TestDifferential(t *testing.T) {
 					// Applying a config waits out the discovery manager's 5s first
 					// update, so the modes overlap that wait.
 					t.Parallel()
-					ps := getProxyStorage(diffConfig(addrs, mode))
+					ps := getProxyStorage(diffConfig(addrs, mode, sc.injectMatchers))
 					for _, expr := range sc.queries {
 						t.Run(expr, func(t *testing.T) {
 							diff := diffQueryOutcome(ref, sc, ps, ps.NodeReplacer, expr)

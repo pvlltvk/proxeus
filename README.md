@@ -88,6 +88,27 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > declared `labels`, so if a backend stamps anything else of its own (a Thanos `prometheus_replica`, say) dedup won't
 > collapse them and the aggregate still double-counts.
 
+> **Known overlap.** When you know which series more than one group holds (endpoints scraped both by a Thanos
+> and by a VictoriaMetrics), exclude them from all but one group with `inject_matchers`. The groups are then disjoint,
+> so pushed-down aggregations are exact without paying for exact mode, and dedup stays on as the safety net for overlap
+> you didn't list:
+>
+> ```yaml
+> proxeus:
+>   cross_group_dedup: true
+>   server_groups:
+>     - labels: {backend: thanos}          # first: wins dedup, has the longest history
+>     - labels: {backend: vm-a}
+>       inject_matchers: ['job!~"node-exporter|kube-state-metrics"']   # endpoints Thanos already has
+> ```
+>
+> The excluded copy can no longer fill gaps in the one you kept.
+
+> **Joins across groups.** Every series carries its group's `labels`, so vector matching between series from
+> different groups never matches on its own: with `foo` in `backend="thanos"` and `bar` in `backend="vm-a"`,
+> `foo + bar` is empty and `foo or bar` returns both instead of dropping `bar`. Exclude the group label from the
+> matching, as in `foo + ignoring(backend) bar`, or match with `on(...)`.
+
 > **Gap filling.** A hole in the dedup winner's series is filled from the other groups in priority order — typical
 > during a migration, when the new backend lacks history or the old one stops first. The winner's own samples are
 > never replaced. A gap is the span before the winner's first sample or after its last, an interval of at least
