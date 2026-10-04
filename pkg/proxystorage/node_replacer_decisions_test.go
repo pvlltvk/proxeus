@@ -225,6 +225,13 @@ func TestNodeReplacerDecisions(t *testing.T) {
 			},
 			calls: []string{"Query[agg=false] foo @ 1700000000000"},
 		},
+		// An aggregate against a literal: only the aggregate goes down, the
+		// engine applies the literal to the recombined result.
+		{
+			expr:      "max(foo) < 5",
+			decisions: []string{"aggregate/pushed/=1", "binary/fallback/unsupported_operand=1"},
+			calls:     []string{"Query[agg=true] max(foo) @ 1700000000000"},
+		},
 		// A literal side whose partner is a non-reentrant aggregate.
 		{
 			expr:      "avg(foo) > 1",
@@ -233,6 +240,22 @@ func TestNodeReplacerDecisions(t *testing.T) {
 				"Query[agg=true] sum(foo) @ 1700000000000",
 				"Query[agg=true] count(foo) @ 1700000000000",
 			},
+		},
+
+		// --- replaceCall ------------------------------------------------
+		// scalar() and vector() depend on the whole input's cardinality, so
+		// only the selector below them is pushed.
+		{
+			expr:      "vector(scalar(foo))",
+			decisions: []string{"call/fallback/unsupported_func=2", "vector_selector/pushed/=1"},
+			calls:     []string{"Query[agg=false] foo @ 1700000000000"},
+		},
+		// A call that reads the evaluation time keeps its offset in the
+		// string, and the request time is not shifted by it.
+		{
+			expr:      "predict_linear(foo[5m] offset 1m, 60)",
+			decisions: []string{"call/pushed/=1"},
+			calls:     []string{"Query[agg=false] predict_linear(foo[5m] offset 1m, 60) @ 1700000000000"},
 		},
 
 		// --- replaceSubquery --------------------------------------------
@@ -359,22 +382,6 @@ func TestNodeReplacerDecisions(t *testing.T) {
 				"Query[agg=false] foo @ 1700000000000",
 			},
 		},
-		// The aggregate-under-binary arm: its request carries the
-		// aggregate-pushdown marker, so the cross-group merge unions the
-		// per-group partials instead of deduping them.
-		{
-			expr:     "min(foo) > 1",
-			response: "histogram",
-			decisions: []string{
-				"aggregate/fallback/lossy_histogram=1", "binary/fallback/lossy_histogram=1",
-				"vector_selector/fallback/lossy_histogram=1",
-			},
-			calls: []string{
-				"Query[agg=true] min(foo) > 1 @ 1700000000000",
-				"Query[agg=true] min(foo) @ 1700000000000",
-				"Query[agg=false] foo @ 1700000000000",
-			},
-		},
 		{
 			expr:      `count_values("v", foo)`,
 			response:  "histogram",
@@ -399,6 +406,12 @@ func TestNodeReplacerDecisions(t *testing.T) {
 			interval:  time.Minute,
 			decisions: []string{"vector_selector/pushed/=1"},
 			calls:     []string{"QueryRange[agg=false] foo @ 1699999100000 to 1699999700000 step 1m0s"},
+		},
+		{
+			expr:      "clamp_min(foo offset 1m, time())",
+			interval:  time.Minute,
+			decisions: []string{"call/pushed/=1"},
+			calls:     []string{"QueryRange[agg=false] clamp_min(foo offset 1m, time()) @ 1699999400000 to 1700000000000 step 1m0s"},
 		},
 		// With an @ in the subtree the offset stays in the string and the
 		// window is NOT shifted: the downstream resolves @+offset itself.

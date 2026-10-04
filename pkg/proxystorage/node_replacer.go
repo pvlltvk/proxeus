@@ -76,10 +76,10 @@ type nodeReplacer struct {
 	state  *proxyStorageState
 	client pushdownAPI
 
-	offset       time.Duration
-	reqOffset    time.Duration
-	synthOffset  time.Duration
-	subtreeHasAt bool
+	offset      time.Duration
+	reqOffset   time.Duration
+	synthOffset time.Duration
+	keepOffsets bool
 
 	atTimestampFinder *promclient.TimestampFinder
 	atUnsafeFinder    *promclient.BooleanFinder
@@ -152,6 +152,17 @@ func (r *nodeReplacer) prepare() (bool, error) {
 		return true, nil
 	}
 
+	r.state = r.p.GetState()
+
+	// Any data a pushed-down subtree reads may be split across groups (an
+	// overlap with differing values, a migration seam), and each group would
+	// then evaluate it over its own piece. Exact mode evaluates everything over
+	// the deduplicated raw series instead.
+	if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
+		r.reason = reasonExactAggregates
+		return true, nil
+	}
+
 	if aggFinder.Found > 0 {
 		switch {
 		// // If there was a single agg and that was us, then we're okay
@@ -172,13 +183,6 @@ func (r *nodeReplacer) prepare() (bool, error) {
 		return true, nil
 	}
 
-	// subtreeHasAt is true when at least one VectorSelector in this subtree has
-	// an @ modifier. With @ in play we must NOT strip offsets or shift the
-	// downstream request window: the downstream resolves `@ T offset O` into
-	// sample[T-O] internally, so any rewrite that removes the offset or moves
-	// the request range silently changes the lookup time.
-	r.subtreeHasAt = timestampFinder.Found > 0
-
 	// If the tree below us is not all the same offset, then we can't do anything below -- we'll need
 	// to wait until further in execution where they all match
 	//
@@ -190,19 +194,25 @@ func (r *nodeReplacer) prepare() (bool, error) {
 	}
 	r.offset = offsetFinder.Offset
 
+	// keepOffsets is true when stripping the offsets and moving the downstream
+	// request window by them would change the answer. With an @ modifier the
+	// downstream resolves `@ T offset O` into sample[T-O] itself. With a call
+	// that reads the evaluation time (time(), predict_linear, ...) the shifted
+	// window would hand it the wrong clock.
+	r.keepOffsets = timestampFinder.Found > 0 || (r.offset != 0 && r.atUnsafeFinder.Found > 0)
+
 	// reqOffset is the time-shift applied to downstream request times so that
 	// the engine, after restoring offsets on the synthesized VectorSelector,
-	// looks up samples at the right timestamps. When the subtree has @, the
-	// downstream already resolves @+offset, so we don't shift and the
-	// synthesized node has no offset to re-apply.
+	// looks up samples at the right timestamps. With keepOffsets the downstream
+	// applies the offsets itself, so we don't shift and the synthesized node
+	// has no offset to re-apply.
 	r.reqOffset = r.offset
 	r.synthOffset = r.offset
-	if r.subtreeHasAt {
+	if r.keepOffsets {
 		r.reqOffset = 0
 		r.synthOffset = 0
 	}
 
-	r.state = r.p.GetState()
 	// pushdownAPI counts the series/samples the pushdown fetches below pull
 	// from the backends; every downstream request in the switch arms below
 	// goes through it.
@@ -216,10 +226,10 @@ func (r *nodeReplacer) prepare() (bool, error) {
 // that the time be the absolute time, whereas the API returns them based on the
 // range you ask for (with the offset being implicit).
 //
-// When the subtree has an @ modifier we keep offsets in the string: see
-// subtreeHasAt comment above.
+// With keepOffsets the offsets stay in the string: see the comment in
+// prepare.
 func (r *nodeReplacer) removeOffset() error {
-	if r.subtreeHasAt {
+	if r.keepOffsets {
 		return nil
 	}
 	remover := &promclient.OffsetRemover{Removed: map[*parser.VectorSelector]time.Duration{}}
@@ -247,7 +257,7 @@ func (r *nodeReplacer) restoreOffset() {
 // time, etc. — see promql.AtModifierUnsafeFunctions), falls back to the
 // regular QueryRange.
 func (r *nodeReplacer) queryRangeAt(queryStr string) storage.SeriesSet {
-	if r.subtreeHasAt && r.atTimestampFinder.Found && r.atUnsafeFinder.Found == 0 && r.s.Interval > 0 {
+	if r.keepOffsets && r.atTimestampFinder.Found && r.atUnsafeFinder.Found == 0 && r.s.Interval > 0 {
 		at := timestamp.Time(r.atTimestampFinder.Timestamp)
 		result := r.client.Query(r.ctx, queryStr, at)
 		if err := result.Err(); err != nil {
@@ -314,16 +324,6 @@ func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, e
 	}
 
 	logrus.Debugf("AggregateExpr %v %s", n, n.Op)
-
-	// With cross_group_exact_aggregates the per-group partials are what
-	// makes the aggregate double-count series that live in more than one
-	// group: they are unioned, never deduped. Decline the pushdown so the
-	// engine aggregates locally over the deduped raw series. A single
-	// server_group sees the whole series set, so there is nothing to fix.
-	if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
-		r.reason = reasonExactAggregates
-		return nil, nil
-	}
 
 	// Mark the fan-out as an aggregation pushdown: each server_group
 	// returns an aggregate partial that the engine re-combines, so the
@@ -540,21 +540,7 @@ func (r *nodeReplacer) replaceAggregate(n *parser.AggregateExpr) (parser.Node, e
 func (r *nodeReplacer) replaceCall(n *parser.Call) (parser.Node, error) {
 	logrus.Debugf("call %v %v", n, n.Type())
 
-	// absent and absent_over_time are difficult to implement at this layer; and as such we won't touch them
-	// we'll do our NodeReplace at another node in the tree.
-	//
-	// label_join / label_replace / info are evaluated by the engine via
-	// dedicated evalLabel{Join,Replace,Info} dispatchers that bypass the
-	// FunctionCalls table and call ev.errorf/ev.error with a precise,
-	// caller-facing message (e.g. "vector cannot contain metrics with
-	// the same labelset"). Pushing them to a single downstream means the
-	// error round-trips through ErrorWrap chains (target=…, servergroup=…)
-	// before reaching the engine, mangling the exact wording — fine for
-	// production, fatal for eval_fail tests. Let the engine handle these
-	// locally by fetching args[0] via Querier.Select.
-	switch n.Func.Name {
-	case "absent", "absent_over_time",
-		"label_join", "label_replace", "info":
+	if _, ok := perSeriesFuncs[n.Func.Name]; !ok {
 		r.reason = reasonUnsupportedFunc
 		return nil, nil
 	}
@@ -594,16 +580,8 @@ func (r *nodeReplacer) replaceCall(n *parser.Call) (parser.Node, error) {
 	}
 	ret.UnexpandedSeriesSet = result
 
-	// Some functions require specific handling which we'll catch here
-	switch n.Func.Name {
-	// the "scalar()" function is a bit tricky. It can return a scalar or a vector.
-	// So to handle this instead of returning the vector directly (as its just the values selected)
-	// we can set it as the args (the vector of data) and the promql engine handles the types properly
-	case "scalar":
-		n.Args[0] = ret
-		return n, nil
 	// the functions of sort() and sort_desc() need whole results to calculate.
-	case "sort", "sort_desc":
+	if n.Func.Name == "sort" || n.Func.Name == "sort_desc" {
 		return &parser.Call{
 			Func: n.Func,
 			Args: []parser.Expr{ret},
@@ -611,6 +589,33 @@ func (r *nodeReplacer) replaceCall(n *parser.Call) (parser.Node, error) {
 	}
 
 	return ret, nil
+}
+
+// perSeriesFuncs are the calls each group can evaluate over its own series:
+// every output series depends only on the matching input series, so the
+// per-group results dedup like raw series (histogram_quantile and
+// histogram_fraction over classic buckets read the bucket series of one
+// histogram, which come from one scrape). Anything else -- scalar() and
+// vector() depend on the cardinality of the whole input, sort_by_label on its
+// order -- is evaluated by the engine over the pushed-down argument. absent,
+// absent_over_time, label_join, label_replace and info are left to the engine
+// too: its errors for them carry wording that callers match on, which a
+// downstream round trip would wrap.
+var perSeriesFuncs = map[string]struct{}{
+	"abs": {}, "acos": {}, "acosh": {}, "asin": {}, "asinh": {}, "atan": {}, "atanh": {},
+	"avg_over_time": {}, "ceil": {}, "changes": {}, "clamp": {}, "clamp_max": {}, "clamp_min": {},
+	"cos": {}, "cosh": {}, "count_over_time": {}, "days_in_month": {}, "day_of_month": {},
+	"day_of_week": {}, "day_of_year": {}, "deg": {}, "delta": {}, "deriv": {},
+	"double_exponential_smoothing": {}, "exp": {}, "floor": {}, "histogram_avg": {},
+	"histogram_count": {}, "histogram_fraction": {}, "histogram_quantile": {}, "histogram_stddev": {},
+	"histogram_stdvar": {}, "histogram_sum": {}, "hour": {}, "idelta": {}, "increase": {},
+	"irate": {}, "last_over_time": {}, "ln": {}, "log10": {}, "log2": {}, "mad_over_time": {},
+	"max_over_time": {}, "min_over_time": {}, "minute": {}, "month": {}, "predict_linear": {},
+	"present_over_time": {}, "quantile_over_time": {}, "rad": {}, "rate": {}, "resets": {},
+	"round": {}, "sgn": {}, "sin": {}, "sinh": {}, "sort": {}, "sort_desc": {}, "sqrt": {},
+	"stddev_over_time": {}, "stdvar_over_time": {}, "sum_over_time": {}, "tan": {}, "tanh": {},
+	"timestamp": {}, "ts_of_last_over_time": {}, "ts_of_max_over_time": {},
+	"ts_of_min_over_time": {}, "year": {},
 }
 
 // If we are simply fetching a Vector then we can fetch the data using the same step that
@@ -752,13 +757,10 @@ func (r *nodeReplacer) replaceSubquery(n *parser.SubqueryExpr) (parser.Node, err
 	return nil, nil
 }
 
-// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS
-// these are relatively rare -- as things like `sum(foo) > 2` would *not* be viable as `sum(foo)` could
-// potentially require multiple servergroups to generate the correct response.
-// From inspection there are only 3 specific types where this sort of replacement is "safe" (assuming one side is a literal)
-//
-//	`VectorSector`
-//	`AggregateExpr` (Max, Min, TopK, BottomK only -- and only if re-combined)
+// BinaryExprs *can* be sent untouched to downstreams assuming there is no actual interaction between LHS/RHS.
+// The only such shape is a VectorSelector against a literal. An aggregate against a literal is not: re-running
+// max over per-group `max(foo) < 5` keeps a group's 1 that the max over all groups (10) would have filtered out,
+// so the aggregate below is pushed on its own and the engine applies the literal.
 func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) {
 	logrus.Debugf("BinaryExpr: %v", n)
 
@@ -798,54 +800,6 @@ func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) 
 		return ret, nil
 	}
 
-	// aggregateBinaryExpr will send the node as a query to the downstream and
-	// replace the aggregate expr with the resulting data. This will cause the aggregation
-	// (min, max, topk, bottomk) to be re-run against the expression.
-	aggregateBinaryExpr := func(agg *parser.AggregateExpr) (parser.Node, error) {
-		logrus.Debugf("BinaryExpr (AggregateExpr + Literal): %v", n)
-
-		// cross_group_exact_aggregates: see the AggregateExpr case.
-		if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
-			r.reason = reasonExactAggregates
-			return nil, nil
-		}
-
-		// Same as the AggregateExpr case: per-group aggregate partials
-		// must be unioned by the cross-group merge, not deduped.
-		aggCtx := promclient.WithAggregatePushdown(r.ctx)
-
-		_ = r.removeOffset()
-
-		var result storage.SeriesSet
-
-		if r.s.Interval > 0 {
-			result = r.client.QueryRange(aggCtx, n.String(), v1.Range{
-				Start: r.s.Start.Add(-r.reqOffset),
-				End:   r.s.End.Add(-r.reqOffset),
-				Step:  r.s.Interval,
-			})
-		} else {
-			result = r.client.Query(aggCtx, n.String(), r.s.Start.Add(-r.reqOffset))
-		}
-		if err := result.Err(); err != nil {
-			return nil, err
-		}
-		result, lossy := containsLossyHistogram(result)
-		if lossy {
-			r.reason = reasonLossyHistogram
-			return nil, nil
-		}
-
-		ret := &parser.VectorSelector{OriginalOffset: r.synthOffset}
-		if r.s.Interval > 0 {
-			ret.LookbackDelta = r.s.Interval - time.Duration(1)
-		}
-		ret.UnexpandedSeriesSet = result
-
-		agg.Expr = ret
-		return agg, nil
-	}
-
 	// Only valid if the other side is either `NumberLiteral` or `StringLiteral`
 	this := n.LHS
 	other := n.RHS
@@ -859,14 +813,8 @@ func (r *nodeReplacer) replaceBinary(n *parser.BinaryExpr) (parser.Node, error) 
 	r.reason = reasonNoLiteralOperand
 	if literal {
 		r.reason = reasonUnsupportedOperand
-		switch otherTyped := other.(type) {
-		case *parser.VectorSelector:
-			return vectorBinaryExpr(otherTyped)
-		case *parser.AggregateExpr:
-			switch otherTyped.Op {
-			case parser.MIN, parser.MAX, parser.TOPK, parser.BOTTOMK:
-				return aggregateBinaryExpr(otherTyped)
-			}
+		if vs, ok := other.(*parser.VectorSelector); ok {
+			return vectorBinaryExpr(vs)
 		}
 	}
 	return nil, nil

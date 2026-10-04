@@ -241,8 +241,8 @@ var diffScenarios = []diffScenario{
 	},
 }
 
-// knownDiv attributes diverging queries to a review finding (R2-R8). A zero
-// scenarios or modes list matches any.
+// knownDiv attributes diverging queries to a review finding or a documented
+// limitation. A zero scenarios or modes list matches any.
 type knownDiv struct {
 	id        string
 	scenarios []string
@@ -252,96 +252,10 @@ type knownDiv struct {
 
 var knownDivergences = []knownDiv{
 	{
-		id:        "R2",
-		scenarios: []string{"disjoint"},
-		modes:     []string{"default", "rr"},
-		exprs: []string{
-			"1 / max(foo)",
-			"5 - max(foo)",
-			"bottomk(1, foo) * -1",
-			"max(foo) * -1",
-			"max(foo) < 5",
-			"max(foo) == bool 1",
-			"min(foo) * -1",
-			"min(foo) < bool 5",
-			"min(foo) > 5",
-			"topk(1, foo) * -1",
-		},
-	},
-	{
-		id:        "R3",
-		scenarios: []string{"seam"},
-		modes:     []string{"exact", "rr_exact"},
-		exprs: []string{
-			"abs(sum(foo))",
-			"avg(foo)",
-			"avg(rate(foo[5m]))",
-			"avg_over_time(foo[5m])",
-			"bottomk(1, foo)",
-			"bottomk(2, foo)",
-			"changes(foo[5m])",
-			"clamp_max(foo, time())",
-			"clamp_min(foo offset 1m, time())",
-			"count_over_time(foo[5m])",
-			"count_values(\"v\", foo)",
-			"delta(foo[5m])",
-			"foo offset -1m",
-			"foo offset 1m",
-			"foo offset 1m + foo",
-			"increase(foo[5m])",
-			"label_replace(foo, \"x\", \"$1\", \"id\", \"(.*)\")",
-			"last_over_time(foo[5m])",
-			"max by (id) (foo)",
-			"max(foo offset 1m)",
-			"max(foo)",
-			"max(foo) + max(foo)",
-			"max(foo) - min(foo)",
-			"max(rate(foo[5m]))",
-			"max(rate(foo[5m])) < 1",
-			"max_over_time(foo[5m])",
-			"max_over_time(rate(foo[5m])[5m:1m])",
-			"max_over_time(sum(foo)[5m:1m])",
-			"min(foo)",
-			"predict_linear(foo[5m] offset 1m, 60)",
-			"quantile(0.5, foo)",
-			"quantile_over_time(0.5, foo[5m])",
-			"rate(foo[5m:1m])",
-			"rate(foo[5m] offset 1m)",
-			"rate(foo[5m])",
-			"round(foo, 0.5)",
-			"scalar(sum(foo))",
-			"sort(foo)",
-			"sort(sum by (id) (foo))",
-			"sort_desc(foo)",
-			"stddev(foo)",
-			"stdvar(foo)",
-			"sum by (id) (foo)",
-			"sum by (id) (rate(foo[5m]))",
-			"sum by (x) (label_replace(foo, \"x\", \"y\", \"id\", \".*\"))",
-			"sum without (id, az) (foo)",
-			"sum(count_over_time(foo[5m]))",
-			"sum(delta(foo[5m]))",
-			"sum(foo offset 1m)",
-			"sum(foo)",
-			"sum(foo) / count(foo)",
-			"sum(increase(foo[5m]))",
-			"sum(max_over_time(foo[5m:1m]))",
-			"sum(predict_linear(foo[5m] offset 1m, 60))",
-			"sum(rate(foo[5m] @ 300))",
-			"sum(rate(foo[5m] offset 1m))",
-			"sum(rate(foo[5m]))",
-			"sum_over_time(foo[5m:1m])",
-			"sum_over_time(foo[5m])",
-			"timestamp(foo offset 1m)",
-			"timestamp(foo)",
-			"topk by (id) (1, foo)",
-			"topk(1, foo)",
-			"topk(2, foo)",
-			"vector(scalar(foo{id=\"a\"}))",
-		},
-	},
-	{
-		id:        "R3",
+		// Without cross_group_exact_aggregates per-series calls and selectors are
+		// evaluated in each group, so a series split at a migration seam is
+		// evaluated per piece. Documented; exact mode is the answer.
+		id:        "seam outside exact mode",
 		scenarios: []string{"seam_per_series"},
 		modes:     []string{"default", "rr"},
 		exprs: []string{
@@ -358,68 +272,11 @@ var knownDivergences = []knownDiv{
 		},
 	},
 	{
-		id:        "R4",
-		scenarios: []string{"disjoint"},
-		modes:     []string{"default", "exact", "nofill", "rr", "rr_exact"},
-		exprs: []string{
-			"scalar(foo)",
-			"vector(scalar(foo))",
-			"vector(scalar(foo{id=\"b\"}))",
-		},
-	},
-	{
-		id:        "R5",
-		scenarios: []string{"asymmetric"},
-		modes:     []string{"exact", "nofill", "rr_exact"},
-		exprs: []string{
-			"clamp_min(foo offset 1m, time())",
-			"predict_linear(foo[5m] offset 1m, 60)",
-			"sum(predict_linear(foo[5m] offset 1m, 60))",
-		},
-	},
-	{
-		id:        "R5",
-		scenarios: []string{"clock"},
-		modes:     []string{"default", "exact", "nofill", "rr", "rr_exact"},
-		exprs: []string{
-			"clamp_min(foo offset 1m, time())",
-			"predict_linear(foo[5m] offset 1m, 60)",
-			"sum(predict_linear(foo[5m] offset 1m, 60))",
-		},
-	},
-	{
-		id:        "R5",
-		scenarios: []string{"disjoint"},
-		modes:     []string{"default", "exact", "nofill", "rr", "rr_exact"},
-		exprs: []string{
-			"clamp_min(foo offset 1m, time())",
-		},
-	},
-	{
-		id:        "R5",
-		scenarios: []string{"identical"},
-		modes:     []string{"exact", "nofill", "rr_exact"},
-		exprs: []string{
-			"clamp_min(foo offset 1m, time())",
-			"predict_linear(foo[5m] offset 1m, 60)",
-			"sum(predict_linear(foo[5m] offset 1m, 60))",
-		},
-	},
-	{
-		id:        "R5",
-		scenarios: []string{"unequal"},
-		modes:     []string{"exact", "nofill", "rr_exact"},
-		exprs: []string{
-			"clamp_min(foo offset 1m, time())",
-			"predict_linear(foo[5m] offset 1m, 60)",
-			"sum(predict_linear(foo[5m] offset 1m, 60))",
-		},
-	},
-	{
 		id:        "R8",
 		scenarios: []string{"float_hist_transition"},
 		modes:     []string{"exact", "rr_exact"},
 		exprs: []string{
+			"count_over_time(foo[3m])",
 			"rate(foo[3m])",
 			"sum(rate(foo[3m]))",
 		},

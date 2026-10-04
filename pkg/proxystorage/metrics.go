@@ -101,13 +101,13 @@ const (
 	reasonOffsetMismatch      = "offset_mismatch"       // offsets in the subtree don't converge (or couldn't be read)
 	reasonMatrixParent        = "matrix_parent"         // selector directly under a MatrixSelector: nothing smaller to ask for
 	reasonLossyHistogram      = "lossy_histogram"       // the response carried native histograms, so we redo it locally
-	reasonUnsupportedFunc     = "unsupported_func"      // absent/label_join/label_replace/info: handled by the engine
+	reasonUnsupportedFunc     = "unsupported_func"      // call not in perSeriesFuncs: evaluated by the engine
 	reasonNonReentrantAgg     = "non_reentrant_agg"     // quantile/stddev/stdvar/limitk/limit_ratio can't be combined from partials
 	reasonNoLiteralOperand    = "no_literal_operand"    // binary expr with no literal side
 	reasonUnsupportedOperand  = "unsupported_operand"   // binary expr whose non-literal side isn't pushable
 	reasonNoInnerPushdown     = "no_inner_pushdown"     // subquery whose inner expression yielded no replacement
 	reasonNonLiteralParam     = "non_literal_param"     // count_values whose value label isn't a string literal
-	reasonExactAggregates     = "exact_aggregates"      // cross_group_exact_aggregates: aggregate locally over deduped series
+	reasonExactAggregates     = "exact_aggregates"      // cross_group_exact_aggregates: evaluate locally over deduped series
 	reasonUnsupported         = "unsupported"           // catch-all: nothing better to ask the backends for (e.g. MatrixSelector)
 )
 

@@ -336,9 +336,10 @@ func gatherPushdownNodes(t *testing.T) map[string]float64 {
 }
 
 // TestExactAggregates_FallbackDedupsRawFanOut checks the mechanism rather than
-// the answer: the aggregation is declined for the stated reason and the raw
-// fan-out that replaces it goes through cross-group dedup (which is what makes
-// the aggregate exact), for nested / composed / subquery / binary shapes too.
+// the answer: no node is pushed down, each is declined for the stated reason,
+// and the raw fan-out that replaces them goes through cross-group dedup (which
+// is what makes the result exact), for nested / composed / subquery / binary
+// shapes too.
 func TestExactAggregates_FallbackDedupsRawFanOut(t *testing.T) {
 	ps, _ := exactAggregatesTestbed(t, rawExactAggregatesConfig, true)
 	now := time.Unix(900, 0)
@@ -349,9 +350,9 @@ func TestExactAggregates_FallbackDedupsRawFanOut(t *testing.T) {
 	}{
 		{expr: "count(up)", want: []string{"aggregate/fallback/exact_aggregates"}},
 		{expr: "sum by (job) (http_requests)", want: []string{"aggregate/fallback/exact_aggregates"}},
-		{expr: "count(count by (instance) (up))", want: []string{"aggregate/fallback/exact_aggregates", "aggregate/fallback/nested_aggregate"}},
-		{expr: "sum(rate(http_requests[5m]))", want: []string{"aggregate/fallback/exact_aggregates"}},
-		{expr: "max_over_time(sum(http_requests)[10m:1m])", want: []string{"aggregate/fallback/exact_aggregates"}},
+		{expr: "count(count by (instance) (up))", want: []string{"aggregate/fallback/exact_aggregates"}},
+		{expr: "sum(rate(http_requests[5m]))", want: []string{"aggregate/fallback/exact_aggregates", "call/fallback/exact_aggregates"}},
+		{expr: "max_over_time(sum(http_requests)[10m:1m])", want: []string{"subquery/fallback/exact_aggregates"}},
 		{expr: "min(http_requests) > 100", want: []string{"aggregate/fallback/exact_aggregates", "binary/fallback/exact_aggregates"}},
 	} {
 		t.Run(tc.expr, func(t *testing.T) {
@@ -367,8 +368,8 @@ func TestExactAggregates_FallbackDedupsRawFanOut(t *testing.T) {
 				}
 			}
 			for key := range got {
-				if strings.HasPrefix(key, "aggregate/pushed") {
-					t.Errorf("%s: aggregation was pushed down anyway: %v", tc.expr, got)
+				if strings.Contains(key, "/pushed/") {
+					t.Errorf("%s: pushed down anyway: %v", tc.expr, got)
 				}
 			}
 			// The aggregation now runs over the raw fan-out, and both groups

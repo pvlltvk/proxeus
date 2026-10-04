@@ -171,13 +171,10 @@ func TestNodeReplacer(t *testing.T) {
 				"irate(foo[1m]) @ 10000",
 			},
 		},
-		// Scalar method; expect replacement
+		// scalar() depends on the cardinality of the whole input, so only
+		// its argument goes down
 		{
-			in:  "scalar(foo{})",
-			out: "scalar()",
-			queries: []string{
-				"scalar(foo) @ 10000",
-			},
+			in: "scalar(foo{})",
 		},
 		// Sort method; expect replacement AND rewrite
 		{
@@ -230,64 +227,20 @@ func TestNodeReplacer(t *testing.T) {
 				"1 > foo @ 10000",
 			},
 		},
-		// If it is SOME AggregateExpr and a scalar -- also valid; in those cases
-		// we expect to re-do the AggregateExpr but have replaced the VectorSelector with the query
+		// An aggregate against a literal is declined: re-running the
+		// aggregation over per-group results filtered or transformed by the
+		// literal isn't the aggregation over all groups
 		{
-			in:  "min(foo{}) > 1",
-			out: "min()",
-			queries: []string{
-				"min(foo) > 1 @ 10000",
-			},
+			in: "min(foo{}) > 1",
 		},
 		{
-			in:  "max(foo{}) > 1",
-			out: "max()",
-			queries: []string{
-				"max(foo) > 1 @ 10000",
-			},
+			in: "max(foo{}) * -1",
 		},
 		{
-			in:  "topk(5, foo{}) > 1",
-			out: "topk(5, )",
-			queries: []string{
-				"topk(5, foo) > 1 @ 10000",
-			},
+			in: "topk(5, foo{}) * 1000",
 		},
 		{
-			in:  "bottomk(5, foo{}) > 1",
-			out: "bottomk(5, )",
-			queries: []string{
-				"bottomk(5, foo) > 1 @ 10000",
-			},
-		},
-
-		{
-			in:  "min(foo{}) * 1000",
-			out: "min()",
-			queries: []string{
-				"min(foo) * 1000 @ 10000",
-			},
-		},
-		{
-			in:  "max(foo{}) * 1000",
-			out: "max()",
-			queries: []string{
-				"max(foo) * 1000 @ 10000",
-			},
-		},
-		{
-			in:  "topk(5, foo{}) * 1000",
-			out: "topk(5, )",
-			queries: []string{
-				"topk(5, foo) * 1000 @ 10000",
-			},
-		},
-		{
-			in:  "bottomk(5, foo{}) * 1000",
-			out: "bottomk(5, )",
-			queries: []string{
-				"bottomk(5, foo) * 1000 @ 10000",
-			},
+			in: "bottomk(5, foo{}) > 1",
 		},
 
 		// Check that some others do nothing
@@ -379,16 +332,6 @@ func TestNodeReplacer(t *testing.T) {
 			out: "foo",
 			queries: []string{
 				"foo @ 100.000 @ 10000",
-			},
-		},
-		// BinaryExpr with an aggregate-with-@ + literal: still a valid
-		// pushdown shape since the synthesized aggregate replacement
-		// carries the @-bearing string.
-		{
-			in:  "min(foo @ 100) > 1",
-			out: "min()",
-			queries: []string{
-				"min(foo @ 100.000) > 1 @ 10000",
 			},
 		},
 	}
