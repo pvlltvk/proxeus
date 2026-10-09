@@ -87,6 +87,11 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > "Exact" means exact modulo dedup's fingerprint: overlapping series have to be identical apart from each group's
 > declared `labels`, so if a backend stamps anything else of its own (a Thanos `prometheus_replica`, say) dedup won't
 > collapse them and the aggregate still double-counts.
+>
+> Raw samples fetched over the HTTP API (groups without `remote_read: true`) arrive without Prometheus staleness
+> markers: the raw fetch is a `foo[Ns]` range query, and range selectors drop them. In exact mode a series that
+> disappeared can therefore keep answering instant queries for up to the lookback delta (5m by default).
+> `remote_read: true` groups keep the markers.
 
 > **Known overlap.** When you know which series more than one group holds (endpoints scraped both by a Thanos
 > and by a VictoriaMetrics), exclude them from all but one group with `inject_matchers`. The groups are then disjoint,
@@ -103,6 +108,10 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > ```
 >
 > The excluded copy can no longer fill gaps in the one you kept.
+>
+> Keep a classic histogram whole: `histogram_quantile` and `histogram_fraction` are pushed down per group, so all
+> `_bucket` series of one histogram must live in the same group. Don't split buckets across groups (by `le` in
+> `inject_matchers`, say). Native histograms are unaffected.
 
 > **Joins across groups.** Every series carries its group's `labels`, so vector matching between series from
 > different groups never matches on its own: with `foo` in `backend="thanos"` and `bar` in `backend="vm-a"`,
@@ -353,8 +362,8 @@ rejected at load. Point a ruler at proxeus as its query endpoint instead, and it
 
 - **Thanos Ruler**: `thanos rule --query=http://proxeus:8082`, writing to its own object store or `remote_write`.
 - **vmalert**: `-datasource.url=http://proxeus:8082`.
-- **A rules-only Prometheus**: no scrape targets, `rule_files` of its own, and `remote_read` against proxeus
-  (`/api/v1/read`, with `read_recent: true` so evaluation actually reaches it).
+
+Proxeus does not serve `/api/v1/read` (it answers 501); rulers query it over the HTTP API.
 
 ## Prometheus fork
 

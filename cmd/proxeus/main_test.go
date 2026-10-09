@@ -169,3 +169,51 @@ func TestOverrideRoutesAuthAndMethods(t *testing.T) {
 		}
 	})
 }
+
+func TestNoRemoteRead(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := auth.New(context.Background(), &auth.Config{
+		Basic: &auth.BasicConfig{Users: map[string]config_util.Secret{"alice": config_util.Secret(hash)}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var upstreamCalls int
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { upstreamCalls++ })
+	router := httprouter.New()
+	registerNoRemoteRead(router, "/prefix/api/v1/read")
+	router.NotFound = upstreamOptions(upstream, upstream)
+	handler := authenticator.Middleware(router)
+
+	tests := []struct {
+		name   string
+		method string
+		authed bool
+		status int
+	}{
+		{name: "POST", method: http.MethodPost, authed: true, status: http.StatusNotImplemented},
+		{name: "GET", method: http.MethodGet, authed: true, status: http.StatusNotImplemented},
+		{name: "POST without credentials", method: http.MethodPost, status: http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstreamCalls = 0
+			req := httptest.NewRequest(tt.method, "/prefix/api/v1/read", nil)
+			if tt.authed {
+				req.SetBasicAuth("alice", "s3cret")
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tt.status {
+				t.Errorf("status = %d, want %d", rec.Code, tt.status)
+			}
+			if upstreamCalls != 0 {
+				t.Errorf("upstream called %d times, want 0", upstreamCalls)
+			}
+		})
+	}
+}
