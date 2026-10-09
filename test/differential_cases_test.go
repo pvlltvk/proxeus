@@ -24,6 +24,9 @@ var (
 	scalarQueries = []string{
 		"scalar(foo)", "vector(scalar(foo))", `vector(scalar(foo{id="a"}))`, `vector(scalar(foo{id="b"}))`, "scalar(sum(foo))",
 		"absent(foo)", `absent(foo{id="zzz"})`, "vector(1)", "foo > scalar(max(foo))",
+		"sum(vector(scalar(foo)))", "max(vector(scalar(foo)))", "abs(vector(scalar(foo)))",
+		"sum(absent(foo))", `sum(absent(foo{id="a"}))`, "sum(absent(meta))", "abs(scalar(foo) + foo)",
+		"rate(foo[5m]) + time()",
 		"time()", "abs(sum(foo))",
 	}
 
