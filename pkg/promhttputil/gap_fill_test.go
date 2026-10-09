@@ -119,6 +119,30 @@ func TestPriorityMergeSampleStream(t *testing.T) {
 			wantFilled: []int{1},
 		},
 		{
+			name:       "a filler's terminal StaleNaN is kept",
+			base:       stream(sp(0, 1), staleAt(10)),
+			fillers:    []*model.SampleStream{stream(sp(20, 102), staleAt(30))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), staleAt(10), sp(20, 102), staleAt(30)},
+			wantFilled: []int{1},
+		},
+		{
+			name:       "a filler's StaleNaN is kept when the base resumes after it",
+			base:       stream(sp(0, 1), staleAt(10), sp(60, 6)),
+			fillers:    []*model.SampleStream{stream(sp(20, 102), staleAt(30))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), staleAt(10), sp(20, 102), staleAt(30), sp(60, 6)},
+			wantFilled: []int{1},
+		},
+		{
+			name:       "a filler's StaleNaN that ends nothing it emitted is dropped",
+			base:       stream(sp(0, 1), staleAt(10), sp(60, 6)),
+			fillers:    []*model.SampleStream{stream(staleAt(20), sp(30, 103))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), staleAt(10), sp(30, 103), sp(60, 6)},
+			wantFilled: []int{1},
+		},
+		{
 			name:       "filler samples exactly on the margin boundary are excluded, one unit inside is kept",
 			base:       stream(sp(0, 1), sp(100, 2)),
 			fillers:    []*model.SampleStream{stream(sp(4, 901), sp(5, 902), sp(95, 903), sp(96, 904))},
@@ -197,6 +221,74 @@ func TestPriorityMergeSampleStream_HistogramGapOpenedByFloatStaleNaN(t *testing.
 	}
 	if fmt.Sprint(stats.Filled) != "[1]" {
 		t.Fatalf("Filled = %v, want [1]", stats.Filled)
+	}
+}
+
+func staleHp(t int64) model.SampleHistogramPair {
+	return hp(t, math.Float64frombits(value.StaleNaN))
+}
+
+func histogramTimes(hs []model.SampleHistogramPair) []int64 {
+	var out []int64
+	for _, h := range hs {
+		out = append(out, int64(h.Timestamp))
+	}
+	return out
+}
+
+func TestPriorityMergeSampleStream_HistogramStaleNaN(t *testing.T) {
+	tests := []struct {
+		name       string
+		base       *model.SampleStream
+		filler     *model.SampleStream
+		gap        model.Time
+		wantValues []int64
+		wantHists  []int64
+		wantFilled string
+	}{
+		{
+			name:       "histogram marker opens a gap inside the threshold",
+			base:       &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(0, 1), staleHp(50), hp(65, 2)}},
+			filler:     &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(57, 9)}},
+			gap:        20,
+			wantHists:  []int64{0, 50, 57, 65},
+			wantFilled: "[1]",
+		},
+		{
+			name:       "filler histogram marker is kept",
+			base:       &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(0, 1), staleHp(10)}},
+			filler:     &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(20, 9), staleHp(30)}},
+			gap:        8,
+			wantHists:  []int64{0, 10, 20, 30},
+			wantFilled: "[1]",
+		},
+		{
+			name: "float filler samples then a histogram marker on the shared timeline",
+			base: &model.SampleStream{Histograms: []model.SampleHistogramPair{hp(0, 1), staleHp(10)}},
+			filler: &model.SampleStream{
+				Values:     []model.SamplePair{sp(20, 9)},
+				Histograms: []model.SampleHistogramPair{staleHp(30)},
+			},
+			gap:        8,
+			wantValues: []int64{20},
+			wantHists:  []int64{0, 10, 30},
+			wantFilled: "[1]",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, stats := PriorityMergeSampleStream(tc.base, []*model.SampleStream{tc.filler}, tc.gap)
+			var values []int64
+			for _, p := range got.Values {
+				values = append(values, int64(p.Timestamp))
+			}
+			if fmt.Sprint(values) != fmt.Sprint(tc.wantValues) || fmt.Sprint(histogramTimes(got.Histograms)) != fmt.Sprint(tc.wantHists) {
+				t.Fatalf("floats at %v, histograms at %v; want %v, %v", values, histogramTimes(got.Histograms), tc.wantValues, tc.wantHists)
+			}
+			if fmt.Sprint(stats.Filled) != tc.wantFilled {
+				t.Fatalf("Filled = %v, want %s", stats.Filled, tc.wantFilled)
+			}
+		})
 	}
 }
 
@@ -323,19 +415,22 @@ func referenceFillRange(lo, hi *model.Time, seqs [][]model.SamplePair, lvl int, 
 	var out []model.SamplePair
 	subLo := lo
 	stale := false
+	live := false
 	for _, p := range candidates {
 		ts := p.Timestamp
 		if stale || subLo == nil || ts-*subLo >= gap {
 			out = append(out, referenceFillRange(subLo, &ts, seqs, lvl+1, gap)...)
 		}
 		if value.IsStaleNaN(float64(p.Value)) {
-			if lvl == 0 {
+			if lvl == 0 || live {
 				out = append(out, p)
 			}
 			stale = true
+			live = false
 		} else {
 			out = append(out, p)
 			stale = false
+			live = true
 		}
 		subLo = &ts
 	}

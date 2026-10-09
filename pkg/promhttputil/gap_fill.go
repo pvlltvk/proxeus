@@ -53,7 +53,12 @@ type timelineSample struct {
 	h *model.SampleHistogram
 }
 
-func (p timelineSample) stale() bool { return p.h == nil && value.IsStaleNaN(float64(p.f)) }
+func (p timelineSample) stale() bool {
+	if p.h != nil {
+		return value.IsStaleNaN(float64(p.h.Sum))
+	}
+	return value.IsStaleNaN(float64(p.f))
+}
 
 func timeline(s *model.SampleStream) []timelineSample {
 	out := make([]timelineSample, 0, len(s.Values)+len(s.Histograms))
@@ -148,6 +153,9 @@ func fill(lo, hi *model.Time, seqs [][]timelineSample, lvl int, gap model.Time, 
 	// would count the margin twice.
 	subLo := lo
 	stale := false
+	// A filler's marker is kept only when it ends samples this call emitted,
+	// so the engine's lookback doesn't carry them past where the filler stopped.
+	live := false
 
 	for ; i < len(seq); i++ {
 		p := seq[i]
@@ -160,16 +168,18 @@ func fill(lo, hi *model.Time, seqs [][]timelineSample, lvl int, gap model.Time, 
 		}
 
 		if p.stale() {
-			if lvl == 0 {
+			if lvl == 0 || live {
 				out = append(out, p)
 			}
 			stale = true
+			live = false
 		} else {
 			out = append(out, p)
 			if lvl > 0 {
 				filled[lvl-1]++
 			}
 			stale = false
+			live = true
 		}
 		subLo = timePtr(p.t)
 	}

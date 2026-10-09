@@ -1,12 +1,14 @@
 package promclient
 
 import (
+	"math"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
@@ -91,6 +93,16 @@ func TestSampleHistogramFallbackReconstruction(t *testing.T) {
 // a model.SampleStream with histogram samples actually produces them via Next +
 // AtFloatHistogram. This catches regressions where the iterator drops
 // histograms before the engine can see them.
+func TestHistogramStaleNaNSurvivesConversion(t *testing.T) {
+	fh := &histogram.FloatHistogram{Sum: math.Float64frombits(value.StaleNaN)}
+
+	sh := floatHistogramToSampleHistogram(fh)
+
+	if !value.IsStaleNaN(float64(sh.Sum)) {
+		t.Fatalf("Sum bits = %#x, want StaleNaN %#x", math.Float64bits(float64(sh.Sum)), value.StaleNaN)
+	}
+}
+
 func TestSeriesIteratorEmitsHistogramSamples(t *testing.T) {
 	original := &histogram.FloatHistogram{
 		Schema:          histogram.CustomBucketsSchema,
