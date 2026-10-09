@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/sigv4"
 	"gopkg.in/yaml.v2"
 
@@ -641,6 +642,84 @@ func TestFollowRedirects(t *testing.T) {
 				t.Errorf("redirect followed = %v (err = %v), want %v", followed, err, tt.wantFollow)
 			}
 		})
+	}
+}
+
+func TestRedirectToOtherHostRefused(t *testing.T) {
+	var leaked atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Secret") != "" {
+			leaked.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":["a"]}`))
+	}))
+	defer other.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/final", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	sg := newConfiguredGroup(t, `
+http_headers:
+  X-Secret: hidden
+http_client:
+  basic_auth: {username: alice, password: s3cret}
+`)
+	groups := map[string][]*targetgroup.Group{
+		"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(origin.URL, "http://"))}}}},
+	}
+	if err := sg.loadTargetGroupMap(groups); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := sg.LabelNames(t.Context(), nil, time.Time{}, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Errorf("err = %v, want redirect to a different host refused", err)
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("other host received credentials in %d requests", n)
+	}
+}
+
+func TestRemoteReadRedirectToOtherHostRefused(t *testing.T) {
+	var leaked atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Secret") != "" {
+			leaked.Add(1)
+		}
+	}))
+	defer other.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/final", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	sg := newConfiguredGroup(t, `
+remote_read: true
+http_headers:
+  X-Secret: hidden
+http_client:
+  basic_auth: {username: alice, password: s3cret}
+`)
+	groups := map[string][]*targetgroup.Group{
+		"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(origin.URL, "http://"))}}}},
+	}
+	if err := sg.loadTargetGroupMap(groups); err != nil {
+		t.Fatal(err)
+	}
+
+	m := labels.MustNewMatcher(labels.MatchEqual, "__name__", "up")
+	set := sg.GetValue(t.Context(), time.Unix(0, 0), time.Unix(60, 0), []*labels.Matcher{m})
+	for set.Next() {
+	}
+	if err := set.Err(); err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Errorf("err = %v, want redirect to a different host refused", err)
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("other host received credentials in %d requests", n)
 	}
 }
 

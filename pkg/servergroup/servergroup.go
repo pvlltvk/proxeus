@@ -211,8 +211,23 @@ func (s *ServerGroup) queryClient() *http.Client {
 		client.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
+	} else {
+		client.CheckRedirect = sameHostRedirect
 	}
 	return client
+}
+
+// sameHostRedirect refuses redirects to another host: the auth and header
+// round trippers re-add credentials to every request, undoing net/http's
+// stripping of sensitive headers on cross-host redirects.
+func sameHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host {
+		return fmt.Errorf("redirect to a different host %s refused", req.URL.Host)
+	}
+	return nil
 }
 
 // Sync updates the targets from our discovery manager
@@ -354,6 +369,13 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 					remoteStorageClient, err := remote.NewReadClient("foo", cfg)
 					if err != nil {
 						return err
+					}
+					if s.Cfg.HTTPConfig.HTTPConfig.FollowRedirects {
+						rc, ok := remoteStorageClient.(*remote.Client)
+						if !ok {
+							return fmt.Errorf("unexpected remote read client %T", remoteStorageClient)
+						}
+						rc.Client.CheckRedirect = sameHostRedirect
 					}
 
 					apiClient = &promclient.PromAPIRemoteRead{apiClient, remoteStorageClient}
