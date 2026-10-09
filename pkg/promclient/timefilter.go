@@ -80,6 +80,9 @@ func (tf *AbsoluteTimeFilter) QueryRange(ctx context.Context, query string, r v1
 		if !tf.End.IsZero() && r.End.After(tf.End) {
 			r.End = tf.End
 		}
+		if r.Start.After(r.End) {
+			return storage.EmptySeriesSet()
+		}
 	}
 
 	return tf.API.QueryRange(ctx, query, r)
@@ -226,6 +229,9 @@ func (tf *RelativeTimeFilter) QueryRange(ctx context.Context, query string, r v1
 		}
 		if !tfEnd.IsZero() && r.End.After(tfEnd) {
 			r.End = tfEnd
+		}
+		if r.Start.After(r.End) {
+			return storage.EmptySeriesSet()
 		}
 	}
 
