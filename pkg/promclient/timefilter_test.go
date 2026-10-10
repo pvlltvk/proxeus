@@ -400,3 +400,81 @@ func TestTimeFilterTruncateBounds(t *testing.T) {
 }
 
 func ptr(d time.Duration) *time.Duration { return &d }
+
+// Aligning the start up to the step grid can move it past the clamped end; the
+// backend rejects such a range, so the filter must answer empty instead.
+func TestTimeFilterTruncateEmptiedByStepAlignment(t *testing.T) {
+	now := time.Now()
+	sec := time.Second
+	newAPI := map[string]func(rec API) API{
+		"absolute": func(rec API) API {
+			return &AbsoluteTimeFilter{API: rec, Start: now.Add(5 * sec), End: now.Add(9 * sec), Truncate: true}
+		},
+		"relative": func(rec API) API {
+			return &RelativeTimeFilter{API: rec, Start: ptr(5 * sec), End: ptr(9 * sec), Truncate: true}
+		},
+	}
+	tests := []struct {
+		name      string
+		start     time.Time
+		end       time.Time
+		step      time.Duration
+		wantEmpty bool
+	}{
+		{name: "aligned start lands past the end", start: now, end: now.Add(10 * sec), step: 10 * sec, wantEmpty: true},
+		{name: "aligned start still inside", start: now, end: now.Add(10 * sec), step: 2 * sec},
+	}
+
+	for kind, build := range newAPI {
+		for _, tt := range tests {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				rec := &windowRecorder{}
+				build(rec).QueryRange(context.Background(), "q", v1.Range{Start: tt.start, End: tt.end, Step: tt.step})
+
+				reached := !rec.start.IsZero()
+				if reached == tt.wantEmpty {
+					t.Fatalf("backend reached = %v, want %v", reached, !tt.wantEmpty)
+				}
+				if reached && rec.start.After(rec.end) {
+					t.Errorf("forwarded start %v is after end %v", rec.start, rec.end)
+				}
+			})
+		}
+	}
+}
+
+func TestTimeFilterTruncateStartMeetsEnd(t *testing.T) {
+	now := time.Now()
+	sec := time.Second
+	newAPI := map[string]func(rec API) API{
+		"absolute": func(rec API) API {
+			return &AbsoluteTimeFilter{API: rec, Start: now.Add(5 * sec), End: now.Add(10 * sec), Truncate: true}
+		},
+		"relative": func(rec API) API {
+			return &RelativeTimeFilter{API: rec, Start: ptr(5 * sec), End: ptr(10 * sec), Truncate: true}
+		},
+	}
+	for kind, build := range newAPI {
+		t.Run(kind, func(t *testing.T) {
+			rec := &windowRecorder{}
+			build(rec).QueryRange(context.Background(), "q", v1.Range{Start: now, End: now.Add(20 * sec), Step: 10 * sec})
+			if rec.start.IsZero() {
+				t.Fatal("backend not reached although the aligned start equals the end")
+			}
+			if rec.start.After(rec.end) {
+				t.Errorf("forwarded start %v is after end %v", rec.start, rec.end)
+			}
+		})
+	}
+}
+
+func TestTimeFilterNoTruncateKeepsRange(t *testing.T) {
+	now := time.Now()
+	sec := time.Second
+	rec := &windowRecorder{}
+	tf := &AbsoluteTimeFilter{API: rec, Start: now.Add(5 * sec), End: now.Add(9 * sec)}
+	tf.QueryRange(context.Background(), "q", v1.Range{Start: now, End: now.Add(10 * sec), Step: 10 * sec})
+	if !rec.start.Equal(now) || !rec.end.Equal(now.Add(10*sec)) {
+		t.Errorf("window = [%v, %v], want the request untouched", rec.start, rec.end)
+	}
+}

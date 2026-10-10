@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/sigv4"
 	"gopkg.in/yaml.v2"
 
@@ -644,6 +646,116 @@ func TestFollowRedirects(t *testing.T) {
 	}
 }
 
+func TestRedirectToOtherHostRefused(t *testing.T) {
+	var leaked atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Secret") != "" {
+			leaked.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":["a"]}`))
+	}))
+	defer other.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/final", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	sg := newConfiguredGroup(t, `
+http_headers:
+  X-Secret: hidden
+http_client:
+  basic_auth: {username: alice, password: s3cret}
+`)
+	groups := map[string][]*targetgroup.Group{
+		"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(origin.URL, "http://"))}}}},
+	}
+	if err := sg.loadTargetGroupMap(groups); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := sg.LabelNames(t.Context(), nil, time.Time{}, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Errorf("err = %v, want redirect to a different host refused", err)
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("other host received credentials in %d requests", n)
+	}
+}
+
+func TestHTTPClientRedirectToOtherHostRefused(t *testing.T) {
+	var leaked atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Secret") != "" {
+			leaked.Add(1)
+		}
+	}))
+	defer other.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/final", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	sg := newConfiguredGroup(t, `
+http_headers:
+  X-Secret: hidden
+http_client:
+  basic_auth: {username: alice, password: s3cret}
+`)
+	resp, err := sg.HTTPClient(time.Second).Get(origin.URL)
+	if err == nil {
+		resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Errorf("err = %v, want redirect to a different host refused", err)
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("other host received credentials in %d requests", n)
+	}
+}
+
+func TestRemoteReadRedirectToOtherHostRefused(t *testing.T) {
+	var leaked atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Secret") != "" {
+			leaked.Add(1)
+		}
+	}))
+	defer other.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/final", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	sg := newConfiguredGroup(t, `
+remote_read: true
+http_headers:
+  X-Secret: hidden
+http_client:
+  basic_auth: {username: alice, password: s3cret}
+`)
+	groups := map[string][]*targetgroup.Group{
+		"x": {{Targets: []model.LabelSet{{model.AddressLabel: model.LabelValue(strings.TrimPrefix(origin.URL, "http://"))}}}},
+	}
+	if err := sg.loadTargetGroupMap(groups); err != nil {
+		t.Fatal(err)
+	}
+
+	m := labels.MustNewMatcher(labels.MatchEqual, "__name__", "up")
+	set := sg.GetValue(t.Context(), time.Unix(0, 0), time.Unix(60, 0), []*labels.Matcher{m})
+	for set.Next() {
+	}
+	if err := set.Err(); err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Errorf("err = %v, want redirect to a different host refused", err)
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Errorf("other host received credentials in %d requests", n)
+	}
+}
+
 func TestProxyOnTheWire(t *testing.T) {
 	var proxied atomic.Int64
 	var connectHeader atomic.Value
@@ -784,5 +896,114 @@ func TestBasicAuthUsernameFile(t *testing.T) {
 	}
 	if user != "alice" || password != "s3cret" {
 		t.Errorf("basic auth = %q:%q, want alice:s3cret", user, password)
+	}
+}
+
+func TestSameHostRedirect(t *testing.T) {
+	var credsOnOther atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Secret") != "" {
+			credsOnOther.Add(1)
+		}
+	}))
+	defer other.Close()
+
+	var origin *httptest.Server
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if code, ok := strings.CutPrefix(r.URL.Path, "/status/"); ok {
+			status, _ := strconv.Atoi(code)
+			http.Redirect(w, r, "/final", status)
+			return
+		}
+		switch r.URL.Path {
+		case "/final":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success","data":["a"]}`))
+		case "/loop":
+			http.Redirect(w, r, "/loop", http.StatusFound)
+		case "/chain-out":
+			http.Redirect(w, r, "/final-hop", http.StatusFound)
+		case "/final-hop":
+			http.Redirect(w, r, other.URL+"/x", http.StatusFound)
+		case "/abs":
+			http.Redirect(w, r, origin.URL+"/final", http.StatusFound)
+		case "/userinfo":
+			http.Redirect(w, r, "http://evil:pw@"+other.Listener.Addr().String()+"/x", http.StatusFound)
+		case "/https":
+			http.Redirect(w, r, "https://"+r.Host+"/final", http.StatusFound)
+		default:
+			http.Redirect(w, r, "/final", http.StatusFound)
+		}
+	}))
+	defer origin.Close()
+
+	tests := []struct {
+		name    string
+		path    string
+		status  int
+		wantErr string
+	}{
+		{name: "relative 301", path: "/", status: http.StatusMovedPermanently},
+		{name: "relative 302", path: "/", status: http.StatusFound},
+		{name: "relative 303", path: "/", status: http.StatusSeeOther},
+		{name: "relative 307", path: "/", status: http.StatusTemporaryRedirect},
+		{name: "relative 308", path: "/", status: http.StatusPermanentRedirect},
+		{name: "absolute same host", path: "/abs"},
+		{name: "chain ending on another host", path: "/chain-out", wantErr: "different host"},
+		{name: "userinfo on another host", path: "/userinfo", wantErr: "different host"},
+		{name: "scheme change on the same host", path: "/https", wantErr: "different host"},
+		{name: "redirect loop", path: "/loop", wantErr: "stopped after 10 redirects"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sg := newConfiguredGroup(t, `
+http_headers:
+  X-Secret: hidden
+http_client:
+  basic_auth: {username: alice, password: s3cret}
+`)
+			target := origin.URL + tt.path
+			if tt.status != 0 {
+				target = origin.URL + "/status/" + strconv.Itoa(tt.status)
+			}
+			req, err := http.NewRequest(http.MethodGet, target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := sg.queryClient().Do(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Errorf("err = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if n := credsOnOther.Load(); n != 0 {
+				t.Errorf("other host received credentials in %d requests", n)
+			}
+		})
+	}
+}
+
+func TestFollowRedirectsDisabledReturnsRedirectUnchanged(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://elsewhere.invalid/x", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	sg := newConfiguredGroup(t, "http_client: {follow_redirects: false}\n")
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := sg.queryClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || resp.Header.Get("Location") != "http://elsewhere.invalid/x" {
+		t.Errorf("got %d Location=%q, want the 307 unchanged", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
