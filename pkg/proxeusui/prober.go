@@ -188,7 +188,7 @@ func (p *Prober) clientForGroup(sg *servergroup.ServerGroup) *http.Client {
 	if sg == nil {
 		return p.client
 	}
-	return &http.Client{Transport: sg, Timeout: p.timeout}
+	return sg.HTTPClient(p.timeout)
 }
 
 // probeTarget performs a single health check against one target (host:port)

@@ -217,6 +217,14 @@ func (s *ServerGroup) queryClient() *http.Client {
 	return client
 }
 
+// HTTPClient returns a client on the group's transport with its redirect
+// policy, for requests outside the API clients (the UI prober).
+func (s *ServerGroup) HTTPClient(timeout time.Duration) *http.Client {
+	c := s.queryClient()
+	c.Timeout = timeout
+	return c
+}
+
 // sameHostRedirect refuses redirects to another host: the auth and header
 // round trippers re-add credentials to every request, undoing net/http's
 // stripping of sensitive headers on cross-host redirects.
