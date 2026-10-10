@@ -159,8 +159,8 @@ func (r *nodeReplacer) prepare() (bool, error) {
 	// overlap with differing values, a migration seam), and each group would
 	// then evaluate it over its own piece. Exact mode evaluates everything over
 	// the deduplicated raw series instead.
-	if r.state.cfg.CrossGroupExactAggregates && len(r.state.sgs) > 1 {
-		r.reason = reasonExactAggregates
+	if r.state.cfg.CrossGroupExact && len(r.state.sgs) > 1 {
+		r.reason = reasonExact
 		return true, nil
 	}
 

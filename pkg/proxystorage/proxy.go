@@ -159,8 +159,8 @@ func (p *ProxyStorage) ApplyConfig(c *proxyconfig.Config) error {
 				Labels: sg.Labels,
 			}
 		}
-		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t, exact_aggregates=%t, fill_gaps=%t)",
-			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse, c.CrossGroupExactAggregates, c.CrossGroupDedupFillGaps)
+		logrus.Infof("cross_group_dedup enabled (metadata_dedup=%t, partial_response=%t, exact=%t, fill_gaps=%t)",
+			c.CrossGroupDedupMetadata, c.CrossGroupPartialResponse, c.CrossGroupExact, c.CrossGroupDedupFillGaps)
 		multiAPI, err = promclient.NewCrossGroupMultiAPI(backends, promclient.CrossGroupOpts{
 			DedupMetadata:   c.CrossGroupDedupMetadata,
 			PartialResponse: c.CrossGroupPartialResponse,

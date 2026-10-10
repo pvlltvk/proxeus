@@ -181,7 +181,7 @@ func TestAuthConfigRedactsPasswordHashes(t *testing.T) {
 }
 
 // The cross-group flags only affect the fan-out/dedup machinery, so each one
-// requires cross_group_dedup. cross_group_exact_aggregates especially: without
+// requires cross_group_dedup. cross_group_exact especially: without
 // dedup the raw fan-out returns both groups' series and the locally computed
 // aggregate double-counts exactly as before.
 func TestProxeusConfigValidate(t *testing.T) {
@@ -192,8 +192,8 @@ func TestProxeusConfigValidate(t *testing.T) {
 	}{
 		{name: "nothing enabled", cfg: ProxeusConfig{}},
 		{name: "dedup alone", cfg: ProxeusConfig{CrossGroupDedup: true}},
-		{name: "exact_aggregates without dedup", cfg: ProxeusConfig{CrossGroupExactAggregates: true}, wantErr: true},
-		{name: "exact_aggregates with dedup", cfg: ProxeusConfig{CrossGroupDedup: true, CrossGroupExactAggregates: true}},
+		{name: "exact without dedup", cfg: ProxeusConfig{CrossGroupExact: true}, wantErr: true},
+		{name: "exact with dedup", cfg: ProxeusConfig{CrossGroupDedup: true, CrossGroupExact: true}},
 		{name: "dedup_metadata without dedup", cfg: ProxeusConfig{CrossGroupDedupMetadata: true}, wantErr: true},
 		{name: "partial_response without dedup", cfg: ProxeusConfig{CrossGroupPartialResponse: true}, wantErr: true},
 		{

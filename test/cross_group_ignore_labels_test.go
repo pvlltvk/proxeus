@@ -44,7 +44,7 @@ load 1m
 	node_cpu_seconds_total{instance="host1", cpu="0", mode="user"} 0+2x5
 `
 
-// Unlike exactAggregatesTestbed, each group gets its own store, so one side's
+// Unlike exactTestbed, each group gets its own store, so one side's
 // series can carry labels the other's don't.
 func ignoreLabelsTestbed(t *testing.T, ignoreLabelsYAML string) *proxystorage.ProxyStorage {
 	t.Helper()
@@ -188,7 +188,7 @@ func TestCrossGroupDedupIgnoreLabels_ReloadFlipsIdentity(t *testing.T) {
 
 func evalInstantErr(t *testing.T, ps *proxystorage.ProxyStorage, expr string, ts time.Time) (promql.Vector, error) {
 	t.Helper()
-	eng := exactAggregatesEngine()
+	eng := exactEngine()
 	eng.NodeReplacer = ps.NodeReplacer
 	query, err := eng.NewInstantQuery(context.Background(), ps, nil, expr, ts)
 	if err != nil {

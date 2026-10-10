@@ -21,17 +21,17 @@ import (
 	"github.com/pvlltvk/proxeus/pkg/proxystorage"
 )
 
-// HTTP-level coverage for cross_group_exact_aggregates: two server_groups in
+// HTTP-level coverage for cross_group_exact: two server_groups in
 // front of the SAME backend storage, so every series exists in both groups --
 // the 100%-overlap case the flag is for. `az` is the per-group external label
-// dedup ignores. The unit layer in pkg/proxystorage/exact_aggregates_test.go
+// dedup ignores. The unit layer in pkg/proxystorage/exact_test.go
 // pins the pushdown decision; this file checks the answers the engine actually
 // produces once the pushdown is declined.
 
-const rawExactAggregatesConfig = `
+const rawExactConfig = `
 proxeus:
   cross_group_dedup: true
-  cross_group_exact_aggregates: %s
+  cross_group_exact: %s
   server_groups:
     - static_configs:
         - targets:
@@ -45,10 +45,10 @@ proxeus:
         az: b
 `
 
-const rawExactAggregatesConfigRR = `
+const rawExactConfigRR = `
 proxeus:
   cross_group_dedup: true
-  cross_group_exact_aggregates: %s
+  cross_group_exact: %s
   server_groups:
     - static_configs:
         - targets:
@@ -64,7 +64,7 @@ proxeus:
       remote_read: true
 `
 
-const exactAggregatesData = `
+const exactData = `
 load 1m
   http_requests{job="api", instance="0", group="prod"}   0+10x30
   http_requests{job="api", instance="1", group="canary"} 0+20x30
@@ -75,15 +75,15 @@ load 1m
   up{job="app", instance="0"} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 `
 
-// exactAggregatesTestbed stands up one backend storage, two prometheus API
+// exactTestbed stands up one backend storage, two prometheus API
 // servers over it and a ProxyStorage in front of both. The returned storage is
 // the single source of truth results are compared against: with both groups
 // serving it, an exact aggregate over the two groups has to equal the
 // aggregate one backend computes on its own.
-func exactAggregatesTestbed(t *testing.T, cfgTemplate string, exact bool) (*proxystorage.ProxyStorage, storage.Storage) {
+func exactTestbed(t *testing.T, cfgTemplate string, exact bool) (*proxystorage.ProxyStorage, storage.Storage) {
 	t.Helper()
 
-	store := promqltest.LoadedStorage(t, exactAggregatesData)
+	store := promqltest.LoadedStorage(t, exactData)
 	t.Cleanup(func() { store.Close() })
 
 	srvA, addrA, stopA := startAPIForTest(store)
@@ -111,7 +111,7 @@ func parseProxeusConfig(t *testing.T, cfg string) *proxyconfig.Config {
 	return parsed
 }
 
-func exactAggregatesEngine() *promql.Engine {
+func exactEngine() *promql.Engine {
 	return promql.NewEngine(promql.EngineOpts{
 		Timeout:                  time.Minute,
 		MaxSamples:               50000000,
@@ -127,7 +127,7 @@ func exactAggregatesEngine() *promql.Engine {
 // proxeus has to match.
 func evalInstant(t *testing.T, q storage.Queryable, replacer parser.NodeReplacer, expr string, ts time.Time) promql.Vector {
 	t.Helper()
-	eng := exactAggregatesEngine()
+	eng := exactEngine()
 	eng.NodeReplacer = replacer
 	query, err := eng.NewInstantQuery(context.Background(), q, nil, expr, ts)
 	if err != nil {
@@ -147,7 +147,7 @@ func evalInstant(t *testing.T, q storage.Queryable, replacer parser.NodeReplacer
 
 func evalRange(t *testing.T, q storage.Queryable, replacer parser.NodeReplacer, expr string, start, end time.Time, step time.Duration) promql.Matrix {
 	t.Helper()
-	eng := exactAggregatesEngine()
+	eng := exactEngine()
 	eng.NodeReplacer = replacer
 	query, err := eng.NewRangeQuery(context.Background(), q, nil, expr, start, end, step)
 	if err != nil {
@@ -214,10 +214,10 @@ func roundFloat(f float64) float64 {
 	return math.Round(f*1e9) / 1e9
 }
 
-// exactAggregateShapes are the query shapes the flag has to get right over
+// exactShapes are the query shapes the flag has to get right over
 // overlapping groups: flat, grouped, nested, composed, inside a subquery, on
 // both sides of a binary expr, and with offset / @.
-var exactAggregateShapes = []string{
+var exactShapes = []string{
 	"count(up)",
 	"sum(up)",
 	"avg(up)",
@@ -258,23 +258,23 @@ var exactAggregateShapes = []string{
 	"sum(up) without ()",
 }
 
-// TestExactAggregates_ShapesMatchSingleBackend is the acceptance property: with
+// TestExact_ShapesMatchSingleBackend is the acceptance property: with
 // the flag on, every shape over two fully overlapping server_groups answers
 // exactly what the single backend behind them answers.
-func TestExactAggregates_ShapesMatchSingleBackend(t *testing.T) {
+func TestExact_ShapesMatchSingleBackend(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		template string
 	}{
-		{name: "http", template: rawExactAggregatesConfig},
-		{name: "remote_read", template: rawExactAggregatesConfigRR},
+		{name: "http", template: rawExactConfig},
+		{name: "remote_read", template: rawExactConfigRR},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ps, store := exactAggregatesTestbed(t, tc.template, true)
+			ps, store := exactTestbed(t, tc.template, true)
 			now := time.Unix(900, 0)
 			start, end := time.Unix(600, 0), time.Unix(900, 0)
 
-			for _, expr := range exactAggregateShapes {
+			for _, expr := range exactShapes {
 				t.Run(expr, func(t *testing.T) {
 					want := formatVector(evalInstant(t, store, nil, expr, now))
 					got := formatVector(evalInstant(t, ps, ps.NodeReplacer, expr, now))
@@ -335,25 +335,25 @@ func gatherPushdownNodes(t *testing.T) map[string]float64 {
 	return out
 }
 
-// TestExactAggregates_FallbackDedupsRawFanOut checks the mechanism rather than
+// TestExact_FallbackDedupsRawFanOut checks the mechanism rather than
 // the answer: no node is pushed down, each is declined for the stated reason,
 // and the raw fan-out that replaces them goes through cross-group dedup (which
 // is what makes the result exact), for nested / composed / subquery / binary
 // shapes too.
-func TestExactAggregates_FallbackDedupsRawFanOut(t *testing.T) {
-	ps, _ := exactAggregatesTestbed(t, rawExactAggregatesConfig, true)
+func TestExact_FallbackDedupsRawFanOut(t *testing.T) {
+	ps, _ := exactTestbed(t, rawExactConfig, true)
 	now := time.Unix(900, 0)
 
 	for _, tc := range []struct {
 		expr string
 		want []string // decisions that must be recorded
 	}{
-		{expr: "count(up)", want: []string{"aggregate/fallback/exact_aggregates"}},
-		{expr: "sum by (job) (http_requests)", want: []string{"aggregate/fallback/exact_aggregates"}},
-		{expr: "count(count by (instance) (up))", want: []string{"aggregate/fallback/exact_aggregates"}},
-		{expr: "sum(rate(http_requests[5m]))", want: []string{"aggregate/fallback/exact_aggregates", "call/fallback/exact_aggregates"}},
-		{expr: "max_over_time(sum(http_requests)[10m:1m])", want: []string{"subquery/fallback/exact_aggregates"}},
-		{expr: "min(http_requests) > 100", want: []string{"aggregate/fallback/exact_aggregates", "binary/fallback/exact_aggregates"}},
+		{expr: "count(up)", want: []string{"aggregate/fallback/exact"}},
+		{expr: "sum by (job) (http_requests)", want: []string{"aggregate/fallback/exact"}},
+		{expr: "count(count by (instance) (up))", want: []string{"aggregate/fallback/exact"}},
+		{expr: "sum(rate(http_requests[5m]))", want: []string{"aggregate/fallback/exact", "call/fallback/exact"}},
+		{expr: "max_over_time(sum(http_requests)[10m:1m])", want: []string{"subquery/fallback/exact"}},
+		{expr: "min(http_requests) > 100", want: []string{"aggregate/fallback/exact", "binary/fallback/exact"}},
 	} {
 		t.Run(tc.expr, func(t *testing.T) {
 			decisions := pushdownDecisions(t)
@@ -382,12 +382,12 @@ func TestExactAggregates_FallbackDedupsRawFanOut(t *testing.T) {
 	}
 }
 
-// TestExactAggregates_FlagOffKeepsPushdown pins the other half of the
+// TestExact_FlagOffKeepsPushdown pins the other half of the
 // contract: with cross_group_dedup on but the flag off, aggregations are still
 // pushed down. Gating on the wrong flag would be invisible in the answers of
 // an overlap-free deployment and shows up only here.
-func TestExactAggregates_FlagOffKeepsPushdown(t *testing.T) {
-	ps, _ := exactAggregatesTestbed(t, rawExactAggregatesConfig, false)
+func TestExact_FlagOffKeepsPushdown(t *testing.T) {
+	ps, _ := exactTestbed(t, rawExactConfig, false)
 	now := time.Unix(900, 0)
 
 	for _, expr := range []string{"count(up)", "sum by (job) (http_requests)", "min(http_requests) > 100"} {
@@ -398,8 +398,8 @@ func TestExactAggregates_FlagOffKeepsPushdown(t *testing.T) {
 			got := decisions()
 			pushed := false
 			for key, v := range got {
-				if strings.Contains(key, "exact_aggregates") {
-					t.Errorf("%s: declined for exact_aggregates with the flag off: %v", expr, got)
+				if strings.HasSuffix(key, "/exact") {
+					t.Errorf("%s: declined for exact with the flag off: %v", expr, got)
 				}
 				if v > 0 && (strings.HasPrefix(key, "aggregate/pushed") || strings.HasPrefix(key, "binary/pushed")) {
 					pushed = true
@@ -412,11 +412,11 @@ func TestExactAggregates_FlagOffKeepsPushdown(t *testing.T) {
 	}
 }
 
-// TestExactAggregates_ConfigReloadFlipsDecision covers the SIGHUP path: the
+// TestExact_ConfigReloadFlipsDecision covers the SIGHUP path: the
 // flag lives in the state ApplyConfig swaps in, so a reload has to change the
 // decision without a restart.
-func TestExactAggregates_ConfigReloadFlipsDecision(t *testing.T) {
-	store := promqltest.LoadedStorage(t, exactAggregatesData)
+func TestExact_ConfigReloadFlipsDecision(t *testing.T) {
+	store := promqltest.LoadedStorage(t, exactData)
 	defer store.Close()
 
 	srvA, addrA, stopA := startAPIForTest(store)
@@ -430,21 +430,21 @@ func TestExactAggregates_ConfigReloadFlipsDecision(t *testing.T) {
 		<-stopB
 	}()
 
-	ps := getProxyStorage(fmt.Sprintf(rawExactAggregatesConfig, "false", addrA, addrB))
+	ps := getProxyStorage(fmt.Sprintf(rawExactConfig, "false", addrA, addrB))
 	now := time.Unix(900, 0)
 
 	if got := formatVector(evalInstant(t, ps, ps.NodeReplacer, "count(up)", now)); got != "{} 6" {
 		t.Fatalf("flag off: count(up) = %q, want the documented double count %q", got, "{} 6")
 	}
 
-	if err := ps.ApplyConfig(parseProxeusConfig(t, fmt.Sprintf(rawExactAggregatesConfig, "true", addrA, addrB))); err != nil {
+	if err := ps.ApplyConfig(parseProxeusConfig(t, fmt.Sprintf(rawExactConfig, "true", addrA, addrB))); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 	if got := formatVector(evalInstant(t, ps, ps.NodeReplacer, "count(up)", now)); got != "{} 3" {
 		t.Fatalf("after reload with the flag on: count(up) = %q, want %q", got, "{} 3")
 	}
 
-	if err := ps.ApplyConfig(parseProxeusConfig(t, fmt.Sprintf(rawExactAggregatesConfig, "false", addrA, addrB))); err != nil {
+	if err := ps.ApplyConfig(parseProxeusConfig(t, fmt.Sprintf(rawExactConfig, "false", addrA, addrB))); err != nil {
 		t.Fatalf("reload back: %v", err)
 	}
 	if got := formatVector(evalInstant(t, ps, ps.NodeReplacer, "count(up)", now)); got != "{} 6" {
