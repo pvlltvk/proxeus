@@ -117,6 +117,9 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > different groups never matches on its own: with `foo` in `backend="thanos"` and `bar` in `backend="vm-a"`,
 > `foo + bar` is empty and `foo or bar` returns both instead of dropping `bar`. Exclude the group label from the
 > matching, as in `foo + ignoring(backend) bar`, or match with `on(...)`.
+>
+> The same labels change `limit_ratio`: it picks series by a hash of their labels, so it selects a different subset
+> than the same query against one store holding all the series.
 
 > **Gap filling.** A hole in the dedup winner's series is filled from the other groups in priority order — typical
 > during a migration, when the new backend lacks history or the old one stops first. The winner's own samples are
