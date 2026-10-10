@@ -216,6 +216,21 @@ func registerOverrides(r *httprouter.Router, upstream http.Handler, overrides ma
 	}
 }
 
+// registerNoRemoteRead answers every method on the remote read path with 501.
+// The embedded API would serve it, but proxeus has no chunk querier and the
+// sample path returns series without samples.
+func registerNoRemoteRead(r *httprouter.Router, p string) {
+	h := func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "proxeus does not serve remote read; query it through the HTTP query API", http.StatusNotImplemented)
+	}
+	for _, m := range []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions,
+	} {
+		r.HandlerFunc(m, p, h)
+	}
+}
+
 // upstreamOptions sends every OPTIONS request that no route claimed to
 // upstream, so a CORS preflight, which the auth middleware lets through
 // unauthenticated, never reaches the proxeus UI or debug handlers.
@@ -562,6 +577,7 @@ func main() {
 	metadataPath := path.Join(webOptions.RoutePrefix, "/api/v1/metadata")
 	walReplayPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/walreplay")
 	flagsPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/flags")
+	remoteReadPath := path.Join(webOptions.RoutePrefix, "/api/v1/read")
 	proxeusPathPrefix := path.Join(webOptions.RoutePrefix, "/proxeus")
 	debugStripPrefix := strings.Trim(webOptions.RoutePrefix, "/")
 	// The injected index.html references bundled assets at <prefix>/assets/*
@@ -619,6 +635,8 @@ func main() {
 		walReplayPath: ps.WalReplayHandler,
 		flagsPath:     ps.FlagsHandler,
 	})
+
+	registerNoRemoteRead(r, remoteReadPath)
 
 	stopping := false
 	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
