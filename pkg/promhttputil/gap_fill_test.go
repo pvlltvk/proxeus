@@ -489,3 +489,245 @@ func TestPriorityMergeSampleStream_MatchesReference(t *testing.T) {
 		}
 	}
 }
+
+func TestPriorityMergeSampleStream_FillerMarkersAcrossLevels(t *testing.T) {
+	tests := []struct {
+		name       string
+		base       *model.SampleStream
+		fillers    []*model.SampleStream
+		gap        model.Time
+		wantValues []model.SamplePair
+	}{
+		{
+			name:       "level 2 fills after the level 1 marker",
+			base:       stream(sp(0, 1), staleAt(10)),
+			fillers:    []*model.SampleStream{stream(sp(20, 101), staleAt(30)), stream(sp(40, 201))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), staleAt(10), sp(20, 101), staleAt(30), sp(40, 201)},
+		},
+		{
+			name:       "level 2 marker is kept after level 1 marker",
+			base:       stream(sp(0, 1), staleAt(10)),
+			fillers:    []*model.SampleStream{stream(sp(20, 101), staleAt(30)), stream(sp(40, 201), staleAt(50))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), staleAt(10), sp(20, 101), staleAt(30), sp(40, 201), staleAt(50)},
+		},
+		{
+			name:       "level 1 marker at effHi is excluded, one before is kept",
+			base:       stream(sp(0, 1), sp(30, 2)),
+			fillers:    []*model.SampleStream{stream(sp(10, 101), staleAt(28)), stream(sp(20, 201))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(20, 201), sp(30, 2)},
+		},
+		{
+			name:       "level 1 marker one before effHi",
+			base:       stream(sp(0, 1), sp(30, 2)),
+			fillers:    []*model.SampleStream{stream(sp(10, 101), staleAt(27)), stream(sp(20, 201))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(20, 201), staleAt(27), sp(30, 2)},
+		},
+		{
+			name:       "level 1 marker at effLo is excluded",
+			base:       stream(sp(0, 1), sp(30, 2)),
+			fillers:    []*model.SampleStream{stream(staleAt(2), sp(10, 101))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(30, 2)},
+		},
+		{
+			name:       "level 1 marker just inside effLo ends nothing and is dropped",
+			base:       stream(sp(0, 1), sp(30, 2)),
+			fillers:    []*model.SampleStream{stream(staleAt(3), sp(10, 101))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(30, 2)},
+		},
+		{
+			name:       "level 1 marker on a base timestamp never lands",
+			base:       stream(sp(0, 1), sp(30, 2)),
+			fillers:    []*model.SampleStream{stream(sp(0, 100), sp(10, 101), staleAt(30))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(30, 2)},
+		},
+		{
+			name:       "consecutive filler markers keep only the first",
+			base:       stream(sp(0, 1), sp(30, 2)),
+			fillers:    []*model.SampleStream{stream(sp(10, 101), staleAt(12), staleAt(14))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), staleAt(12), sp(30, 2)},
+		},
+		{
+			name:       "live filler with an internal gap filled deeper still ends with its marker",
+			base:       stream(sp(0, 1), sp(60, 2)),
+			fillers:    []*model.SampleStream{stream(sp(10, 101), staleAt(30)), stream(sp(20, 201))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(20, 201), staleAt(30), sp(60, 2)},
+		},
+		{
+			name:       "dropped level 1 marker still lets level 2 fill after it",
+			base:       stream(sp(0, 1), sp(60, 2)),
+			fillers:    []*model.SampleStream{stream(staleAt(20)), stream(sp(25, 201))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(25, 201), sp(60, 2)},
+		},
+		{
+			name:       "liveness restarts per base gap",
+			base:       stream(sp(0, 1), sp(30, 2), sp(60, 3)),
+			fillers:    []*model.SampleStream{stream(sp(10, 101), sp(40, 102), staleAt(50))},
+			gap:        8,
+			wantValues: []model.SamplePair{sp(0, 1), sp(10, 101), sp(30, 2), sp(40, 102), staleAt(50), sp(60, 3)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := PriorityMergeSampleStream(tc.base, tc.fillers, tc.gap)
+			assertSamplePairsEqual(t, got.Values, tc.wantValues)
+		})
+	}
+}
+
+type tagged struct {
+	t     int64
+	stale bool
+	id    float64
+	hist  bool
+}
+
+func taggedOf(s *model.SampleStream) []tagged {
+	var out []tagged
+	for _, p := range s.Values {
+		out = append(out, tagged{int64(p.Timestamp), value.IsStaleNaN(float64(p.Value)), float64(p.Value), false})
+	}
+	for _, p := range s.Histograms {
+		out = append(out, tagged{int64(p.Timestamp), value.IsStaleNaN(float64(p.Histogram.Sum)), float64(p.Histogram.Sum), true})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].t < out[j].t })
+	return out
+}
+
+// Histograms must behave exactly like floats on the shared timeline: run the
+// float oracle on an all-float copy, then compare per timestamp with the
+// sample type preserved. Also checks structural invariants that don't depend
+// on the algorithm: sorted unique output, every base sample kept, and
+// everything else lands only inside a base gap and outside the margin.
+func TestPriorityMergeSampleStream_MixedTypesMatchReferenceAndInvariants(t *testing.T) {
+	rnd := rand.New(rand.NewSource(7))
+	next := 0.0
+	series := func(n int, maxT int64) (floats []model.SamplePair, mixed *model.SampleStream) {
+		mixed = &model.SampleStream{}
+		seen := map[int64]bool{}
+		var ts []int64
+		for i := 0; i < n; i++ {
+			x := rnd.Int63n(maxT)
+			if !seen[x] {
+				seen[x] = true
+				ts = append(ts, x)
+			}
+		}
+		sort.Slice(ts, func(i, j int) bool { return ts[i] < ts[j] })
+		for _, x := range ts {
+			v := model.SampleValue(math.Float64frombits(value.StaleNaN))
+			if rnd.Float64() >= 0.2 {
+				next++
+				v = model.SampleValue(next)
+			}
+			floats = append(floats, model.SamplePair{Timestamp: model.Time(x), Value: v})
+			if rnd.Intn(2) == 0 {
+				mixed.Values = append(mixed.Values, floats[len(floats)-1])
+			} else {
+				mixed.Histograms = append(mixed.Histograms, model.SampleHistogramPair{Timestamp: model.Time(x), Histogram: &model.SampleHistogram{Sum: model.FloatString(v), Count: 1}})
+			}
+		}
+		return floats, mixed
+	}
+
+	for trial := 0; trial < 2000; trial++ {
+		baseF, baseM := series(rnd.Intn(10), 400)
+		var fillersF [][]model.SamplePair
+		var fillersM []*model.SampleStream
+		for i, n := 0, rnd.Intn(4); i < n; i++ {
+			f, m := series(rnd.Intn(12), 400)
+			fillersF = append(fillersF, f)
+			fillersM = append(fillersM, m)
+		}
+		gap := model.Time(1 + rnd.Intn(60))
+
+		want := referenceFillGaps(baseF, fillersF, gap)
+		got, _ := PriorityMergeSampleStream(baseM, fillersM, gap)
+		gotT := taggedOf(got)
+
+		fail := func(format string, args ...any) {
+			t.Fatalf("trial %d gap=%d base=%v fillers=%v\n got: %v\n"+format, append([]any{trial, gap, baseF, fillersF, gotT}, args...)...)
+		}
+
+		if len(gotT) != len(want) {
+			fail("want: %v", want)
+		}
+		for i, w := range want {
+			g := gotT[i]
+			if g.t != int64(w.Timestamp) || g.stale != value.IsStaleNaN(float64(w.Value)) || (!g.stale && g.id != float64(w.Value)) {
+				fail("mismatch at %d, want: %v", i, want)
+			}
+		}
+
+		for _, g := range gotT {
+			if g.stale {
+				continue
+			}
+			var src *model.SampleStream
+			for _, s := range append([]*model.SampleStream{baseM}, fillersM...) {
+				for _, p := range taggedOf(s) {
+					if p.id == g.id {
+						src = s
+						if p.hist != g.hist {
+							fail("sample id %v changed type", g.id)
+						}
+					}
+				}
+			}
+			if src == nil {
+				fail("sample id %v from nowhere", g.id)
+			}
+		}
+
+		baseT := taggedOf(baseM)
+		baseAt := map[int64]bool{}
+		for _, b := range baseT {
+			baseAt[b.t] = true
+		}
+		for i, g := range gotT {
+			if i > 0 && g.t <= gotT[i-1].t {
+				fail("not strictly increasing at %d", i)
+			}
+		}
+		for _, b := range baseT {
+			found := false
+			for _, g := range gotT {
+				if g.t == b.t && g.stale == b.stale && g.hist == b.hist && (g.stale || g.id == b.id) {
+					found = true
+				}
+			}
+			if !found {
+				fail("base sample %v lost", b)
+			}
+		}
+		margin := int64(gap / 4)
+		for _, g := range gotT {
+			if baseAt[g.t] {
+				continue
+			}
+			var prev, nxt *tagged
+			for i := range baseT {
+				if baseT[i].t < g.t {
+					prev = &baseT[i]
+				} else if baseT[i].t > g.t && nxt == nil {
+					nxt = &baseT[i]
+				}
+			}
+			if prev != nil && g.t-prev.t <= margin || nxt != nil && nxt.t-g.t <= margin {
+				fail("filler sample %v inside margin of base", g)
+			}
+			if prev != nil && nxt != nil && !prev.stale && nxt.t-prev.t < int64(gap) {
+				fail("filler sample %v inside gapless base coverage", g)
+			}
+		}
+	}
+}
