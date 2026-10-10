@@ -320,7 +320,7 @@ var knownDivergences = []knownDiv{
 		exprs:     []string{"foo + bar", "foo or bar"},
 	},
 	{
-		// Without cross_group_exact_aggregates per-series calls and selectors are
+		// Without cross_group_exact per-series calls and selectors are
 		// evaluated in each group, so a series split at a migration seam is
 		// evaluated per piece. Documented; exact mode is the answer.
 		id:        "seam outside exact mode",

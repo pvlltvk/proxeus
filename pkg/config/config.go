@@ -178,11 +178,11 @@ type ProxeusConfig struct {
 	// aggregations (sum(up), count(...) etc.) fan out per-group PARTIALS that
 	// the engine re-combines, so those are unioned, never deduped — a series
 	// present in multiple groups appears once in `up` but contributes to every
-	// group's partial in `count(up)`. If exact aggregates over overlapping
-	// groups matter, enable CrossGroupExactAggregates.
+	// group's partial in `count(up)`. If exact results over overlapping
+	// groups matter, enable CrossGroupExact.
 	CrossGroupDedup bool `yaml:"cross_group_dedup"`
 
-	// CrossGroupExactAggregates, when true, makes queries exact over
+	// CrossGroupExact, when true, makes queries exact over
 	// overlapping server_groups and migration seams: proxeus declines all
 	// pushdown while more than one server_group is configured, so the engine
 	// evaluates the whole query over deduplicated, gap-filled raw series
@@ -194,7 +194,7 @@ type ProxeusConfig struct {
 	// Cost: raw samples cross the network instead of per-group partials and
 	// step-aligned results, which is the expensive path — a wide range now
 	// transfers every sample of every series the query reads.
-	CrossGroupExactAggregates bool `yaml:"cross_group_exact_aggregates"`
+	CrossGroupExact bool `yaml:"cross_group_exact"`
 
 	// CrossGroupDedupMetadata extends the same reduced-fingerprint dedup to
 	// /api/v1/series so Grafana label browsers and dashboards don't show one
@@ -228,7 +228,7 @@ type ProxeusConfig struct {
 }
 
 // Validate checks the cross-group flag dependencies. CrossGroupDedupMetadata,
-// CrossGroupExactAggregates and CrossGroupPartialResponse only affect the
+// CrossGroupExact and CrossGroupPartialResponse only affect the
 // cross-group fan-out/dedup machinery, so none makes sense without
 // CrossGroupDedup also being enabled.
 func (c *ProxeusConfig) Validate() error {
@@ -238,8 +238,8 @@ func (c *ProxeusConfig) Validate() error {
 	// Without dedup the raw fan-out returns both groups' series, so the
 	// locally computed aggregate double-counts anyway — the flag would look
 	// like a fix while changing nothing but the query cost.
-	if c.CrossGroupExactAggregates && !c.CrossGroupDedup {
-		return fmt.Errorf("cross_group_exact_aggregates: true requires cross_group_dedup: true")
+	if c.CrossGroupExact && !c.CrossGroupDedup {
+		return fmt.Errorf("cross_group_exact: true requires cross_group_dedup: true")
 	}
 	if c.CrossGroupPartialResponse && !c.CrossGroupDedup {
 		return fmt.Errorf("cross_group_partial_response: true requires cross_group_dedup: true")

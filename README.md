@@ -74,10 +74,10 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 > per piece: `rate()` over a window that straddles the seam sees only one side, and a group that stopped receiving
 > the series can still win with its last sample for the 5m lookback.
 >
-> **Exact aggregates:** `cross_group_exact_aggregates: true` (requires `cross_group_dedup`) fixes both. With more
+> **Exact mode:** `cross_group_exact: true` (requires `cross_group_dedup`) fixes both. With more
 > than one `server_group` proxeus pushes nothing down, so the engine evaluates the whole query over the deduplicated,
 > gap-filled raw series: `count(up)` matches `up`, and `rate()` across a seam matches a single store holding the full
-> history. The decision is visible as `proxeus_pushdown_nodes_total{result="fallback",reason="exact_aggregates"}`.
+> history. The decision is visible as `proxeus_pushdown_nodes_total{result="fallback",reason="exact"}`.
 > The cost is the point of the trade: raw samples cross the network instead of per-group partials and step-aligned
 > results, which hurts most on wide ranges and high cardinality, and a query that used to fit under
 > `--query.max-samples` can now exceed it and fail outright. A single-`server_group` deployment is unaffected — one backend sees the whole series set, so there is
@@ -135,7 +135,7 @@ racy. Collisions are counted in `proxeus_cross_group_dedup_collisions_total`.
 >
 > Values can differ slightly at a filled seam (downsampled Thanos next to raw VictoriaMetrics, or different scrape
 > moments), as with Thanos Query's own replica dedup. Pushed-down aggregations are not deduped and so not filled; with
-> `cross_group_exact_aggregates: true` they are. Every series found in more than one group has all its copies read,
+> `cross_group_exact: true` they are. Every series found in more than one group has all its copies read,
 > which costs memory when most series overlap.
 
 **Backend dialects.** Declaring `backend_type` on a `server_group` (`prometheus`, `thanos`, `victoriametrics`,

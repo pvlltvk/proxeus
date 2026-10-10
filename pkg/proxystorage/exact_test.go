@@ -18,28 +18,28 @@ import (
 	"github.com/pvlltvk/proxeus/pkg/promclient"
 )
 
-// newExactAggregatesStorage builds a ProxyStorage with n server_groups and
-// cross_group_exact_aggregates set as given.
-func newExactAggregatesStorage(client promclient.API, n int, exact bool) *ProxyStorage {
+// newExactStorage builds a ProxyStorage with n server_groups and
+// cross_group_exact set as given.
+func newExactStorage(client promclient.API, n int, exact bool) *ProxyStorage {
 	ps := &ProxyStorage{}
 	ps.state.Store(&proxyStorageState{
 		client: client,
 		sgs:    newServerGroups(n),
 		cfg: &proxyconfig.Config{
 			ProxeusConfig: proxyconfig.ProxeusConfig{
-				CrossGroupDedup:           exact,
-				CrossGroupExactAggregates: exact,
+				CrossGroupDedup: exact,
+				CrossGroupExact: exact,
 			},
 		},
 	})
 	return ps
 }
 
-// TestNodeReplacerExactAggregates pins the pushdown decision for
-// cross_group_exact_aggregates: with more than one server_group nothing is
+// TestNodeReplacerExact pins the pushdown decision for
+// cross_group_exact: with more than one server_group nothing is
 // pushed down (so the engine evaluates over deduped raw series), with one
 // server_group it still is.
-func TestNodeReplacerExactAggregates(t *testing.T) {
+func TestNodeReplacerExact(t *testing.T) {
 	// One expression per branch of the aggregation switch, plus one per
 	// other node kind that pushes down without the flag.
 	tests := []struct {
@@ -79,24 +79,24 @@ func TestNodeReplacerExactAggregates(t *testing.T) {
 		t.Run(test.expr, func(t *testing.T) {
 			api := &stubAPI{}
 
-			deltas := counterDeltas(t, pushdownNodes.WithLabelValues(test.node, resultFallback, reasonExactAggregates))
-			if node := replace(t, newExactAggregatesStorage(api, 2, true), test.expr); node != nil {
-				t.Fatalf("exact aggregates, 2 server_groups: pushed down as %s, want no replacement", node)
+			deltas := counterDeltas(t, pushdownNodes.WithLabelValues(test.node, resultFallback, reasonExact))
+			if node := replace(t, newExactStorage(api, 2, true), test.expr); node != nil {
+				t.Fatalf("exact mode, 2 server_groups: pushed down as %s, want no replacement", node)
 			}
 			if got := deltas()[0]; got != 1 {
-				t.Fatalf("pushdown_nodes{node=%s,result=%s,reason=%s}: got %v, want 1", test.node, resultFallback, reasonExactAggregates, got)
+				t.Fatalf("pushdown_nodes{node=%s,result=%s,reason=%s}: got %v, want 1", test.node, resultFallback, reasonExact, got)
 			}
 			if queries := api.getQueries(); len(queries) != 0 {
-				t.Fatalf("exact aggregates sent queries downstream: %v", queries)
+				t.Fatalf("exact mode sent queries downstream: %v", queries)
 			}
 
-			if node := replace(t, newExactAggregatesStorage(api, 2, false), test.expr); node == nil {
+			if node := replace(t, newExactStorage(api, 2, false), test.expr); node == nil {
 				t.Fatal("flag off, 2 server_groups: no replacement, want pushdown")
 			}
 			api.getQueries()
 
-			if node := replace(t, newExactAggregatesStorage(api, 1, true), test.expr); node == nil {
-				t.Fatal("exact aggregates, 1 server_group: no replacement, want pushdown")
+			if node := replace(t, newExactStorage(api, 1, true), test.expr); node == nil {
+				t.Fatal("exact mode, 1 server_group: no replacement, want pushdown")
 			}
 		})
 	}
@@ -132,13 +132,13 @@ func (a *overlapStub) GetValue(ctx context.Context, start, end time.Time, matche
 	return a.set()
 }
 
-// TestExactAggregates_E2E_CountOverlap is the acceptance property: one series
+// TestExact_E2E_CountOverlap is the acceptance property: one series
 // present in two overlapping server_groups must be counted once. Without the
 // flag each group answers `count(up)` with its own partial and the engine adds
 // them up to 2 -- the double count cross_group_dedup cannot fix, since it only
 // sees the partials. With the flag the aggregation is not pushed down, the raw
 // fan-out goes through cross-group dedup, and count sees the one series.
-func TestExactAggregates_E2E_CountOverlap(t *testing.T) {
+func TestExact_E2E_CountOverlap(t *testing.T) {
 	now := time.Unix(10000, 0)
 
 	count := func(t *testing.T, exact bool) float64 {
@@ -151,7 +151,7 @@ func TestExactAggregates_E2E_CountOverlap(t *testing.T) {
 			t.Fatalf("NewCrossGroupMultiAPI: %v", err)
 		}
 
-		ps := newExactAggregatesStorage(client, 2, exact)
+		ps := newExactStorage(client, 2, exact)
 		eng := promql.NewEngine(promql.EngineOpts{
 			MaxSamples:    1e6,
 			Timeout:       10 * time.Second,
@@ -178,10 +178,10 @@ func TestExactAggregates_E2E_CountOverlap(t *testing.T) {
 	}
 
 	if got := count(t, true); got != 1 {
-		t.Fatalf("with cross_group_exact_aggregates: count(up) = %v, want 1", got)
+		t.Fatalf("with cross_group_exact: count(up) = %v, want 1", got)
 	}
 	// Control: the documented double count, proving the flag is what fixes it.
 	if got := count(t, false); got != 2 {
-		t.Fatalf("without cross_group_exact_aggregates: count(up) = %v, want the 2 of the union", got)
+		t.Fatalf("without cross_group_exact: count(up) = %v, want the 2 of the union", got)
 	}
 }

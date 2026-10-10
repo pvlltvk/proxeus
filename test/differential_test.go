@@ -36,7 +36,7 @@ var (
 	modeRR      = diffMode{name: "rr", remoteRead: true, fillGaps: true}
 	modeRRExact = diffMode{name: "rr_exact", remoteRead: true, exact: true, fillGaps: true}
 
-	// Without cross_group_exact_aggregates an aggregate over overlapping or
+	// Without cross_group_exact an aggregate over overlapping or
 	// seamed groups is documented to double count, so those scenarios only run
 	// the modes that define a reference.
 	allDiffModes  = []diffMode{modeDefault, modeExact, modeNoFill, modeRR, modeRRExact}
@@ -61,7 +61,7 @@ type diffScenario struct {
 
 func diffConfig(addrs []string, m diffMode, inject map[int][]string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "proxeus:\n  cross_group_dedup: true\n  cross_group_exact_aggregates: %t\n  cross_group_dedup_fill_gaps: %t\n  server_groups:\n",
+	fmt.Fprintf(&b, "proxeus:\n  cross_group_dedup: true\n  cross_group_exact: %t\n  cross_group_dedup_fill_gaps: %t\n  server_groups:\n",
 		m.exact, m.fillGaps)
 	for i, addr := range addrs {
 		fmt.Fprintf(&b, "    - static_configs:\n        - targets:\n          - %s\n      labels:\n        az: g%d\n      remote_read: %t\n",
@@ -79,7 +79,7 @@ func diffConfig(addrs []string, m diffMode, inject map[int][]string) string {
 // diffEval renders the result of one query as comparable text. A failed query is
 // an outcome too: both sides erroring counts as a match.
 func diffEval(q storage.Queryable, replacer parser.NodeReplacer, expr string, instant int64, rangeEnd int64) string {
-	eng := exactAggregatesEngine()
+	eng := exactEngine()
 	eng.NodeReplacer = replacer
 	var (
 		query promql.Query
