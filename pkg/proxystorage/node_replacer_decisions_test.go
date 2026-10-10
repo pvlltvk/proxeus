@@ -215,12 +215,21 @@ func TestNodeReplacerDecisions(t *testing.T) {
 		},
 
 		// --- replaceBinary ----------------------------------------------
-		// vector(1) is not a literal, so there is no literal side to pair the
-		// selector with.
+		// vector(1) is not a literal and not a per-series call.
 		{
 			expr: "foo > vector(1)",
 			decisions: []string{
-				"binary/fallback/no_literal_operand=1", "call/fallback/offset_mismatch=1",
+				"binary/fallback/unsupported_func=1", "call/fallback/offset_mismatch=1",
+				"vector_selector/pushed/=1",
+			},
+			calls: []string{"Query[agg=false] foo @ 1700000000000"},
+		},
+		// A cross-series call below the root keeps the whole subtree with the
+		// engine; the selector inside is still pushed on its own.
+		{
+			expr: "sum(vector(scalar(foo)))",
+			decisions: []string{
+				"aggregate/fallback/unsupported_func=1", "call/fallback/unsupported_func=2",
 				"vector_selector/pushed/=1",
 			},
 			calls: []string{"Query[agg=false] foo @ 1700000000000"},
@@ -291,7 +300,7 @@ func TestNodeReplacerDecisions(t *testing.T) {
 		{
 			expr: "sum(foo) + absent_over_time((vector(1))[10m:1m])",
 			decisions: []string{
-				"aggregate/pushed/=1", "binary/fallback/no_literal_operand=1",
+				"aggregate/pushed/=1", "binary/fallback/unsupported_func=1",
 				"call/fallback/offset_mismatch=1", "call/fallback/subquery_child=1",
 				"call/fallback/unsupported_func=1", "subquery/fallback/no_inner_pushdown=1",
 			},
@@ -302,7 +311,7 @@ func TestNodeReplacerDecisions(t *testing.T) {
 		{
 			expr: "(bar + absent_over_time((vector(1))[5m:1m]))[10m:1m]",
 			decisions: []string{
-				"binary/fallback/no_literal_operand=1", "binary/fallback/subquery_child=1",
+				"binary/fallback/subquery_child=1", "binary/fallback/unsupported_func=1",
 				"call/fallback/offset_mismatch=1", "call/fallback/subquery_child=3",
 				"call/fallback/unsupported_func=1", "subquery/fallback/no_inner_pushdown=1",
 				"subquery/fallback/subquery_child=1", "subquery/pushed/=1",
@@ -318,6 +327,33 @@ func TestNodeReplacerDecisions(t *testing.T) {
 			calls:     []string{`Query[agg=false] sum_over_time(foo[10m:1m] @ 100.000) @ 1700000000000`},
 		},
 
+		// Cross-series calls hide in parameters and operands too.
+		{
+			expr:      "topk(scalar(vector(1)), foo)",
+			decisions: []string{"aggregate/fallback/unsupported_func=1", "call/fallback/offset_mismatch=2", "vector_selector/pushed/=1"},
+			calls:     []string{"Query[agg=false] foo @ 1700000000000"},
+		},
+		{
+			expr:      "sum(foo * scalar(vector(1)))",
+			decisions: []string{"aggregate/fallback/unsupported_func=1", "binary/fallback/unsupported_func=1", "call/fallback/offset_mismatch=2", "vector_selector/pushed/=1"},
+			calls:     []string{"Query[agg=false] foo @ 1700000000000"},
+		},
+		// label_replace is per-series and keeps the whole subtree pushed.
+		{
+			expr:      `sum by (x) (label_replace(foo, "x", "y", "id", ".*"))`,
+			decisions: []string{"aggregate/pushed/=1"},
+			calls:     []string{`Query[agg=true] sum by (x) (label_replace(foo, "x", "y", "id", ".*")) @ 1700000000000`},
+		},
+		{
+			expr:      "sum(rate(foo[5m]))",
+			decisions: []string{"aggregate/pushed/=1"},
+			calls:     []string{"Query[agg=true] sum(rate(foo[5m])) @ 1700000000000"},
+		},
+		{
+			expr:      "histogram_quantile(0.9, sum by (le) (rate(foo_bucket[5m])))",
+			decisions: []string{"aggregate/pushed/=1", "call/fallback/nested_aggregate=1"},
+			calls:     []string{"Query[agg=true] sum by (le) (rate(foo_bucket[5m])) @ 1700000000000"},
+		},
 		// --- replaceAggregate: the avg rewrites -------------------------
 		// __name__ in the grouping needs the preserve-label workaround, since
 		// the downstream aggregation drops the metric name.

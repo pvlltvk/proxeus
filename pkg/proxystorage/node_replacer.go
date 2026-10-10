@@ -110,6 +110,7 @@ func (r *nodeReplacer) prepare() (bool, error) {
 	offsetFinder := &promclient.OffsetFinder{}
 	vecFinder := &promclient.BooleanFinder{Func: isVectorSelector}
 	timestampFinder := &promclient.BooleanFinder{Func: hasTimestamp}
+	crossSeriesCallFinder := &promclient.BooleanFinder{Func: isCrossSeriesCall}
 	// atTimestampFinder records the @ timestamp itself (in ms) so we can
 	// issue an instant query at a guaranteed-safe time when pushing down
 	// step-invariant subtrees — see queryRangeAt.
@@ -125,7 +126,7 @@ func (r *nodeReplacer) prepare() (bool, error) {
 	// is configured).
 	histFinder := &histogramFinder{isHistogramName: r.p.histogramNamePredicate()}
 
-	visitor := promclient.NewMultiVisitor([]parser.Visitor{aggFinder, offsetFinder, vecFinder, timestampFinder, r.atTimestampFinder, r.atUnsafeFinder, histFinder})
+	visitor := promclient.NewMultiVisitor([]parser.Visitor{aggFinder, offsetFinder, vecFinder, timestampFinder, crossSeriesCallFinder, r.atTimestampFinder, r.atUnsafeFinder, histFinder})
 
 	if _, err := parser.Walk(r.ctx, visitor, r.s, r.node, nil, nil); err != nil {
 		return false, err
@@ -193,6 +194,14 @@ func (r *nodeReplacer) prepare() (bool, error) {
 		return true, nil
 	}
 	r.offset = offsetFinder.Offset
+
+	// A call anywhere below depends on the whole input (scalar, vector, absent,
+	// ...), which no group has alone. A subquery re-runs the walk on its own
+	// expression, so it is left to that.
+	if crossSeriesCallFinder.Found > 0 && !isSubQuery(r.node) {
+		r.reason = reasonUnsupportedFunc
+		return true, nil
+	}
 
 	// keepOffsets is true when stripping the offsets and moving the downstream
 	// request window by them would change the answer. With an @ modifier the
@@ -860,6 +869,21 @@ func hasTimestamp(node parser.Node) bool {
 		return vs.Timestamp != nil
 	}
 	return false
+}
+
+func isCrossSeriesCall(node parser.Node) bool {
+	c, ok := node.(*parser.Call)
+	if !ok {
+		return false
+	}
+	if _, perSeries := perSeriesFuncs[c.Func.Name]; perSeries {
+		return false
+	}
+	switch c.Func.Name {
+	case "time", "pi", "label_replace", "label_join":
+		return false
+	}
+	return true
 }
 
 // isAtModifierUnsafeCall flags Call nodes whose result is NOT
