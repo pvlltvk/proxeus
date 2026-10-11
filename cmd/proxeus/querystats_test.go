@@ -278,3 +278,25 @@ func TestQueryStatsRendererKeepsBuiltinBytes(t *testing.T) {
 func strconvUnix(t time.Time) string {
 	return time.Unix(t.Unix(), 0).UTC().Format(time.RFC3339)
 }
+
+// stats.js wraps fetch, so it has to be in the page ahead of the Mantine
+// bundle that makes the requests.
+func TestInjectedReactAppLoadsStatsScriptFirst(t *testing.T) {
+	head, nav, err := loadReactScripts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := buildInjectedReactApp(&web.Options{RoutePrefix: "/", PageTitle: "Proxeus"}, head, nav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	stats := strings.Index(html, "data-proxeus-backend-stats")
+	bundle := strings.Index(html, `type="module"`)
+	if stats == -1 || bundle == -1 {
+		t.Fatalf("stats script at %d, bundle at %d: want both present", stats, bundle)
+	}
+	if stats > bundle {
+		t.Fatalf("stats script (at %d) comes after the Mantine bundle (at %d)", stats, bundle)
+	}
+}

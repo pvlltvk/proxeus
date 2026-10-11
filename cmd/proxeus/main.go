@@ -157,7 +157,7 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, notif
 	return nil
 }
 
-// loadReactScripts reads the embedded head.js/nav.js files used to inject
+// loadReactScripts reads the embedded head.js/stats.js/nav.js files used to inject
 // proxeus-specific behavior into the Mantine UI and wraps each in a <script>
 // tag. The embedded files are part of the binary, so a read failure here
 // indicates a build problem and is treated as a hard startup error by the
@@ -171,7 +171,13 @@ func loadReactScripts() (headScript, navScript string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("embedded nav.js missing: %w", err)
 	}
-	return "<script>" + string(head) + "</script>", "<script>" + string(nav) + "</script>", nil
+	// stats.js wraps fetch, so it goes in <head> with head.js, ahead of the
+	// Mantine bundle.
+	stats, err := injectionUI.Scripts.ReadFile("stats.js")
+	if err != nil {
+		return "", "", fmt.Errorf("embedded stats.js missing: %w", err)
+	}
+	return "<script>" + string(head) + "</script><script>" + string(stats) + "</script>", "<script>" + string(nav) + "</script>", nil
 }
 
 // reactRouteSet is the set of exact path segments that the Mantine UI handles.
