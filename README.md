@@ -409,6 +409,17 @@ percentiles and errors, `proxeus_server_group_targets` (alert on `== 0`), and cr
 > be evaluated centrally. The number to watch is the *sample volume* on the `raw` path, since that is what a long
 > range query actually costs.
 
+**Per-query backend stats.** With the `stats` parameter set (as for Prometheus), `/api/v1/query` and
+`/api/v1/query_range` add a `backends` section to `data.stats`: per `server_group` the number of requests, errors,
+series, samples and the summed request time, and the requests themselves — group, `pushdown` or `raw`, the query or
+selector as handed to the group (before per-target rewrites such as `inject_matchers`), time range, duration, series,
+samples and status. The list keeps the first 100 requests; `requestsTruncated` counts the rest, which still count
+towards the group totals. The query page shows the same data under each panel, in Table and Graph view.
+
+```sh
+curl -s 'http://localhost:8082/api/v1/query' --data-urlencode 'query=sum(up)' -d stats=true | jq .data.stats.backends
+```
+
 ## MCP endpoint
 
 Proxeus can serve a [Model Context Protocol](https://modelcontextprotocol.io) endpoint, so an agent can query the
