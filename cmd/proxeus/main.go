@@ -515,6 +515,8 @@ func main() {
 		// or startup panics.
 		ListenAddresses: []string{opts.BindAddr},
 
+		StatsRenderer: renderQueryStats,
+
 		Flags:       opts.ToFlags(),
 		PageTitle:   "Proxeus",
 		RoutePrefix: opts.RoutePrefix,
@@ -550,7 +552,7 @@ func main() {
 	// proxeus mounts it in-process and hands it every request its own router
 	// does not answer itself. It must not also be Run(), which would register
 	// the API routes a second time.
-	promHandler := webHandler.HTTPHandler()
+	promHandler := withQueryStats(webHandler.HTTPHandler(), webOptions.RoutePrefix, queryStatsGroups(ps))
 
 	// Create the proxeus inventory UI handler.
 	proxeusUIHandler, err := proxeusui.NewHandler(ps, webOptions.RoutePrefix)
