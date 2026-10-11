@@ -478,8 +478,12 @@ func (s *ServerGroup) loadTargetGroupMap(targetGroupMap map[string][]*targetgrou
 
 	newState := &ServerGroupState{
 		Targets: targets,
-		// Add error wrap for this specific servergroup
-		apiClient: &promclient.ErrorWrap{A: apiClient, Msg: fmt.Sprintf("error in servergroup ord=%d", s.Cfg.Ordinal)},
+		// Add error wrap for this specific servergroup. Query stats sit inside
+		// ignore_error/downgrade_error below, so a hidden failure still shows.
+		apiClient: &promclient.QueryStatsAPI{
+			API:     &promclient.ErrorWrap{A: apiClient, Msg: fmt.Sprintf("error in servergroup ord=%d", s.Cfg.Ordinal)},
+			Ordinal: s.Cfg.Ordinal,
+		},
 		ctx:       ctx,
 		ctxCancel: ctxCancel,
 	}
