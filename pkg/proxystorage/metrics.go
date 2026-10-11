@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 
 	"github.com/pvlltvk/proxeus/pkg/promclient"
+	"github.com/pvlltvk/proxeus/pkg/querystats"
 )
 
 // crossGroupDedupCollisions counts series collisions resolved by ordinal
@@ -140,10 +141,12 @@ type pushdownAPI struct {
 }
 
 func (a pushdownAPI) Query(ctx context.Context, query string, ts time.Time) storage.SeriesSet {
+	ctx = querystats.WithPath(ctx, querystats.PathPushdown)
 	return countSeriesSet(a.API.Query(ctx, query, ts), pathPushdown)
 }
 
 func (a pushdownAPI) QueryRange(ctx context.Context, query string, r v1.Range) storage.SeriesSet {
+	ctx = querystats.WithPath(ctx, querystats.PathPushdown)
 	return countSeriesSet(a.API.QueryRange(ctx, query, r), pathPushdown)
 }
 
@@ -156,6 +159,7 @@ type rawAPI struct {
 
 func (a rawAPI) GetValue(ctx context.Context, start, end time.Time, matchers []*labels.Matcher) storage.SeriesSet {
 	rawSeriesFetches.Inc()
+	ctx = querystats.WithPath(ctx, querystats.PathRaw)
 	return countSeriesSet(a.API.GetValue(ctx, start, end, matchers), pathRaw)
 }
 
