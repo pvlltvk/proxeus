@@ -5,74 +5,32 @@
   var PREFIX = (window.__PROXEUS_ROUTE_PREFIX__ || '');
   var API_PREFIX = PREFIX + '/api/v1/';
   var OPEN_KEY = 'proxeus.backendStats.open';
-  var MAX_KEPT = 50;
   var BLOCK_ATTR = 'data-proxeus-backend-stats';
 
-  // Latest `backends` stats per endpoint, keyed by the normalized query.
-  var latest = { query: {}, query_range: {} };
-  var received = 0;
-
-  function endpointOf(u) {
-    if (u.origin !== window.location.origin) return null;
-    if (u.pathname === API_PREFIX + 'query') return 'query';
-    if (u.pathname === API_PREFIX + 'query_range') return 'query_range';
-    return null;
-  }
-
-  function norm(q) {
-    return String(q).replace(/\s+/g, '');
-  }
-
-  function remember(endpoint, query, backends) {
-    var byQuery = latest[endpoint];
-    received++;
-    byQuery[norm(query)] = { query: query, backends: backends, seq: received };
-    var keys = Object.keys(byQuery);
-    if (keys.length > MAX_KEPT) {
-      keys.sort(function(a, b) { return byQuery[a].seq - byQuery[b].seq; });
-      delete byQuery[keys[0]];
-    }
-    scheduleRender();
+  function isRangeQuery(u) {
+    return u.origin === window.location.origin && u.pathname === API_PREFIX + 'query_range';
   }
 
   // Graph view doesn't ask for stats; add the parameter so its range queries
-  // report backends too. Responses are read from a clone, so Mantine sees them
-  // unchanged.
+  // report backends too.
   var origFetch = window.fetch;
   if (origFetch) {
     window.fetch = function(input, init) {
-      var endpoint = null, query = null;
       try {
         if (typeof input === 'string') {
           var u = new URL(input, window.location.href);
-          endpoint = endpointOf(u);
-          if (endpoint) {
-            query = u.searchParams.get('query');
-            if (endpoint === 'query_range' && !u.searchParams.has('stats')) {
-              u.searchParams.set('stats', 'true');
-              input = u.toString();
-            }
+          if (isRangeQuery(u) && !u.searchParams.has('stats')) {
+            u.searchParams.set('stats', 'true');
+            input = u.toString();
           }
         }
-      } catch (e) {
-        endpoint = null;
-      }
-      var p = origFetch.call(this, input, init);
-      if (!endpoint || query === null) return p;
-      return p.then(function(resp) {
-        try {
-          resp.clone().json().then(function(body) {
-            var b = body && body.data && body.data.stats && body.data.stats.backends;
-            if (b && b.groups) remember(endpoint, query, b);
-          }, function() {});
-        } catch (e) { /* not JSON: nothing to show */ }
-        return resp;
-      });
+      } catch (e) { /* leave the request as it was */ }
+      return origFetch.call(this, input, init);
     };
   }
 
   /* ---------------------------------------------------------------- */
-  /* Matching panels to stats                                          */
+  /* Finding each panel's own response                                 */
   /* ---------------------------------------------------------------- */
 
   function fiberOf(el) {
@@ -83,9 +41,8 @@
   }
 
   // The Table view component has props {panelIdx, expr, retriggerIdx}, the
-  // Graph view one {expr, node, range, ...}; both hold the expression that was
-  // last executed, which may differ from the editor's text.
-  function panelQuery(panelEl) {
+  // Graph view one {expr, node, range, ..., retriggerIdx}.
+  function viewComponent(panelEl) {
     var root = fiberOf(panelEl);
     if (!root) return null;
     var queue = [root], seen = 0;
@@ -93,28 +50,34 @@
       var f = queue.shift();
       seen++;
       var p = f.memoizedProps;
-      if (p && typeof p === 'object' && typeof p.expr === 'string' && 'retriggerIdx' in p) {
-        if ('panelIdx' in p) return { endpoint: 'query', expr: p.expr, node: null };
-        if ('node' in p) return { endpoint: 'query_range', expr: p.expr, node: p.node };
-      }
+      if (p && typeof p === 'object' && typeof p.expr === 'string' && 'retriggerIdx' in p &&
+          ('panelIdx' in p || 'node' in p)) return f;
       for (var c = f.child; c; c = c.sibling) queue.push(c);
     }
     return null;
   }
 
-  // An exact match on the executed expression; with an explain-tree node
-  // selected, Graph queries only that subexpression, so fall back to the
-  // newest stats whose query is part of the expression.
-  function statsFor(pq) {
-    var byQuery = latest[pq.endpoint];
-    var exact = byQuery[norm(pq.expr)];
-    if (exact && !pq.node) return exact;
-    if (!pq.node) return null;
-    var whole = norm(pq.expr), best = null;
-    Object.keys(byQuery).forEach(function(k) {
-      if (whole.indexOf(k) !== -1 && (!best || byQuery[k].seq > best.seq)) best = byQuery[k];
-    });
-    return best;
+  // Each view runs its query through one React Query observer, kept in the
+  // component's hook state. Its current result is the response the panel
+  // shows, whichever of the fiber's two copies the DOM node points to, so
+  // the stats always belong to the panel's own latest execution.
+  function backendsOf(comp) {
+    for (var h = comp.memoizedState; h; h = h.next) {
+      var obs = h.memoizedState;
+      if (!obs || typeof obs.getCurrentResult !== 'function') continue;
+      var r = obs.getCurrentResult();
+      if (!r || r.isError) return null;
+      var b = r.data && r.data.data && r.data.data.stats && r.data.data.stats.backends;
+      return b && b.groups ? b : null;
+    }
+    return null;
+  }
+
+  var ids = new WeakMap();
+  var nextId = 0;
+  function idOf(backends) {
+    if (!ids.has(backends)) ids.set(backends, ++nextId);
+    return ids.get(backends);
   }
 
   /* ---------------------------------------------------------------- */
@@ -168,14 +131,13 @@
   var CELL = 'padding:3px 10px 3px 0;border-bottom:1px solid var(--mantine-color-default-border);vertical-align:top;white-space:nowrap;';
   var NUM = CELL + 'text-align:right;font-variant-numeric:tabular-nums;';
 
-  function buildBlock(entry) {
-    var b = entry.backends;
+  function buildBlock(b) {
     var groups = b.groups || [];
     var requests = b.requests || [];
     var open = isOpen();
 
     var block = el('div', 'font-size:var(--mantine-font-size-xs);margin:2px 0 6px;align-self:stretch;width:100%;');
-    block.setAttribute(BLOCK_ATTR, String(entry.seq));
+    block.setAttribute(BLOCK_ATTR, String(idOf(b)));
 
     var summary = el('div', 'cursor:pointer;user-select:none;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;' + MUTED);
     summary.setAttribute('role', 'button');
@@ -253,17 +215,17 @@
       var panel = panels[i];
       if (panel.offsetParent === null) continue;
       var existing = panel.querySelector('[' + BLOCK_ATTR + ']');
-      var pq = panelQuery(panel);
-      var entry = pq ? statsFor(pq) : null;
-      if (!entry) {
+      var comp = viewComponent(panel);
+      var backends = comp ? backendsOf(comp) : null;
+      if (!backends) {
         if (existing) existing.remove();
         continue;
       }
-      if (existing && !forceAll && existing.getAttribute(BLOCK_ATTR) === String(entry.seq)) continue;
+      if (existing && !forceAll && existing.getAttribute(BLOCK_ATTR) === String(idOf(backends))) continue;
       var anchor = anchorIn(panel);
       if (!anchor) continue;
       if (existing) existing.remove();
-      anchor.insertAdjacentElement('afterend', buildBlock(entry));
+      anchor.insertAdjacentElement('afterend', buildBlock(backends));
     }
     forceAll = false;
   }
@@ -284,7 +246,7 @@
   }
 
   function start() {
-    new MutationObserver(scheduleRender).observe(document.body, { childList: true, subtree: true });
+    new MutationObserver(scheduleRender).observe(document.body, { childList: true, characterData: true, subtree: true });
     scheduleRender();
   }
 
