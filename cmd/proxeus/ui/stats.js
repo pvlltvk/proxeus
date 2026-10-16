@@ -62,15 +62,18 @@
   // shows, whichever of the fiber's two copies the DOM node points to, so
   // the stats always belong to the panel's own latest execution.
   function backendsOf(comp) {
+    var observer = null;
     for (var h = comp.memoizedState; h; h = h.next) {
       var obs = h.memoizedState;
       if (!obs || typeof obs.getCurrentResult !== 'function') continue;
-      var r = obs.getCurrentResult();
-      if (!r || r.isError) return null;
-      var b = r.data && r.data.data && r.data.data.stats && r.data.data.stats.backends;
-      return b && b.groups ? b : null;
+      if (observer) return null;
+      observer = obs;
     }
-    return null;
+    if (!observer) return null;
+    var r = observer.getCurrentResult();
+    if (!r || r.isError) return null;
+    var b = r.data && r.data.data && r.data.data.stats && r.data.data.stats.backends;
+    return b && b.groups ? b : null;
   }
 
   var ids = new WeakMap();
@@ -221,9 +224,12 @@
         if (existing) existing.remove();
         continue;
       }
-      if (existing && !forceAll && existing.getAttribute(BLOCK_ATTR) === String(idOf(backends))) continue;
       var anchor = anchorIn(panel);
-      if (!anchor) continue;
+      if (!anchor) {
+        if (existing) existing.remove();
+        continue;
+      }
+      if (existing && !forceAll && existing.getAttribute(BLOCK_ATTR) === String(idOf(backends))) continue;
       if (existing) existing.remove();
       anchor.insertAdjacentElement('afterend', buildBlock(backends));
     }
