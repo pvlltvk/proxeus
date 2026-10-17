@@ -211,7 +211,8 @@
   }
 
   function relTime(isoStr) {
-    if (!isoStr) return '-';
+    // Go's zero time: the target has not been probed yet.
+    if (!isoStr || isoStr.indexOf('0001-') === 0) return '-';
     var diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
     if (diff < 60) return diff + 's ago';
     if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
@@ -229,6 +230,16 @@
     return map[(btype || '').toLowerCase()] || '#868e96';
   }
 
+  // Mantine's theme variables, so the page follows the light/dark switch.
+  var TEXT = 'color:var(--mantine-color-text);';
+  var MUTED = 'color:var(--mantine-color-dimmed);';
+  var ERR = 'color:var(--mantine-color-red-text, #fa5252);';
+  var BORDER = '1px solid var(--mantine-color-default-border)';
+  var TINT = 'background:var(--mantine-color-gray-light);';
+  var CELL = 'padding:8px 16px;text-align:left;vertical-align:middle;border-bottom:' + BORDER + ';overflow-wrap:anywhere;';
+  // One fixed layout for every group's table, so the columns line up.
+  var COLGROUP = '<colgroup><col style="width:45%"><col style="width:15%"><col style="width:12%"><col style="width:28%"></colgroup>';
+
   function loadBackendsData(container) {
     var statusEl = document.getElementById('proxeus-backends-status');
     if (statusEl) statusEl.textContent = 'Refreshing...';
@@ -237,7 +248,7 @@
       .then(function(r) { return r.json(); })
       .then(function(data) { renderBackendsData(container, data); })
       .catch(function(err) {
-        container.innerHTML = '<p style="color:#fa5252">Failed to load backends: ' + err + '</p>';
+        container.innerHTML = '<p style="' + ERR + '">Failed to load backends: ' + err + '</p>';
       });
   }
 
@@ -245,54 +256,53 @@
     var groups = data.groups || [];
     var now = new Date().toLocaleTimeString();
     var html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">' +
-      '<h2 style="margin:0;font-size:1.25rem;font-weight:600;color:#1a1a1a;">Backends</h2>' +
-      '<span id="proxeus-backends-status" style="font-size:0.75rem;color:#868e96;">Updated ' + now + '</span>' +
+      '<h2 style="margin:0;font-size:1.25rem;font-weight:600;' + TEXT + '">Backends</h2>' +
+      '<span id="proxeus-backends-status" style="font-size:0.75rem;' + MUTED + '">Updated ' + now + '</span>' +
       '</div>';
 
     if (groups.length === 0) {
-      html += '<p style="color:#868e96;">No backend groups configured.</p>';
+      html += '<p style="' + MUTED + '">No backend groups configured.</p>';
     } else {
       groups.forEach(function(group) {
         var targets = group.targets || [];
         var totalUp = targets.filter(function(t) { return t.healthy; }).length;
         var dotColor = targets.length === 0 ? '#aaa' : (totalUp === 0 ? '#fa5252' : totalUp < targets.length ? '#fab005' : '#40c057');
 
-        html += '<div style="background:#fff;border:1px solid #e9ecef;border-radius:8px;margin-bottom:16px;overflow:hidden;">';
-        html += '<div style="padding:12px 16px;background:#f8f9fa;border-bottom:1px solid #e9ecef;display:flex;align-items:center;gap:8px;">' +
+        html += '<div style="background:var(--mantine-color-body);border:' + BORDER + ';border-radius:8px;margin-bottom:16px;overflow:hidden;">';
+        html += '<div style="padding:12px 16px;' + TINT + 'border-bottom:' + BORDER + ';display:flex;align-items:center;gap:8px;">' +
           '<span style="width:10px;height:10px;border-radius:50%;background:' + dotColor + ';display:inline-block;flex-shrink:0;"></span>' +
-          '<strong style="font-size:0.9rem;">' + escHtml(group.name) + '</strong>' +
-          '<span style="color:#868e96;font-size:0.8rem;margin-left:auto;">' + totalUp + '/' + targets.length + ' up</span>' +
+          '<strong style="font-size:0.9rem;' + TEXT + '">' + escHtml(group.name) + '</strong>' +
+          '<span style="font-size:0.8rem;margin-left:auto;' + MUTED + '">' + totalUp + '/' + targets.length + ' up</span>' +
           '</div>';
 
         if (targets.length > 0) {
-          html += '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
-          html += '<thead><tr style="background:#f8f9fa;">' +
-            '<th style="padding:8px 16px;text-align:left;color:#495057;font-weight:600;border-bottom:1px solid #e9ecef;">Endpoint</th>' +
-            '<th style="padding:8px 16px;text-align:left;color:#495057;font-weight:600;border-bottom:1px solid #e9ecef;">Type</th>' +
-            '<th style="padding:8px 16px;text-align:left;color:#495057;font-weight:600;border-bottom:1px solid #e9ecef;">Last Probed</th>' +
-            '<th style="padding:8px 16px;text-align:left;color:#495057;font-weight:600;border-bottom:1px solid #e9ecef;">Last Error</th>' +
+          html += '<table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:0.85rem;">' + COLGROUP;
+          html += '<thead><tr style="' + TINT + '">' +
+            '<th style="' + CELL + TEXT + 'font-weight:600;">Endpoint</th>' +
+            '<th style="' + CELL + TEXT + 'font-weight:600;">Type</th>' +
+            '<th style="' + CELL + TEXT + 'font-weight:600;">Last Probed</th>' +
+            '<th style="' + CELL + TEXT + 'font-weight:600;">Last Error</th>' +
             '</tr></thead><tbody>';
 
-          targets.forEach(function(t, i) {
-            var rowBg = i % 2 === 0 ? '#fff' : '#fdfdfd';
+          targets.forEach(function(t) {
             var tDot = t.healthy ? '#40c057' : '#fa5252';
             var bColor = badgeColor(t.backendType);
-            html += '<tr style="background:' + rowBg + ';">';
-            html += '<td style="padding:8px 16px;border-bottom:1px solid #f1f3f5;">' +
-              '<span style="width:8px;height:8px;border-radius:50%;background:' + tDot + ';display:inline-block;margin-right:6px;flex-shrink:0;vertical-align:middle;"></span>' +
-              '<a href="' + escHtml(t.url) + '" style="color:#228be6;text-decoration:none;font-family:monospace;font-size:0.82rem;" target="_blank" rel="noopener">' + escHtml(t.url) + '</a>' +
+            html += '<tr>';
+            html += '<td style="' + CELL + '">' +
+              '<span style="width:8px;height:8px;border-radius:50%;background:' + tDot + ';display:inline-block;margin-right:6px;vertical-align:middle;"></span>' +
+              '<a href="' + escHtml(t.url) + '" style="color:var(--mantine-color-anchor);text-decoration:none;font-family:var(--mantine-font-family-monospace);font-size:0.82rem;" target="_blank" rel="noopener">' + escHtml(t.url) + '</a>' +
               '</td>';
-            html += '<td style="padding:8px 16px;border-bottom:1px solid #f1f3f5;">' +
+            html += '<td style="' + CELL + '">' +
               '<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:' + bColor + ';color:#fff;font-size:0.75rem;font-weight:600;">' + escHtml(t.backendType || '-') + '</span>' +
               '</td>';
-            html += '<td style="padding:8px 16px;border-bottom:1px solid #f1f3f5;color:#495057;">' + escHtml(relTime(t.lastProbeAt)) + '</td>';
-            html += '<td style="padding:8px 16px;border-bottom:1px solid #f1f3f5;color:' + (t.lastError ? '#fa5252' : '#868e96') + ';font-size:0.8rem;">' + escHtml(t.lastError || '-') + '</td>';
+            html += '<td style="' + CELL + TEXT + '">' + escHtml(relTime(t.lastProbeAt)) + '</td>';
+            html += '<td style="' + CELL + (t.lastError ? ERR : MUTED) + 'font-size:0.8rem;">' + escHtml(t.lastError || '-') + '</td>';
             html += '</tr>';
           });
 
           html += '</tbody></table>';
         } else {
-          html += '<p style="padding:12px 16px;color:#868e96;margin:0;">No targets in this group.</p>';
+          html += '<p style="padding:12px 16px;margin:0;' + MUTED + '">No targets in this group.</p>';
         }
         html += '</div>';
       });
