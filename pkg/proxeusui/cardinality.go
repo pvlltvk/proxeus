@@ -244,3 +244,97 @@ func nonEmpty(s []CardinalityStat) []CardinalityStat {
 	}
 	return s
 }
+
+const (
+	defaultCardinalityTopN = 10
+	maxCardinalityTopN     = 1000
+	cardinalityTimeout     = 10 * time.Second
+)
+
+// cardinalityBackends lists the configured server_groups with their current
+// targets, in config order. A group whose ServerGroup isn't running yet is
+// listed without targets and so reports an error.
+func (p *Prober) cardinalityBackends() []cardinalityBackend {
+	cfg := p.ps.Config()
+	if cfg == nil {
+		return nil
+	}
+	sgByName := make(map[string]*servergroup.ServerGroup)
+	for _, sg := range p.ps.ServerGroups() {
+		if sg.Cfg != nil {
+			sgByName[sg.Cfg.Name] = sg
+		}
+	}
+
+	backends := make([]cardinalityBackend, 0, len(cfg.ServerGroups))
+	for _, sgCfg := range cfg.ServerGroups {
+		sg := sgByName[sgCfg.Name]
+		b := cardinalityBackend{
+			Name:        sgCfg.Name,
+			BackendType: sgCfg.BackendType,
+			Client:      &http.Client{Timeout: cardinalityTimeout},
+		}
+		if sg != nil {
+			b.Client = sg.HTTPClient(cardinalityTimeout)
+			if st := sg.State(); st != nil {
+				for _, target := range st.Targets {
+					b.BaseURLs = append(b.BaseURLs, backendBaseURL(sgCfg, target))
+				}
+			}
+		}
+		backends = append(backends, b)
+	}
+	return backends
+}
+
+func (h *Handler) cardinalityBackends() []cardinalityBackend {
+	if h.cardinalityBackendsFn != nil {
+		return h.cardinalityBackendsFn()
+	}
+	return h.prober.cardinalityBackends()
+}
+
+func (h *Handler) serveCardinality(w http.ResponseWriter, r *http.Request) {
+	q, err := parseCardinalityQuery(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resp := struct {
+		Groups []CardinalityGroup `json:"groups"`
+	}{collectCardinality(r.Context(), h.cardinalityBackends(), q)}
+
+	b, err := json.Marshal(resp)
+	if err != nil {
+		logrus.WithError(err).Error("proxeusui: error marshaling cardinality JSON")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(b); err != nil {
+		logrus.WithError(err).Debug("proxeusui: error writing cardinality JSON response")
+	}
+}
+
+func parseCardinalityQuery(r *http.Request) (cardinalityQuery, error) {
+	q := cardinalityQuery{
+		TopN:       defaultCardinalityTopN,
+		Match:      r.URL.Query()["match[]"],
+		FocusLabel: r.URL.Query().Get("focusLabel"),
+		Date:       r.URL.Query().Get("date"),
+	}
+	if s := r.URL.Query().Get("topN"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > maxCardinalityTopN {
+			return q, fmt.Errorf("topN must be an integer from 1 to %d", maxCardinalityTopN)
+		}
+		q.TopN = n
+	}
+	if q.Date != "" {
+		if _, err := time.Parse(time.DateOnly, q.Date); err != nil {
+			return q, errors.New("date must be YYYY-MM-DD")
+		}
+	}
+	return q, nil
+}

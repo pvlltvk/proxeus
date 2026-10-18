@@ -244,3 +244,32 @@ func TestProber_Inventory_TimeRangeAndRemoteRead(t *testing.T) {
 		}
 	}
 }
+
+func TestProber_CardinalityBackendsFromConfig(t *testing.T) {
+	cfg := &proxyconfig.Config{
+		ProxeusConfig: proxyconfig.ProxeusConfig{
+			ServerGroups: []*servergroup.Config{
+				{Name: "thanos", BackendType: servergroup.BackendThanos},
+				{Name: "undeclared"},
+			},
+		},
+	}
+	backends := newProber(&stubStorage{cfg: cfg}).cardinalityBackends()
+	if len(backends) != 2 {
+		t.Fatalf("got %d backends, want 2", len(backends))
+	}
+	if backends[0].Name != "thanos" || backends[0].BackendType != servergroup.BackendThanos || backends[1].Name != "undeclared" || backends[1].BackendType != "" {
+		t.Errorf("backends = %+v", backends)
+	}
+	for _, b := range backends {
+		if b.Client == nil || len(b.BaseURLs) != 0 {
+			t.Errorf("backend %s: client %v, base URLs %v; want a client and no targets without a running group", b.Name, b.Client, b.BaseURLs)
+		}
+	}
+}
+
+func TestProber_CardinalityBackendsNilConfig(t *testing.T) {
+	if got := newProber(&stubStorage{}).cardinalityBackends(); len(got) != 0 {
+		t.Errorf("got %+v, want none", got)
+	}
+}

@@ -187,3 +187,83 @@ func TestHandlerBackendsJSON_EmptyGroups(t *testing.T) {
 		t.Errorf("expected 0 groups, got %d", len(envelope.Groups))
 	}
 }
+
+func newCardinalityHandlerForTest(backends ...cardinalityBackend) *Handler {
+	h := newHandlerForTest(Inventory{GeneratedAt: time.Now()})
+	h.cardinalityBackendsFn = func() []cardinalityBackend { return backends }
+	return h
+}
+
+func TestHandlerCardinalityJSON(t *testing.T) {
+	thanos := newTSDBBackend(t, http.StatusOK, "tsdb_thanos.json")
+	vm := newTSDBBackend(t, http.StatusOK, "tsdb_victoriametrics.json")
+	h := newCardinalityHandlerForTest(
+		cardinalityBackend{Name: "thanos", BackendType: servergroup.BackendThanos, Client: cardinalityClient(), BaseURLs: []string{thanos.base()}},
+		cardinalityBackend{Name: "victoria", BackendType: servergroup.BackendVictoriaMetrics, Client: cardinalityClient(), BaseURLs: []string{vm.base()}},
+	)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/proxeus/api/cardinality.json?topN=3&match[]=up&match[]=%7Bjob%3D%22a%22%7D&focusLabel=job&date=2026-10-17", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var resp struct {
+		Groups []CardinalityGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Groups) != 2 || resp.Groups[0].TotalSeries != 32433 || resp.Groups[1].TotalSeries != 72498 {
+		t.Fatalf("groups = %+v", resp.Groups)
+	}
+	got := vm.requests()
+	if len(got) != 1 || got[0].Get("topN") != "3" || strings.Join(got[0]["match[]"], ",") != `up,{job="a"}` || got[0].Get("focusLabel") != "job" || got[0].Get("date") != "2026-10-17" {
+		t.Errorf("victoria query = %v", got)
+	}
+}
+
+func TestHandlerCardinalityJSON_DefaultTopN(t *testing.T) {
+	thanos := newTSDBBackend(t, http.StatusOK, "tsdb_thanos.json")
+	h := newCardinalityHandlerForTest(
+		cardinalityBackend{Name: "thanos", BackendType: servergroup.BackendThanos, Client: cardinalityClient(), BaseURLs: []string{thanos.base()}},
+	)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/proxeus/api/cardinality.json", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := thanos.requests(); len(got) != 1 || got[0].Get("limit") != "10" {
+		t.Errorf("thanos query = %v, want limit=10", got)
+	}
+}
+
+func TestHandlerCardinalityJSON_InvalidInput(t *testing.T) {
+	for _, q := range []string{"topN=0", "topN=-1", "topN=abc", "topN=1001", "topN=5000", "date=2026-13-01", "date=yesterday", "date=2026-10-17T00:00:00Z"} {
+		t.Run(q, func(t *testing.T) {
+			h := newCardinalityHandlerForTest()
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/proxeus/api/cardinality.json?"+q, nil))
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", w.Code)
+			}
+		})
+	}
+}
+
+func TestHandlerCardinalityJSON_RoutePrefix(t *testing.T) {
+	thanos := newTSDBBackend(t, http.StatusOK, "tsdb_thanos.json")
+	h := newCardinalityHandlerForTest(
+		cardinalityBackend{Name: "thanos", BackendType: servergroup.BackendThanos, Client: cardinalityClient(), BaseURLs: []string{thanos.base()}},
+	)
+	h.routePrefix = "/foo"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/foo/proxeus/api/cardinality.json", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"groups"`) {
+		t.Fatalf("status = %d body %s, want 200 with groups", w.Code, w.Body.String())
+	}
+}
