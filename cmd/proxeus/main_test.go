@@ -66,12 +66,15 @@ func TestIsReactRoute(t *testing.T) {
 		// Root prefix (normalized to "/"): paths arrive unprefixed.
 		{name: "root query", routePrefix: "/", urlPath: "/query", want: true},
 		{name: "root backends", routePrefix: "/", urlPath: "/backends", want: true},
+		{name: "root cardinality", routePrefix: "/", urlPath: "/cardinality", want: true},
+		{name: "root tsdb-status redirects instead", routePrefix: "/", urlPath: "/tsdb-status", want: false},
 		{name: "root unknown", routePrefix: "/", urlPath: "/proxeus/backends", want: false},
 		{name: "empty prefix query", routePrefix: "", urlPath: "/query", want: true},
 
 		// Sub-path prefix: paths arrive prefixed with "/foo".
 		{name: "foo query", routePrefix: "/foo", urlPath: "/foo/query", want: true},
 		{name: "foo backends", routePrefix: "/foo", urlPath: "/foo/backends", want: true},
+		{name: "foo cardinality", routePrefix: "/foo", urlPath: "/foo/cardinality", want: true},
 		// Unprefixed path under a sub-path prefix must NOT match.
 		{name: "foo unprefixed query", routePrefix: "/foo", urlPath: "/query", want: false},
 		// Non-react path under prefix.
@@ -274,4 +277,25 @@ func TestTSDBStatusNotServed(t *testing.T) {
 			t.Errorf("status = %d, upstream calls = %d; want 401, 0", rec.Code, upstreamCalls)
 		}
 	})
+}
+
+func TestUIRedirect(t *testing.T) {
+	cases := []struct {
+		routePrefix, urlPath, want string
+	}{
+		{routePrefix: "/", urlPath: "/tsdb-status", want: "/cardinality"},
+		{routePrefix: "", urlPath: "/tsdb-status", want: "/cardinality"},
+		{routePrefix: "/foo", urlPath: "/foo/tsdb-status", want: "/foo/cardinality"},
+		{routePrefix: "/foo", urlPath: "/tsdb-status"},
+		{routePrefix: "/", urlPath: "/cardinality"},
+		{routePrefix: "/", urlPath: "/query"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.routePrefix+" "+tc.urlPath, func(t *testing.T) {
+			got, ok := uiRedirect(tc.routePrefix, tc.urlPath)
+			if got != tc.want || ok != (tc.want != "") {
+				t.Errorf("uiRedirect(%q, %q) = %q, %v; want %q", tc.routePrefix, tc.urlPath, got, ok, tc.want)
+			}
+		})
+	}
 }

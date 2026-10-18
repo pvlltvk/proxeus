@@ -2,6 +2,9 @@
   var PREFIX = (window.__PROXEUS_ROUTE_PREFIX__ || '');
   var ICON_URL = PREFIX + '/proxeus/static/proxeus-icon.svg';
   var BACKENDS_PATH = PREFIX + '/backends';
+  var CARDINALITY_PATH = PREFIX + '/cardinality';
+  // Set by head.js on a proxeus page (/backends, /cardinality).
+  var PAGE_PATH = window.__proxeusPage || null;
   var API_URL = PREFIX + '/proxeus/api/backends.json';
 
   // Text labels for nav items to hide from the dropdown.
@@ -24,16 +27,16 @@
     'Alertmanager discovery': true
   };
 
-  // --- Href fixer for the backends page ---
-  // React Router generates relative hrefs resolved against /backends and
+  // --- Href fixer for the proxeus pages ---
+  // React Router generates relative hrefs resolved against the page path and
   // also intercepts clicks with its own onClick handler that calls navigate()
   // relatively, producing /backends/query instead of /query.
   // We fix both problems: rewrite href AND override the click to do a full
   // browser navigation (bypassing React Router entirely).
-  function fixBackendsHref(a) {
+  function fixPageHref(a) {
     // a.href is the fully-resolved absolute URL; use pathname to compare.
     var pathname = a.pathname; // e.g. /backends/query (or <prefix>/backends/query)
-    var prefix = BACKENDS_PATH + '/';
+    var prefix = PAGE_PATH + '/';
     if (pathname && pathname.indexOf(prefix) === 0) {
       var corrected = PREFIX + '/' + pathname.slice(prefix.length);
       a.href = corrected;
@@ -79,12 +82,12 @@
       }
     });
 
-    // On the backends page, React Router generates relative hrefs that resolve
-    // against /backends, e.g. "query" -> /backends/query.
+    // On a proxeus page, React Router generates relative hrefs that resolve
+    // against it, e.g. "query" -> /backends/query.
     // Rewrite those to absolute paths so navigation works correctly.
-    if (window.__proxeusBackends) {
+    if (PAGE_PATH) {
       document.querySelectorAll('header a, nav a').forEach(function(a) {
-        fixBackendsHref(a);
+        fixPageHref(a);
       });
     }
 
@@ -133,7 +136,8 @@
         }
       }
 
-      // Inject "Backends" as the first item under "Server status".
+      // Inject "Backends" and "Cardinality" as the first items under
+      // "Server status".
       if (!menu.querySelector('[data-proxeus-backends]') && serverStatusLabel) {
         // Prefer cloning a hidden item (distinct icon); fall back to first visible item.
         var templateItem = iconDonorItem;
@@ -144,36 +148,17 @@
         }
 
         if (templateItem) {
-          // Deep-clone so we get the icon SVG and all child spans.
-          var backendsLink = templateItem.cloneNode(true);
-          backendsLink.style.display = '';
-          backendsLink.href = BACKENDS_PATH;
-          backendsLink.setAttribute('data-proxeus-backends', '');
-          // Update only the visible text node(s), leaving the icon intact.
-          // Mantine items typically have: <svg>…</svg><span>Label text</span>
-          var textSpan = backendsLink.querySelector('span:last-of-type') ||
-                         backendsLink.querySelector('span');
-          if (textSpan) {
-            textSpan.textContent = 'Backends';
-          } else {
-            // Fallback: replace full text content preserving icon nodes.
-            var tw = document.createTreeWalker(backendsLink, NodeFilter.SHOW_TEXT, null, false);
-            var tn;
-            while ((tn = tw.nextNode())) {
-              if (tn.nodeValue && tn.nodeValue.trim().length > 0) {
-                tn.nodeValue = 'Backends';
-                break;
-              }
-            }
-          }
+          var backendsLink = menuItem(templateItem, BACKENDS_PATH, 'Backends', 'data-proxeus-backends');
           serverStatusLabel.insertAdjacentElement('afterend', backendsLink);
+          backendsLink.insertAdjacentElement('afterend',
+            menuItem(templateItem, CARDINALITY_PATH, 'Cardinality', 'data-proxeus-cardinality'));
         }
       }
 
-      // On the backends page, fix any relative hrefs in the dropdown.
-      if (window.__proxeusBackends) {
+      // On a proxeus page, fix any relative hrefs in the dropdown.
+      if (PAGE_PATH) {
         menu.querySelectorAll('a').forEach(function(a) {
-          fixBackendsHref(a);
+          fixPageHref(a);
         });
       }
 
@@ -181,8 +166,35 @@
     });
   }
 
+  // menuItem deep-clones a Mantine menu item (icon SVG and child spans) into a
+  // plain link; the clone has none of React Router's handlers.
+  function menuItem(templateItem, href, label, attr) {
+    var link = templateItem.cloneNode(true);
+    link.style.display = '';
+    link.href = href;
+    link.setAttribute(attr, '');
+    // Update only the visible text node(s), leaving the icon intact.
+    // Mantine items typically have: <svg>…</svg><span>Label text</span>
+    var textSpan = link.querySelector('span:last-of-type') ||
+                   link.querySelector('span');
+    if (textSpan) {
+      textSpan.textContent = label;
+    } else {
+      // Fallback: replace full text content preserving icon nodes.
+      var tw = document.createTreeWalker(link, NodeFilter.SHOW_TEXT, null, false);
+      var tn;
+      while ((tn = tw.nextNode())) {
+        if (tn.nodeValue && tn.nodeValue.trim().length > 0) {
+          tn.nodeValue = label;
+          break;
+        }
+      }
+    }
+    return link;
+  }
+
   // --- Backends page renderer ---
-  var isBackendsPage = !!window.__proxeusBackends;
+  var isBackendsPage = PAGE_PATH === BACKENDS_PATH;
   var backendsRendered = false;
   var backendsInterval = null;
 

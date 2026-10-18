@@ -192,9 +192,30 @@ var reactRouteSet = map[string]bool{
 	"/alerts":                 true,
 	"/query":                  true,
 	"/rules":                  true,
-	"/tsdb-status":            true,
 	"/agent":                  true,
 	"/backends":               true,
+	"/cardinality":            true,
+}
+
+// uiRedirects sends Mantine pages proxeus replaces to its own page. The
+// TSDB status page would show proxeus's empty head.
+var uiRedirects = map[string]string{
+	"/tsdb-status": "/cardinality",
+}
+
+// uiRedirect returns where urlPath (full, possibly route-prefixed) redirects
+// to, with the route prefix kept, and whether it redirects at all.
+func uiRedirect(routePrefix, urlPath string) (string, bool) {
+	trimmed := strings.TrimRight(routePrefix, "/")
+	rel := strings.TrimPrefix(urlPath, trimmed)
+	if trimmed != "" && rel == urlPath {
+		return "", false
+	}
+	to, ok := uiRedirects[rel]
+	if !ok {
+		return "", false
+	}
+	return trimmed + to, true
 }
 
 // isReactRoute reports whether urlPath (the full, possibly route-prefixed
@@ -678,6 +699,8 @@ func main() {
 			} else {
 				promHandler.ServeHTTP(w, r)
 			}
+		} else if to, ok := uiRedirect(webOptions.RoutePrefix, r.URL.Path); ok {
+			http.Redirect(w, r, to, http.StatusFound)
 		} else if isReactRoute(webOptions.RoutePrefix, r.URL.Path) {
 			// Serve Mantine index.html with our nav injection.
 			// This must come before the /proxeus prefix check so that
