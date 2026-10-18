@@ -237,6 +237,24 @@ func registerNoRemoteRead(r *httprouter.Router, p string) {
 	}
 }
 
+// tsdbStatusNotServed answers /api/v1/status/tsdb with 501. The embedded API
+// would report proxeus's own empty head (all zeros); each backend's stats are
+// at the proxeus cardinality endpoint instead.
+func tsdbStatusNotServed(cardinalityPath string) http.HandlerFunc {
+	body, _ := json.Marshal(map[string]string{
+		"status":    "error",
+		"errorType": "unavailable",
+		"error":     "proxeus has no TSDB of its own; per-backend cardinality is at " + cardinalityPath,
+	})
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		if _, err := w.Write(body); err != nil {
+			logrus.WithError(err).Debug("error writing response")
+		}
+	}
+}
+
 // upstreamOptions sends every OPTIONS request that no route claimed to
 // upstream, so a CORS preflight, which the auth middleware lets through
 // unauthenticated, never reaches the proxeus UI or debug handlers.
@@ -585,6 +603,7 @@ func main() {
 	metadataPath := path.Join(webOptions.RoutePrefix, "/api/v1/metadata")
 	walReplayPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/walreplay")
 	flagsPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/flags")
+	tsdbStatusPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/tsdb")
 	remoteReadPath := path.Join(webOptions.RoutePrefix, "/api/v1/read")
 	proxeusPathPrefix := path.Join(webOptions.RoutePrefix, "/proxeus")
 	debugStripPrefix := strings.Trim(webOptions.RoutePrefix, "/")
@@ -638,10 +657,11 @@ func main() {
 	}
 
 	registerOverrides(r, promHandler, map[string]http.HandlerFunc{
-		configPath:    ps.ConfigHandler,
-		metadataPath:  ps.MetadataHandler,
-		walReplayPath: ps.WalReplayHandler,
-		flagsPath:     ps.FlagsHandler,
+		configPath:     ps.ConfigHandler,
+		metadataPath:   ps.MetadataHandler,
+		walReplayPath:  ps.WalReplayHandler,
+		flagsPath:      ps.FlagsHandler,
+		tsdbStatusPath: tsdbStatusNotServed(path.Join(webOptions.RoutePrefix, "/proxeus/api/cardinality.json")),
 	})
 
 	registerNoRemoteRead(r, remoteReadPath)

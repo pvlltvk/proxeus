@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/julienschmidt/httprouter"
@@ -216,4 +218,60 @@ func TestNoRemoteRead(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTSDBStatusNotServed(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := auth.New(context.Background(), &auth.Config{
+		Basic: &auth.BasicConfig{Users: map[string]config_util.Secret{"alice": config_util.Secret(hash)}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var upstreamCalls int
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { upstreamCalls++ })
+	router := httprouter.New()
+	registerOverrides(router, upstream, map[string]http.HandlerFunc{
+		"/prefix/api/v1/status/tsdb": tsdbStatusNotServed("/prefix/proxeus/api/cardinality.json"),
+	})
+	router.NotFound = upstreamOptions(upstream, upstream)
+	handler := authenticator.Middleware(router)
+
+	t.Run("GET", func(t *testing.T) {
+		upstreamCalls = 0
+		req := httptest.NewRequest(http.MethodGet, "/prefix/api/v1/status/tsdb", nil)
+		req.SetBasicAuth("alice", "s3cret")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want 501", rec.Code)
+		}
+		var body struct {
+			Status    string `json:"status"`
+			ErrorType string `json:"errorType"`
+			Error     string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("body %q is not JSON: %v", rec.Body.String(), err)
+		}
+		if body.Status != "error" || body.ErrorType == "" || !strings.Contains(body.Error, "/prefix/proxeus/api/cardinality.json") {
+			t.Errorf("body = %+v, want a Prometheus error naming /prefix/proxeus/api/cardinality.json", body)
+		}
+		if upstreamCalls != 0 {
+			t.Errorf("upstream called %d times, want 0", upstreamCalls)
+		}
+	})
+
+	t.Run("GET without credentials", func(t *testing.T) {
+		upstreamCalls = 0
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/prefix/api/v1/status/tsdb", nil))
+		if rec.Code != http.StatusUnauthorized || upstreamCalls != 0 {
+			t.Errorf("status = %d, upstream calls = %d; want 401, 0", rec.Code, upstreamCalls)
+		}
+	})
 }
