@@ -1,0 +1,68 @@
+{
+  "status": "success",
+  "data": {
+    "headStats": {
+      "numSeries": 32433,
+      "numLabelPairs": 2305,
+      "chunkCount": 0,
+      "minTime": 1792317602044,
+      "maxTime": 1792331810490
+    },
+    "seriesCountByMetricName": [
+      {
+        "name": "avalanche_gauge_metric_mmmmm_0_1",
+        "value": 375
+      },
+      {
+        "name": "avalanche_gauge_metric_mmmmm_0_4",
+        "value": 375
+      },
+      {
+        "name": "avalanche_gauge_metric_mmmmm_0_7",
+        "value": 375
+      }
+    ],
+    "labelValueCountByLabelName": [
+      {
+        "name": "__name__",
+        "value": 1075
+      },
+      {
+        "name": "series_id",
+        "value": 250
+      },
+      {
+        "name": "le",
+        "value": 169
+      }
+    ],
+    "memoryInBytesByLabelName": [
+      {
+        "name": "__name__",
+        "value": 2383955
+      },
+      {
+        "name": "instance",
+        "value": 1961498
+      },
+      {
+        "name": "label_key_kkkkk_4",
+        "value": 1732500
+      }
+    ],
+    "seriesCountByLabelValuePair": [
+      {
+        "name": "cluster=thanos-sandbox",
+        "value": 32433
+      },
+      {
+        "name": "component=avalanche",
+        "value": 26260
+      },
+      {
+        "name": "label_key_kkkkk_4=label_val_vvvvv_4",
+        "value": 26250
+      }
+    ]
+  }
+}

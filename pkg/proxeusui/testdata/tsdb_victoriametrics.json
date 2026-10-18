@@ -1,0 +1,84 @@
+{
+  "status": "success",
+  "isPartial": false,
+  "data": {
+    "totalSeries": 72498,
+    "totalLabelValuePairs": 1103834,
+    "seriesCountByMetricName": [
+      {
+        "name": "flag",
+        "value": 2901,
+        "requestsCount": 2880,
+        "lastRequestTimestamp": 1790537982
+      },
+      {
+        "name": "vm_http_request_duration_seconds_bucket",
+        "value": 1183,
+        "requestsCount": 0,
+        "lastRequestTimestamp": 0
+      },
+      {
+        "name": "avalanche_gauge_metric_mmmmm_0_3",
+        "value": 270,
+        "requestsCount": 111706,
+        "lastRequestTimestamp": 1790787246
+      }
+    ],
+    "seriesCountByLabelName": [
+      {
+        "name": "cluster",
+        "value": 75109
+      },
+      {
+        "name": "component",
+        "value": 74327
+      },
+      {
+        "name": "job",
+        "value": 74323
+      }
+    ],
+    "seriesCountByFocusLabelValue": [
+      {
+        "name": "avalanche-vm",
+        "value": 51696
+      },
+      {
+        "name": "victoria-metrics",
+        "value": 17202
+      },
+      {
+        "name": "avalanche-shared",
+        "value": 2514
+      }
+    ],
+    "seriesCountByLabelValuePair": [
+      {
+        "name": "cluster=victoria-metrics-sandbox",
+        "value": 75109
+      },
+      {
+        "name": "label_key_kkkkk_9=label_val_vvvvv_9",
+        "value": 54533
+      },
+      {
+        "name": "label_key_kkkkk_8=label_val_vvvvv_8",
+        "value": 54422
+      }
+    ],
+    "labelValueCountByLabelName": [
+      {
+        "name": "__name__",
+        "value": 798
+      },
+      {
+        "name": "name",
+        "value": 351
+      },
+      {
+        "name": "series_id",
+        "value": 250
+      }
+    ]
+  }
+}
