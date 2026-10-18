@@ -157,7 +157,7 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, notif
 	return nil
 }
 
-// loadReactScripts reads the embedded head.js/stats.js/nav.js files used to inject
+// loadReactScripts reads the embedded head.js/stats.js/nav.js/cardinality.js files used to inject
 // proxeus-specific behavior into the Mantine UI and wraps each in a <script>
 // tag. The embedded files are part of the binary, so a read failure here
 // indicates a build problem and is treated as a hard startup error by the
@@ -177,7 +177,12 @@ func loadReactScripts() (headScript, navScript string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("embedded stats.js missing: %w", err)
 	}
-	return "<script>" + string(head) + "</script><script>" + string(stats) + "</script>", "<script>" + string(nav) + "</script>", nil
+	cardinality, err := injectionUI.Scripts.ReadFile("cardinality.js")
+	if err != nil {
+		return "", "", fmt.Errorf("embedded cardinality.js missing: %w", err)
+	}
+	return "<script>" + string(head) + "</script><script>" + string(stats) + "</script>",
+		"<script>" + string(nav) + "</script><script>" + string(cardinality) + "</script>", nil
 }
 
 // reactRouteSet is the set of exact path segments that the Mantine UI handles.
@@ -192,9 +197,30 @@ var reactRouteSet = map[string]bool{
 	"/alerts":                 true,
 	"/query":                  true,
 	"/rules":                  true,
-	"/tsdb-status":            true,
 	"/agent":                  true,
 	"/backends":               true,
+	"/cardinality":            true,
+}
+
+// uiRedirects sends Mantine pages proxeus replaces to its own page. The
+// TSDB status page would show proxeus's empty head.
+var uiRedirects = map[string]string{
+	"/tsdb-status": "/cardinality",
+}
+
+// uiRedirect returns where urlPath (full, possibly route-prefixed) redirects
+// to, with the route prefix kept, and whether it redirects at all.
+func uiRedirect(routePrefix, urlPath string) (string, bool) {
+	trimmed := strings.TrimRight(routePrefix, "/")
+	rel := strings.TrimPrefix(urlPath, trimmed)
+	if trimmed != "" && rel == urlPath {
+		return "", false
+	}
+	to, ok := uiRedirects[rel]
+	if !ok {
+		return "", false
+	}
+	return trimmed + to, true
 }
 
 // isReactRoute reports whether urlPath (the full, possibly route-prefixed
@@ -234,6 +260,24 @@ func registerNoRemoteRead(r *httprouter.Router, p string) {
 		http.MethodPatch, http.MethodDelete, http.MethodOptions,
 	} {
 		r.HandlerFunc(m, p, h)
+	}
+}
+
+// tsdbStatusNotServed answers /api/v1/status/tsdb with 501. The embedded API
+// would report proxeus's own empty head (all zeros); each backend's stats are
+// at the proxeus cardinality endpoint instead.
+func tsdbStatusNotServed(cardinalityPath string) http.HandlerFunc {
+	body, _ := json.Marshal(map[string]string{
+		"status":    "error",
+		"errorType": "unavailable",
+		"error":     "proxeus has no TSDB of its own; per-backend cardinality is at " + cardinalityPath,
+	})
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		if _, err := w.Write(body); err != nil {
+			logrus.WithError(err).Debug("error writing response")
+		}
 	}
 }
 
@@ -585,6 +629,7 @@ func main() {
 	metadataPath := path.Join(webOptions.RoutePrefix, "/api/v1/metadata")
 	walReplayPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/walreplay")
 	flagsPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/flags")
+	tsdbStatusPath := path.Join(webOptions.RoutePrefix, "/api/v1/status/tsdb")
 	remoteReadPath := path.Join(webOptions.RoutePrefix, "/api/v1/read")
 	proxeusPathPrefix := path.Join(webOptions.RoutePrefix, "/proxeus")
 	debugStripPrefix := strings.Trim(webOptions.RoutePrefix, "/")
@@ -638,10 +683,11 @@ func main() {
 	}
 
 	registerOverrides(r, promHandler, map[string]http.HandlerFunc{
-		configPath:    ps.ConfigHandler,
-		metadataPath:  ps.MetadataHandler,
-		walReplayPath: ps.WalReplayHandler,
-		flagsPath:     ps.FlagsHandler,
+		configPath:     ps.ConfigHandler,
+		metadataPath:   ps.MetadataHandler,
+		walReplayPath:  ps.WalReplayHandler,
+		flagsPath:      ps.FlagsHandler,
+		tsdbStatusPath: tsdbStatusNotServed(path.Join(webOptions.RoutePrefix, "/proxeus/api/cardinality.json")),
 	})
 
 	registerNoRemoteRead(r, remoteReadPath)
@@ -658,6 +704,8 @@ func main() {
 			} else {
 				promHandler.ServeHTTP(w, r)
 			}
+		} else if to, ok := uiRedirect(webOptions.RoutePrefix, r.URL.Path); ok {
+			http.Redirect(w, r, to, http.StatusFound)
 		} else if isReactRoute(webOptions.RoutePrefix, r.URL.Path) {
 			// Serve Mantine index.html with our nav injection.
 			// This must come before the /proxeus prefix check so that

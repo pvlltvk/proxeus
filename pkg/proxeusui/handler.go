@@ -5,6 +5,7 @@
 //	GET /proxeus/                  — 302 redirect to /proxeus/backends
 //	GET /proxeus/backends          — HTML inventory page (rendered from templates/inventory.html)
 //	GET /proxeus/api/backends.json — JSON snapshot of all server_groups and targets
+//	GET /proxeus/api/cardinality.json — each server_group's /api/v1/status/tsdb, normalized
 //	GET /proxeus/static/*          — static assets owned by the frontend-developer agent
 package proxeusui
 
@@ -35,6 +36,9 @@ type Handler struct {
 
 	// inventoryFn, when non-nil, overrides prober.Inventory(). Used in tests.
 	inventoryFn func() Inventory
+	// cardinalityBackendsFn, when non-nil, overrides
+	// prober.cardinalityBackends(). Used in tests.
+	cardinalityBackendsFn func() []cardinalityBackend
 
 	muxOnce sync.Once
 	mux     *http.ServeMux
@@ -85,6 +89,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) initMux() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /proxeus/api/backends.json", h.serveJSON)
+	mux.HandleFunc("GET /proxeus/api/cardinality.json", h.serveCardinality)
 	mux.HandleFunc("GET /proxeus/static/", h.serveStatic)
 	mux.HandleFunc("GET /proxeus/backends", h.serveIndex)
 	mux.HandleFunc("GET /proxeus/backends/", h.serveIndex)

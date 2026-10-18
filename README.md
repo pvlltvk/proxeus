@@ -420,6 +420,22 @@ towards the group totals. The query page shows the same data under each panel, i
 curl -s 'http://localhost:8082/api/v1/query' --data-urlencode 'query=sum(up)' -d stats=true | jq .data.stats.backends
 ```
 
+**Cardinality.** `/proxeus/api/cardinality.json` asks every `server_group` for its `/api/v1/status/tsdb` (the first
+target that answers) and returns one entry per group: total series and label=value pairs, top series by metric
+name, top label names by value count, top label=value pairs, plus what only one backend type reports (memory by label
+name for Prometheus/Thanos; series by label name and by focus-label value for VictoriaMetrics). The numbers mean
+different things per backend and the entry says which: Prometheus and Thanos report their head block (`coverage.kind:
+head` with its time range), VictoriaMetrics one day's index (`day`, today in UTC unless `date` is set). Groups are
+never summed, since series kept by more than one group would count twice. `topN` (default 10, at most 1000) applies
+everywhere; `match[]`, `focusLabel` and `date` are sent to `backend_type: victoriametrics` groups only (Thanos answers
+all zeros to any `match[]`) and listed under `notApplied` for the others. A group that fails carries an `error`; the
+rest still answer. The UI shows the same data on the Cardinality page (Status menu). `/api/v1/status/tsdb` itself
+answers 501: proxeus has no TSDB of its own.
+
+```sh
+curl -s 'http://localhost:8082/proxeus/api/cardinality.json?topN=5&focusLabel=job' | jq '.groups[] | {name, totalSeries, notApplied}'
+```
+
 ## MCP endpoint
 
 Proxeus can serve a [Model Context Protocol](https://modelcontextprotocol.io) endpoint, so an agent can query the

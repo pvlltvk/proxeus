@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/julienschmidt/httprouter"
@@ -64,12 +66,15 @@ func TestIsReactRoute(t *testing.T) {
 		// Root prefix (normalized to "/"): paths arrive unprefixed.
 		{name: "root query", routePrefix: "/", urlPath: "/query", want: true},
 		{name: "root backends", routePrefix: "/", urlPath: "/backends", want: true},
+		{name: "root cardinality", routePrefix: "/", urlPath: "/cardinality", want: true},
+		{name: "root tsdb-status redirects instead", routePrefix: "/", urlPath: "/tsdb-status", want: false},
 		{name: "root unknown", routePrefix: "/", urlPath: "/proxeus/backends", want: false},
 		{name: "empty prefix query", routePrefix: "", urlPath: "/query", want: true},
 
 		// Sub-path prefix: paths arrive prefixed with "/foo".
 		{name: "foo query", routePrefix: "/foo", urlPath: "/foo/query", want: true},
 		{name: "foo backends", routePrefix: "/foo", urlPath: "/foo/backends", want: true},
+		{name: "foo cardinality", routePrefix: "/foo", urlPath: "/foo/cardinality", want: true},
 		// Unprefixed path under a sub-path prefix must NOT match.
 		{name: "foo unprefixed query", routePrefix: "/foo", urlPath: "/query", want: false},
 		// Non-react path under prefix.
@@ -213,6 +218,83 @@ func TestNoRemoteRead(t *testing.T) {
 			}
 			if upstreamCalls != 0 {
 				t.Errorf("upstream called %d times, want 0", upstreamCalls)
+			}
+		})
+	}
+}
+
+func TestTSDBStatusNotServed(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := auth.New(context.Background(), &auth.Config{
+		Basic: &auth.BasicConfig{Users: map[string]config_util.Secret{"alice": config_util.Secret(hash)}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var upstreamCalls int
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { upstreamCalls++ })
+	router := httprouter.New()
+	registerOverrides(router, upstream, map[string]http.HandlerFunc{
+		"/prefix/api/v1/status/tsdb": tsdbStatusNotServed("/prefix/proxeus/api/cardinality.json"),
+	})
+	router.NotFound = upstreamOptions(upstream, upstream)
+	handler := authenticator.Middleware(router)
+
+	t.Run("GET", func(t *testing.T) {
+		upstreamCalls = 0
+		req := httptest.NewRequest(http.MethodGet, "/prefix/api/v1/status/tsdb", nil)
+		req.SetBasicAuth("alice", "s3cret")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want 501", rec.Code)
+		}
+		var body struct {
+			Status    string `json:"status"`
+			ErrorType string `json:"errorType"`
+			Error     string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("body %q is not JSON: %v", rec.Body.String(), err)
+		}
+		if body.Status != "error" || body.ErrorType == "" || !strings.Contains(body.Error, "/prefix/proxeus/api/cardinality.json") {
+			t.Errorf("body = %+v, want a Prometheus error naming /prefix/proxeus/api/cardinality.json", body)
+		}
+		if upstreamCalls != 0 {
+			t.Errorf("upstream called %d times, want 0", upstreamCalls)
+		}
+	})
+
+	t.Run("GET without credentials", func(t *testing.T) {
+		upstreamCalls = 0
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/prefix/api/v1/status/tsdb", nil))
+		if rec.Code != http.StatusUnauthorized || upstreamCalls != 0 {
+			t.Errorf("status = %d, upstream calls = %d; want 401, 0", rec.Code, upstreamCalls)
+		}
+	})
+}
+
+func TestUIRedirect(t *testing.T) {
+	cases := []struct {
+		routePrefix, urlPath, want string
+	}{
+		{routePrefix: "/", urlPath: "/tsdb-status", want: "/cardinality"},
+		{routePrefix: "", urlPath: "/tsdb-status", want: "/cardinality"},
+		{routePrefix: "/foo", urlPath: "/foo/tsdb-status", want: "/foo/cardinality"},
+		{routePrefix: "/foo", urlPath: "/tsdb-status"},
+		{routePrefix: "/", urlPath: "/cardinality"},
+		{routePrefix: "/", urlPath: "/query"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.routePrefix+" "+tc.urlPath, func(t *testing.T) {
+			got, ok := uiRedirect(tc.routePrefix, tc.urlPath)
+			if got != tc.want || ok != (tc.want != "") {
+				t.Errorf("uiRedirect(%q, %q) = %q, %v; want %q", tc.routePrefix, tc.urlPath, got, ok, tc.want)
 			}
 		})
 	}

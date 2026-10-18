@@ -300,3 +300,20 @@ func TestInjectedReactAppLoadsStatsScriptFirst(t *testing.T) {
 		t.Fatalf("stats script (at %d) comes after the Mantine bundle (at %d)", stats, bundle)
 	}
 }
+
+func TestInjectedReactAppLoadsCardinalityScript(t *testing.T) {
+	head, nav, err := loadReactScripts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := buildInjectedReactApp(&web.Options{RoutePrefix: "/", PageTitle: "Proxeus"}, head, nav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	card := strings.Index(html, "proxeus-cardinality-root")
+	body := strings.Index(html, "</body>")
+	if card == -1 || card > body {
+		t.Fatalf("cardinality script at %d, </body> at %d: want it injected before </body>", card, body)
+	}
+}
